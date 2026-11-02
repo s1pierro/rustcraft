@@ -3,7 +3,7 @@
 //! leur sommet reste soudé. Un **point** réunit les coins d'un même sommet aux mêmes
 //! coordonnées ; un **îlot** réunit les faces reliées par de tels points.
 
-use crate::maillage::Maillage;
+use crate::maillage::{Maillage, P3};
 use std::collections::{HashMap, HashSet};
 
 /// Coin : rang de la face, rang du sommet dans la face.
@@ -191,6 +191,366 @@ pub fn transformer(q: Uv, g: Geste, a: Aspect) -> Uv {
 /// `v` arrondi au multiple de `pas` le plus proche.
 pub fn au_pas(v: f32, pas: f32) -> f32 {
     if pas > 0.0 { (v / pas).round() * pas } else { v }
+}
+
+/// Forme sur laquelle les faces sont projetées.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Projection {
+    /// À plat, depuis la vue : axes droite et haut de l'écran.
+    Vue { droite: P3, haut: P3 },
+    /// Six côtés : chaque face va au côté que sa normale regarde.
+    Cube,
+    /// `axe` : 0 à 2. Les faces qui regardent le long de l'axe font deux disques.
+    Cylindre { axe: usize },
+    /// `axe` : 0 à 2, celui des pôles.
+    Sphere { axe: usize },
+}
+
+/// Part de la tuile laissée autour des îlots et entre eux.
+const MARGE: f32 = 1.0 / 64.0;
+
+/// Coins d'un îlot et leur position dans son plan, à la vraie échelle du modèle.
+type Ilot = Vec<(Coin, [f64; 2])>;
+
+fn scal(a: P3, b: P3) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn base(axe: usize) -> (P3, P3, P3) {
+    let e = |k: usize| {
+        let mut u = [0.0; 3];
+        u[k] = 1.0;
+        u
+    };
+    // Repère direct (a, b, axe) : vue de l'extérieur, l'angle croît vers la droite
+    (e((axe + 1) % 3), e((axe + 2) % 3), e(axe))
+}
+
+/// Coordonnées autour de l'axe. Une face à cheval sur la couture de l'angle reste d'un
+/// seul tenant : ses coins suivent le premier, et ceux posés sur l'axe prennent la
+/// moyenne des autres.
+fn angles(pts: &[(f64, f64)]) -> Vec<f64> {
+    let hors: Vec<Option<f64>> = pts.iter().map(|&(a, b)| (a.hypot(b) > 1e-9).then(|| b.atan2(a))).collect();
+    let Some(t0) = hors.iter().flatten().next().copied() else { return vec![0.0; pts.len()] };
+    let suivi: Vec<Option<f64>> = hors.iter().map(|t| t.map(|t| t0 + (t - t0 + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI)).collect();
+    let n = suivi.iter().flatten().count().max(1) as f64;
+    let moyenne = suivi.iter().flatten().sum::<f64>() / n;
+    suivi.iter().map(|t| t.unwrap_or(moyenne)).collect()
+}
+
+fn centre_de(m: &Maillage, faces: &[usize]) -> P3 {
+    let (mut a, mut b) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for &f in faces {
+        for i in &m.faces[f].s {
+            for k in 0..3 {
+                a[k] = a[k].min(m.sommets[*i][k]);
+                b[k] = b[k].max(m.sommets[*i][k]);
+            }
+        }
+    }
+    [0, 1, 2].map(|k| (a[k] + b[k]) / 2.0)
+}
+
+/// Les îlots d'une projection, à l'échelle du modèle : v descend, comme dans l'image.
+fn ilots_de(m: &Maillage, faces: &[usize], p: Projection) -> Vec<Ilot> {
+    let c = centre_de(m, faces);
+    let rel = |i: usize| [0, 1, 2].map(|k| m.sommets[i][k] - c[k]);
+    let a_plat = |l: &mut Ilot, f: usize, u: P3, v: P3| {
+        l.extend(m.faces[f].s.iter().enumerate().map(|(k, i)| ((f, k), [scal(rel(*i), u), scal(rel(*i), v)])));
+    };
+    match p {
+        Projection::Vue { droite, haut } => {
+            let bas = haut.map(|x| -x);
+            let mut l = Ilot::new();
+            faces.iter().for_each(|&f| a_plat(&mut l, f, droite, bas));
+            vec![l]
+        }
+        Projection::Cube => {
+            // Pour chaque côté : sa droite et son bas, vus de l'extérieur
+            let cotes: [(P3, P3); 6] = [
+                ([0.0, 0.0, -1.0], [0.0, -1.0, 0.0]), // +X
+                ([0.0, 0.0, 1.0], [0.0, -1.0, 0.0]),  // -X
+                ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),   // +Y
+                ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),  // -Y
+                ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),  // +Z
+                ([-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]), // -Z
+            ];
+            let mut l: Vec<Ilot> = vec![Ilot::new(); 6];
+            for &f in faces {
+                let n = m.normale(&m.faces[f].s);
+                let k = (0..3).max_by(|a, b| n[*a].abs().total_cmp(&n[*b].abs())).unwrap();
+                let cote = 2 * k + (n[k] < 0.0) as usize;
+                a_plat(&mut l[cote], f, cotes[cote].0, cotes[cote].1);
+            }
+            l.retain(|x| !x.is_empty());
+            l
+        }
+        Projection::Cylindre { axe } => {
+            let (ea, eb, ez) = base(axe);
+            let bas = ez.map(|x| -x);
+            let (mut corps, mut haut, mut dessous) = (Ilot::new(), Ilot::new(), Ilot::new());
+            let sommets: HashSet<usize> = faces.iter().flat_map(|f| m.faces[*f].s.iter().copied()).collect();
+            let r = sommets.iter().map(|i| scal(rel(*i), ea).hypot(scal(rel(*i), eb))).sum::<f64>() / sommets.len().max(1) as f64;
+            for &f in faces {
+                let n = scal(m.normale(&m.faces[f].s), ez);
+                if n > 0.7 {
+                    a_plat(&mut haut, f, eb, ea);
+                } else if n < -0.7 {
+                    a_plat(&mut dessous, f, eb, ea.map(|x| -x));
+                } else {
+                    let s = &m.faces[f].s;
+                    let pts: Vec<(f64, f64)> = s.iter().map(|i| (scal(rel(*i), ea), scal(rel(*i), eb))).collect();
+                    let t = angles(&pts);
+                    corps.extend(s.iter().enumerate().map(|(k, i)| ((f, k), [t[k] * r, scal(rel(*i), bas)])));
+                }
+            }
+            [corps, haut, dessous].into_iter().filter(|x| !x.is_empty()).collect()
+        }
+        Projection::Sphere { axe } => {
+            let (ea, eb, ez) = base(axe);
+            let sommets: HashSet<usize> = faces.iter().flat_map(|f| m.faces[*f].s.iter().copied()).collect();
+            let longueur = |i: usize| scal(rel(i), rel(i)).sqrt();
+            let r = sommets.iter().map(|i| longueur(*i)).sum::<f64>() / sommets.len().max(1) as f64;
+            let mut l = Ilot::new();
+            for &f in faces {
+                let s = &m.faces[f].s;
+                let pts: Vec<(f64, f64)> = s.iter().map(|i| (scal(rel(*i), ea), scal(rel(*i), eb))).collect();
+                let t = angles(&pts);
+                l.extend(s.iter().enumerate().map(|(k, i)| {
+                    let d = longueur(*i).max(1e-12);
+                    ((f, k), [t[k] * r, (scal(rel(*i), ez) / d).clamp(-1.0, 1.0).acos() * r])
+                }));
+            }
+            vec![l]
+        }
+    }
+}
+
+/// Boîte [min u, min v, largeur, hauteur] d'un îlot.
+fn etendue(l: &Ilot) -> [f64; 4] {
+    let (mut a, mut b) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for (_, p) in l {
+        for k in 0..2 {
+            a[k] = a[k].min(p[k]);
+            b[k] = b[k].max(p[k]);
+        }
+    }
+    [a[0], a[1], b[0] - a[0], b[1] - a[1]]
+}
+
+/// Range des boîtes par rangées dans un rectangle : leur place (dans l'ordre donné),
+/// l'encombrement total, ou `None` si elles n'y tiennent pas.
+fn rangees(tailles: &[[f64; 2]], (l, h): (f64, f64), ecart: f64) -> Option<(Vec<[f64; 2]>, [f64; 2])> {
+    let mut ordre: Vec<usize> = (0..tailles.len()).collect();
+    ordre.sort_by(|a, b| tailles[*b][1].total_cmp(&tailles[*a][1]));
+    let mut places = vec![[0.0; 2]; tailles.len()];
+    let (mut x, mut y, mut rangee, mut large) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    for k in ordre {
+        let [w, t] = tailles[k];
+        if w > l {
+            return None;
+        }
+        if x > 0.0 && x + w > l {
+            y += rangee + ecart;
+            (x, rangee) = (0.0, 0.0);
+        }
+        if y + t > h {
+            return None;
+        }
+        places[k] = [x, y];
+        x += w + ecart;
+        large = large.max(x - ecart);
+        rangee = rangee.max(t);
+    }
+    Some((places, [large, y + rangee]))
+}
+
+/// UV de chaque coin : les îlots gardent leurs proportions à l'écran, à la même échelle
+/// entre eux, la plus grande qui tienne dans la tuile, marges comprises.
+pub fn projeter(m: &Maillage, faces: &[usize], p: Projection, a: Aspect) -> Vec<(Coin, Uv)> {
+    let ilots = ilots_de(m, faces, p);
+    let (tl, th) = (a.l as f64, a.h as f64);
+    let marge = MARGE as f64;
+    let (ul, uh) = (tl - 2.0 * marge, th - 2.0 * marge);
+    let boites: Vec<[f64; 4]> = ilots.iter().map(etendue).collect();
+    let tailles = |k: f64| -> Vec<[f64; 2]> { boites.iter().map(|b| [b[2] * k, b[3] * k]).collect() };
+    let plus_grand = boites.iter().map(|b| b[2].max(b[3])).fold(0.0, f64::max).max(1e-12);
+    // Recherche de la plus grande échelle : l'ordre des rangées rend la limite irrégulière
+    let (mut bas, mut haut) = (0.0, tl.max(th) / plus_grand);
+    for _ in 0..40 {
+        let k = (bas + haut) / 2.0;
+        if rangees(&tailles(k), (ul, uh), marge).is_some() {
+            bas = k;
+        } else {
+            haut = k;
+        }
+    }
+    let (places, total) = rangees(&tailles(bas), (ul, uh), marge).unwrap_or((vec![[0.0; 2]; boites.len()], [0.0; 2]));
+    let (dx, dy) = ((tl - total[0]) / 2.0, (th - total[1]) / 2.0);
+    let mut r = Vec::new();
+    for (k, l) in ilots.iter().enumerate() {
+        for (c, q) in l {
+            let x = dx + places[k][0] + (q[0] - boites[k][0]) * bas;
+            let y = dy + places[k][1] + (q[1] - boites[k][1]) * bas;
+            r.push((*c, [(x / tl) as f32, (y / th) as f32]));
+        }
+    }
+    r
+}
+
+#[cfg(test)]
+mod tests_projection {
+    use super::*;
+    use crate::maillage::Maillage;
+
+    fn dans_la_tuile(m: &Maillage) {
+        for f in &m.faces {
+            assert_eq!(f.uv.len(), f.s.len());
+            assert!(f.uv.iter().flatten().all(|x| (-1e-5..=1.00001).contains(x)), "{:?}", f.uv);
+        }
+    }
+
+    fn pose(m: &mut Maillage, p: Projection, a: Aspect) {
+        let faces: Vec<usize> = (0..m.faces.len()).collect();
+        for f in &mut m.faces {
+            f.uv = vec![[0.0; 2]; f.s.len()];
+        }
+        for ((f, k), q) in projeter(m, &faces, p, a) {
+            m.faces[f].uv[k] = q;
+        }
+    }
+
+    fn cote_uv(m: &Maillage, f: usize) -> (f32, f32) {
+        let u = &m.faces[f].uv;
+        ((u[1][0] - u[0][0]).hypot(u[1][1] - u[0][1]), (u[2][0] - u[1][0]).hypot(u[2][1] - u[1][1]))
+    }
+
+    /// Aire signée du polygone en UV, dans le repère image (v descend).
+    fn aire(u: &[Uv]) -> f32 {
+        (0..u.len()).map(|k| { let (a, b) = (u[k], u[(k + 1) % u.len()]); a[0] * b[1] - b[0] * a[1] }).sum::<f32>() / 2.0
+    }
+
+    #[test]
+    fn le_cube_fait_six_carres_egaux_sans_chevauchement() {
+        let mut m = Maillage::cube(2.0);
+        pose(&mut m, Projection::Cube, Aspect::CARRE);
+        dans_la_tuile(&m);
+        assert_eq!(ilots(&m, &(0..6).collect::<Vec<_>>()).len(), 6);
+        for f in 0..6 {
+            let (a, b) = cote_uv(&m, f);
+            assert!((a - b).abs() < 1e-5 && (a - cote_uv(&m, 0).0).abs() < 1e-5);
+            assert!(a > 0.25, "le rangement utilise mal la tuile : {a}");
+        }
+        for (i, f) in m.faces.iter().enumerate() {
+            let c = centre_face(&m, i);
+            for j in 0..6 {
+                assert!(j == i || face_sous(&m, &[j], c).is_none(), "{i} {j} {:?}", f.uv);
+            }
+        }
+    }
+
+    #[test]
+    fn aucune_projection_ne_montre_une_image_a_l_envers() {
+        // Vue de l'extérieur, une face tourne dans le sens direct. Une image non retournée
+        // la montre tourner de même : avec v qui descend, son aire signée est négative.
+        for p in [Projection::Cube, Projection::Cylindre { axe: 1 }, Projection::Sphere { axe: 1 }, Projection::Cylindre { axe: 0 }, Projection::Cylindre { axe: 2 }, Projection::Sphere { axe: 2 }] {
+            let mut m = if p == Projection::Cube { Maillage::cube(2.0) } else { Maillage::sphere_uv(1.0, 24, 12) };
+            let centre = centre_de(&m, &(0..m.faces.len()).collect::<Vec<_>>());
+            let n = m.normale(&m.faces[0].s);
+            let q = m.sommets[m.faces[0].s[0]];
+            assert!(scal(n, [0, 1, 2].map(|k| q[k] - centre[k])) > 0.0, "le maillage d'essai tourne vers l'extérieur");
+            pose(&mut m, p, Aspect::CARRE);
+            for f in m.faces.iter().filter(|f| f.s.len() == 4) {
+                assert!(aire(&f.uv) < 0.0, "{p:?} {:?}", f.uv);
+            }
+        }
+        let vers_nous = Projection::Vue { droite: [1.0, 0.0, 0.0], haut: [0.0, 1.0, 0.0] };
+        let mut m = Maillage::cube(2.0);
+        pose(&mut m, vers_nous, Aspect::CARRE);
+        let f = m.faces.iter().find(|f| m.normale(&f.s)[2] > 0.5).unwrap();
+        assert!(aire(&f.uv) < 0.0, "{:?}", f.uv);
+        // Le haut du modèle reste en haut de l'image, sa droite à droite
+        let de = |i: usize| m.sommets[f.s[i]];
+        let (b, c) = ((0..4).max_by(|a, b| de(*a)[1].total_cmp(&de(*b)[1])).unwrap(), (0..4).min_by(|a, b| de(*a)[1].total_cmp(&de(*b)[1])).unwrap());
+        assert!(f.uv[b][1] < f.uv[c][1]);
+    }
+
+    #[test]
+    fn le_cylindre_deroule_le_corps_et_garde_deux_disques() {
+        let mut m = Maillage::cylindre(1.0, 3.0, 24, false);
+        pose(&mut m, Projection::Cylindre { axe: 1 }, Aspect::CARRE);
+        dans_la_tuile(&m);
+        let f: Vec<usize> = (0..m.faces.len()).collect();
+        assert_eq!(ilots(&m, &f).len(), 3);
+        // Le corps garde ses proportions : largeur / hauteur = 2πr / h, à une face près
+        let corps = f.iter().copied().filter(|k| m.faces[*k].s.len() == 4).collect::<Vec<_>>();
+        let (mut a, mut b) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for c in coins(&m, &corps) {
+            for k in 0..2 {
+                a[k] = a[k].min(uv_de(&m, c)[k]);
+                b[k] = b[k].max(uv_de(&m, c)[k]);
+            }
+        }
+        let attendu = std::f32::consts::TAU / 3.0;
+        assert!(((b[0] - a[0]) / (b[1] - a[1]) - attendu).abs() < 0.05, "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn la_couture_ne_traverse_pas_la_tuile() {
+        for p in [Projection::Cylindre { axe: 1 }, Projection::Sphere { axe: 1 }] {
+            let mut m = Maillage::sphere_uv(1.0, 24, 12);
+            pose(&mut m, p, Aspect::CARRE);
+            dans_la_tuile(&m);
+            for f in &m.faces {
+                let (a, b) = (f.uv.iter().map(|c| c[0]).fold(f32::MAX, f32::min), f.uv.iter().map(|c| c[0]).fold(f32::MIN, f32::max));
+                assert!(b - a < 0.15, "{p:?} {:?}", f.uv);
+            }
+        }
+    }
+
+    #[test]
+    fn la_sphere_fait_un_rectangle_de_deux_pour_un() {
+        let mut m = Maillage::sphere_uv(1.0, 32, 16);
+        pose(&mut m, Projection::Sphere { axe: 1 }, Aspect::de(2048, 1024));
+        dans_la_tuile(&m);
+        // Sur une image 2:1, le dépliage remplit la tuile
+        let (mut a, mut b) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for q in m.faces.iter().flat_map(|f| f.uv.iter()) {
+            for k in 0..2 {
+                a[k] = a[k].min(q[k]);
+                b[k] = b[k].max(q[k]);
+            }
+        }
+        assert!(b[0] - a[0] > 0.9 && b[1] - a[1] > 0.9, "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn la_vue_garde_les_proportions_sur_une_image_etiree() {
+        let mut m = Maillage::boite(4.0, 2.0, 1.0);
+        let k = (0..m.faces.len()).find(|f| m.normale(&m.faces[*f].s)[2] > 0.5).unwrap();
+        let a = Aspect::de(1024, 2048);
+        let p = Projection::Vue { droite: [1.0, 0.0, 0.0], haut: [0.0, 1.0, 0.0] };
+        m.faces[k].uv = vec![[0.0; 2]; 4];
+        for ((f, c), q) in projeter(&m, &[k], p, a) {
+            m.faces[f].uv[c] = q;
+        }
+        let u = &m.faces[k].uv;
+        let ecart = |c: usize| u.iter().map(|q| q[c]).fold(f32::MIN, f32::max) - u.iter().map(|q| q[c]).fold(f32::MAX, f32::min);
+        // 4 × 2 à l'écran, sur une image deux fois plus haute que large
+        assert!((ecart(0) * a.l / (ecart(1) * a.h) - 2.0).abs() < 1e-4, "{u:?}");
+        assert!(ecart(0) > 0.9, "la largeur remplit la tuile");
+    }
+
+    #[test]
+    fn un_axe_choisi_tourne_le_cylindre() {
+        let mut m = Maillage::cylindre(1.0, 3.0, 12, false);
+        for p in &mut m.sommets {
+            *p = [p[1], p[2], p[0]]; // axe Y → X
+        }
+        pose(&mut m, Projection::Cylindre { axe: 0 }, Aspect::CARRE);
+        dans_la_tuile(&m);
+        assert_eq!(ilots(&m, &(0..m.faces.len()).collect::<Vec<_>>()).len(), 3);
+    }
 }
 
 #[cfg(test)]

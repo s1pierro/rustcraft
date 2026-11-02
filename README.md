@@ -7,7 +7,7 @@ ni WebView, dans un APK très léger.
 
 ## État
 
-Version 0.13 : **édition en modes Scène et Géométrie, modifieurs, visserie et UV**.
+Version 0.15 : **édition en modes Scène et Géométrie, modifieurs, visserie, UV et matériaux**.
 
 - Projets `.gda` des formats 1 à 9, fichiers OBJ, STL, glTF et GLB
 - Rendus Solide, En jeu et Rayons X, éclairage de GDA
@@ -37,17 +37,21 @@ Version 0.13 : **édition en modes Scène et Géométrie, modifieurs, visserie e
 - Barre rapide au-dessus des outils : les opérations qui s'appliquent à la sélection,
   à choisir dans Réglages › Barre rapide
 - Réglages › Couleurs : les couleurs de l'interface et de la vue 3D, comme dans GDA
-- Pastille Scène : rendu, vue et ajouts à la scène
+- Pastille Scène : rendu, vue et ajouts à la scène, et onglet Matériaux, aussi en mode
+  Géométrie : réglages du matériau de l'objet actif, bibliothèque du projet, création,
+  duplication, renommage, suppression, image PNG ou JPEG choisie depuis l'appareil
 - Vue UV du mode Géométrie, à côté du modèle : points et îlots, coins liés ou séparés,
   sélection au toucher et en boîte, déplacement, rotation, échelle, axes U et V, pas et
   annulation, zoom à deux doigts ; le modèle montre la texture et suit chaque geste
+- Projections UV selon la vue, en cube, cylindre ou sphère, sur les faces choisies ou
+  toutes, à la forme de l'image, axe réglable ; un damier montre l'étirement sans texture
 - Curseur 3D : vers l'origine, vers la sélection, sélection vers le curseur
 - Panneau Fichier à trois onglets : Projet (nom, enregistrement `.gda`, ouverture,
   nouvelle scène), Importer par le sélecteur d'Android, Exporter en OBJ, STL ou GLB la
   scène complète ou les seuls objets choisis, et `.mtl`, dans Téléchargements
   (Android 10 ou plus) ; sauvegarde automatique d'un lancement à l'autre
 
-Pas encore disponibles : projections et dépliage UV, déplacement entre sets, curseur 3D à la main,
+Pas encore disponibles : mise en page et dépliage UV, déplacement entre sets, curseur 3D à la main,
 armatures (conservées dans le projet, ni affichées ni appliquées à l'export). En mode
 Géométrie, les objets sont édités sans leurs modifieurs.
 

@@ -373,6 +373,22 @@ impl Projet {
         }
     }
 
+    /// Teinte du prochain matériau, tour à tour.
+    pub fn teinte_libre(&self) -> &'static str {
+        TEINTES[self.materiaux.len().saturating_sub(1) % TEINTES.len()]
+    }
+
+    /// `base`, ou `base 2`, `base 3`… s'il est pris.
+    pub fn nom_materiau_libre(&self, base: &str) -> String {
+        let mut n = base.to_string();
+        let mut k = 2;
+        while self.materiau(&n).is_some() {
+            n = format!("{base} {k}");
+            k += 1;
+        }
+        n
+    }
+
     pub fn materiau(&self, nom: &str) -> Option<&Materiau> {
         self.materiaux.iter().find(|(n, _)| n == nom).map(|(_, m)| m)
     }

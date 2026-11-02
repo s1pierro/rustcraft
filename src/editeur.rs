@@ -14,7 +14,7 @@ use crate::maillage::{self, Arete, Boite, Cible, Maillage, P3};
 use crate::math::{self, Mat4};
 use crate::modifs;
 use crate::primitives::{self, Genre, Prim, Valeurs, V};
-use crate::projet::{Materiau, Objet, Projet};
+use crate::projet::{Materiau, Objet, Projet, DEFAUT};
 use crate::shell::{Layout, Shell, Side};
 use crate::texture::{self, Image};
 use crate::uv::{self, Aspect, Coin, Uv};
@@ -46,6 +46,11 @@ const MIME: &str = "application/octet-stream";
 /// Onglets du panneau de réglages.
 const ONGLETS: [&str; 2] = ["Couleurs", "Barre rapide"];
 const ONGLET_COULEURS: usize = 0;
+const ONGLET_MATERIAUX: usize = 1;
+/// Valeurs d'`illum` du format Wavefront, comme dans GDA.
+const ILLUM: [&str; 11] = ["Couleur seule, sans éclairage", "Diffuse et ambiante", "Avec reflets spéculaires", "Reflets et réflexion (lancer de rayons)", "Verre : transparence et réflexion", "Réflexion de Fresnel", "Réfraction", "Réfraction et Fresnel", "Réflexion sans lancer de rayons", "Verre sans lancer de rayons", "Ombres portées sur des surfaces invisibles"];
+/// Couleurs d'un matériau : libellé, et si elle compte à l'écran.
+const COULEURS_MAT: [(&str, bool); 4] = [("Diffuse", true), ("Émission", true), ("Ambiante", false), ("Spéculaire", false)];
 const ONGLET_DERNIERE: usize = 1;
 
 const COUL_AXES: [C; 3] = [C::AxeX, C::AxeY, C::AxeZ];
@@ -86,6 +91,24 @@ fn lin_octets(c: Color) -> [f32; 3] {
 
 fn lin_hex(h: &str) -> [f32; 3] {
     maillage::rvb(h).map(|c| lineaire(c as f32))
+}
+
+/// Nom montré d'un matériau.
+fn nom_mat(n: &str) -> &str {
+    if n == DEFAUT { "défaut" } else { n }
+}
+
+fn couleur_mat(m: &Materiau, k: usize) -> &str {
+    [&m.couleur, &m.emission, &m.ambiante, &m.speculaire][k]
+}
+
+fn couleur_mat_mut(m: &mut Materiau, k: usize) -> &mut String {
+    match k {
+        0 => &mut m.couleur,
+        1 => &mut m.emission,
+        2 => &mut m.ambiante,
+        _ => &mut m.speculaire,
+    }
 }
 
 fn octets_hex(h: &str) -> Color {
@@ -202,6 +225,8 @@ pub enum Derniere {
     /// `axe` : 0 à 2, ou 3 pour l'axe de la vue, gardé dans `vue`.
     Rotation { degres: f64, axe: usize, vue: Option<P3>, pivot: P3 },
     Echelle { s: P3, pivot: P3 },
+    /// Faces cibles relues à chaque rejeu : la sélection n'a pas changé.
+    Projection { p: uv::Projection, aspect: Aspect },
 }
 
 impl Derniere {
@@ -232,6 +257,7 @@ impl Derniere {
             Derniere::Translation { .. } => "Translation",
             Derniere::Rotation { .. } => "Rotation",
             Derniere::Echelle { .. } => "Échelle",
+            Derniere::Projection { .. } => "Projection UV",
         }
     }
 }
@@ -264,6 +290,9 @@ pub enum Champ {
     Pivot(usize),
     Nom,
     Projet,
+    MatNom,
+    /// Code d'une couleur du matériau de l'objet actif.
+    MatCode(usize),
     /// Champ du panneau d'ajout : son rang et son libellé.
     Primitive(usize, &'static str),
     /// Nombre de copies d'une répétition.
@@ -293,13 +322,15 @@ impl Champ {
             Champ::Facteur(k) => format!("Facteur {}", NOMS_AXES[k]),
             Champ::Pivot(k) => format!("Pivot {}", NOMS_AXES[k]),
             Champ::Nom => "Nom de l'objet".into(),
+            Champ::MatNom => "Nom du matériau".into(),
+            Champ::MatCode(k) => format!("{} (#rrggbb)", COULEURS_MAT[k].0),
             Champ::Projet => "Nom du projet".into(),
         }
     }
 
     /// Champ qui accepte du texte, pas seulement un nombre.
     fn libre(self) -> bool {
-        matches!(self, Champ::Nom | Champ::Projet | Champ::Couleur(_))
+        matches!(self, Champ::Nom | Champ::Projet | Champ::Couleur(_) | Champ::MatNom | Champ::MatCode(_))
     }
 }
 
@@ -477,6 +508,8 @@ impl Pilule {
 pub enum Selecteur {
     Ouvrir = 1,
     Importer = 2,
+    /// Une image pour un matériau.
+    Image = 3,
 }
 
 /// Ce que montre le panneau de fin.
@@ -617,6 +650,14 @@ pub struct App {
     calcul: Option<Receiver<Vec<(String, modifs::Ev)>>>,
     ajout: Option<Ajout>,
     uv: EditeurUv,
+    /// Onglet de la pastille Scène.
+    pub onglet_scene: usize,
+    /// Couleur de matériau dépliée : matériau, couleur, teinte.
+    mat_couleur: Option<(String, usize, [f32; 3])>,
+    /// Glissé en cours sur un réglage : une seule étape d'annulation.
+    mat_saisie: bool,
+    /// Matériau qui attend l'image du sélecteur.
+    image_pour: Option<String>,
     /// Départ de la boîte en cours dans la vue UV.
     boite_uv: Option<(f32, f32)>,
     /// Derniers réglages de chaque primitive, repris à l'ajout suivant.
@@ -684,6 +725,10 @@ impl App {
             calcul: None,
             ajout: None,
             uv: EditeurUv::default(),
+            onglet_scene: 0,
+            mat_couleur: None,
+            mat_saisie: false,
+            image_pour: None,
             boite_uv: None,
             primitives: HashMap::new(),
             images_vues: HashSet::new(),
@@ -929,29 +974,70 @@ impl App {
 
     fn panneau_uv(&mut self, cx: &mut Cx, corps: Rect) {
         let d = cx.dp;
-        let bas = (146.0 * d).min(corps.h * 0.45);
+        let avec_axe = matches!(self.derniere, Some(Derniere::Projection { p: uv::Projection::Cylindre { .. } | uv::Projection::Sphere { .. }, .. }));
+        let bas = (if avec_axe { 254.0 } else { 204.0 } * d).min(corps.h * 0.5);
         let toile = Rect::new(corps.x, corps.y, corps.w, corps.h - bas);
         let (faces, tex, masquees) = self.faces_uv();
         self.toile_uv(cx, toile, &faces, tex.as_deref());
         let mut b = cx.body(id("corps-uv"), Rect::new(corps.x, toile.bottom(), corps.w, bas), &self.scrolls);
         let u = &mut self.uv;
         if faces.is_empty() {
-            cx.paragraph(&mut b, "Aucune face à montrer : celles-ci n'ont pas d'UV. Les projections arriveront à l'étape suivante.");
+            cx.paragraph(&mut b, "Ces faces n'ont pas encore d'UV : choisissez une projection.");
         } else {
             let p = if faces.len() > 1 { "s" } else { "" };
             let cache = if masquees > 0 { format!(" · {masquees} d'une autre texture masquées") } else { String::new() };
             cx.paragraph(&mut b, &format!("{} face{p} · {} coins choisis{cache}", faces.len(), u.sel.len()));
         }
-        match cx.bascules(&mut b, id("uv-mode"), &[("Points", !u.ilots), ("Îlots", u.ilots), ("Coins liés", u.lies), ("Cadrer", false)], 4) {
+        let actuelle = match self.derniere {
+            Some(Derniere::Projection { p, .. }) => Some(p),
+            _ => None,
+        };
+        let genre = actuelle.map(|p| match p {
+            uv::Projection::Vue { .. } => 0,
+            uv::Projection::Cube => 1,
+            uv::Projection::Cylindre { .. } => 2,
+            uv::Projection::Sphere { .. } => 3,
+        });
+        if let Some(k) = cx.choix(&mut b, id("uv-projeter"), &["Vue", "Cube", "Cylindre", "Sphère"], genre, 4) {
+            self.projeter(match k {
+                0 => {
+                    let (_, droite, haut, _) = self.repere();
+                    uv::Projection::Vue { droite, haut }
+                }
+                1 => uv::Projection::Cube,
+                2 => uv::Projection::Cylindre { axe: 1 },
+                _ => uv::Projection::Sphere { axe: 1 },
+            });
+        }
+        // L'axe se change après coup : la projection se rejoue sans nouvelle étape
+        if let Some(axe) = actuelle.and_then(|p| match p {
+            uv::Projection::Cylindre { axe } | uv::Projection::Sphere { axe } => Some(axe),
+            _ => None,
+        }) {
+            if let Some(k) = cx.choix(&mut b, id("uv-axe"), &NOMS_AXES, Some(axe), 3) {
+                if let (Some(Derniere::Projection { p, aspect }), true) = (self.derniere, k != axe) {
+                    let p = match p {
+                        uv::Projection::Cylindre { .. } => uv::Projection::Cylindre { axe: k },
+                        _ => uv::Projection::Sphere { axe: k },
+                    };
+                    self.uv.sel.clear();
+                    self.rejouer(Derniere::Projection { p, aspect });
+                }
+            }
+        }
+        let u = &mut self.uv;
+        match cx.bascules(&mut b, id("uv-mode"), &[("Points", !u.ilots), ("Îlots", u.ilots), ("Coins liés", u.lies), ("Cadrer", false), ("Image…", false)], 5) {
             Some(0) | Some(1) => {
                 u.ilots = !u.ilots;
                 u.sel.clear();
                 self.version_geo = None;
             }
             Some(2) => u.lies = !u.lies,
-            Some(_) => u.cadre = None,
+            Some(3) => u.cadre = None,
+            Some(_) => self.choisir_image(),
             None => {}
         }
+        let u = &mut self.uv;
         let o = u.outil;
         match cx.bascules(&mut b, id("uv-outil"), &[("Déplacer", o == OutilUv::Deplacer), ("Tourner", o == OutilUv::Tourner), ("Échelle", o == OutilUv::Echelle), ("U", u.axes[0]), ("V", u.axes[1])], 5) {
             Some(0) => u.outil = OutilUv::Deplacer,
@@ -961,6 +1047,28 @@ impl App {
             None => {}
         }
         cx.body_end(b, &mut self.scrolls);
+    }
+
+    /// Projette les faces visées, sous la forme de l'image qu'elles portent.
+    pub fn projeter(&mut self, p: uv::Projection) {
+        let Some(t) = &self.travail else { return };
+        let vise = t.sel.faces.first().copied().or((!t.m.faces.is_empty()).then_some(0));
+        let image = vise.and_then(|f| t.m.faces[f].s.first()).and_then(|i| t.proprio.get(*i)).and_then(|k| self.projet.texture_de(&self.projet.objets[*k])).cloned();
+        let aspect = image.and_then(|i| self.aspect_de(&i)).unwrap_or(Aspect::CARRE);
+        self.uv.sel.clear();
+        self.lancer(Derniere::Projection { p, aspect });
+        self.ouvrir_uv();
+    }
+
+    /// Forme d'une image, décodée au besoin : elle n'a peut-être pas encore été vue.
+    fn aspect_de(&mut self, id: &str) -> Option<Aspect> {
+        if let Some(a) = self.uv.aspects.get(id) {
+            return Some(*a);
+        }
+        let i = texture::decoder(&self.projet.textures.get(id)?.octets).ok()?;
+        let a = Aspect::de(i.l, i.h);
+        self.uv.aspects.insert(id.to_string(), a);
+        Some(a)
     }
 
     /// Vue UV : gestes, puis dessin.
@@ -1125,9 +1233,7 @@ impl App {
         let (p0, p1) = (u.ecran([0.0, 0.0]), u.ecran([1.0, 1.0]));
         let tuile = Rect::new(p0[0], p0[1], p1[0] - p0[0], p1[1] - p0[1]);
         cx.dl.rrect(tuile, 0.0, coul(C::Surface));
-        if let Some(i) = tex {
-            cx.dl.image(tuile, i);
-        }
+        cx.dl.image(tuile, tex.unwrap_or(texture::DAMIER));
         for (a, b) in [(p0, [p1[0], p0[1]]), ([p1[0], p0[1]], p1), (p1, [p0[0], p1[1]]), ([p0[0], p1[1]], p0)] {
             cx.dl.line(a, b, 1.5 * d, coul(C::Bordures));
         }
@@ -1175,6 +1281,290 @@ impl App {
             }
         }
         cx.clip(None);
+    }
+
+    /// Matériau de l'objet actif. Une armature n'en a pas.
+    fn materiau_actif(&self) -> Option<String> {
+        let o = self.projet.objets.get(self.projet.actif?)?;
+        o.armature.is_none().then(|| o.materiau.clone())
+    }
+
+    /// Change un matériau. Un glissé ne fait qu'une étape : `mat_saisie` tient jusqu'au
+    /// lever du doigt. Le rendu En jeu montre le résultat.
+    fn regler_materiau(&mut self, nom: &str, f: impl FnOnce(&mut Materiau)) {
+        if !self.mat_saisie {
+            self.memoriser();
+            self.mat_saisie = true;
+        }
+        if let Some((_, m)) = self.projet.materiaux.iter_mut().find(|x| x.0 == nom) {
+            f(m);
+        }
+        self.a_sauver = true;
+        self.montrer_materiaux();
+    }
+
+    fn montrer_materiaux(&mut self) {
+        if self.travail.is_none() {
+            self.rendu = Rendu::Jeu;
+        }
+    }
+
+    fn objets_choisis_a_materiau(&self) -> Vec<usize> {
+        let p = &self.projet;
+        self.choix.iter().copied().filter(|k| p.objets.get(*k).is_some_and(|o| o.armature.is_none())).collect()
+    }
+
+    fn appliquer_materiau(&mut self, nom: &str) {
+        let l = self.objets_choisis_a_materiau();
+        if l.is_empty() {
+            return self.dire("Aucun objet choisi : touchez un objet".into());
+        }
+        if l.iter().all(|k| self.projet.objets[*k].materiau == nom) {
+            return;
+        }
+        self.memoriser();
+        for k in l {
+            self.projet.objets[k].materiau = nom.to_string();
+        }
+        self.a_sauver = true;
+        self.version_geo = None;
+        self.montrer_materiaux();
+    }
+
+    /// Nouveau matériau, copie de `modele` ou d'une teinte neuve, appliqué aux objets
+    /// choisis. Rend son nom.
+    fn nouveau_materiau(&mut self, modele: Option<&str>) -> String {
+        self.memoriser();
+        let base = modele.filter(|n| *n != DEFAUT).unwrap_or("materiau");
+        let nom = self.projet.nom_materiau_libre(base);
+        let m = modele.and_then(|n| self.projet.materiau(n).cloned()).unwrap_or_else(|| Materiau::neuf(Some(self.projet.teinte_libre())));
+        self.projet.materiaux.push((nom.clone(), m));
+        let l = self.objets_choisis_a_materiau();
+        let applique = !l.is_empty();
+        for k in l {
+            self.projet.objets[k].materiau = nom.clone();
+        }
+        self.a_sauver = true;
+        self.version_geo = None;
+        self.dire(format!("Matériau « {nom} » créé{}", if applique { " et appliqué" } else { "" }));
+        nom
+    }
+
+    /// Ses objets reprennent le matériau par défaut.
+    fn supprimer_materiau(&mut self, nom: &str) {
+        if nom == DEFAUT || self.projet.materiau(nom).is_none() {
+            return;
+        }
+        self.memoriser();
+        for o in &mut self.projet.objets {
+            if o.materiau == nom {
+                o.materiau = DEFAUT.to_string();
+            }
+        }
+        self.projet.materiaux.retain(|x| x.0 != nom);
+        self.a_sauver = true;
+        self.version_geo = None;
+    }
+
+    fn renommer_materiau(&mut self, ancien: &str, nouveau: &str) {
+        let nouveau = nouveau.trim();
+        if ancien == DEFAUT || nouveau.is_empty() || nouveau == ancien || self.projet.materiau(ancien).is_none() {
+            return;
+        }
+        if self.projet.materiau(nouveau).is_some() || nouveau == DEFAUT || nouveau == nom_mat(DEFAUT) {
+            return self.dire("Ce nom est déjà pris".into());
+        }
+        self.memoriser();
+        for (n, _) in &mut self.projet.materiaux {
+            if n == ancien {
+                *n = nouveau.to_string();
+            }
+        }
+        for o in &mut self.projet.objets {
+            if o.materiau == ancien {
+                o.materiau = nouveau.to_string();
+            }
+        }
+        self.mat_couleur = None;
+        self.a_sauver = true;
+    }
+
+    /// Demande une image au sélecteur, pour le matériau de l'objet actif.
+    fn choisir_image(&mut self) {
+        let Some(n) = self.materiau_actif() else { return self.dire("Touchez d'abord un objet".into()) };
+        self.image_pour = Some(n);
+        self.selecteur = Some(Selecteur::Image);
+    }
+
+    /// Image reçue du sélecteur. Le matériau par défaut, que tout objet partage, ne la
+    /// porte pas : un nouveau matériau prend le nom du fichier. La couleur repasse au
+    /// blanc, sans quoi elle teinterait l'image.
+    pub fn recevoir_image(&mut self, fichier: &str, octets: &[u8]) {
+        let Some(mut nom) = self.image_pour.take() else { return };
+        let i = match texture::decoder(octets) {
+            Ok(i) => i,
+            Err(e) => return self.dire(format!("Image illisible : {fichier} ({e})")),
+        };
+        let cle = texture::identifiant(octets);
+        self.uv.aspects.insert(cle.clone(), Aspect::de(i.l, i.h));
+        let base = fichier.rsplit(['/', '\\']).next().unwrap_or(fichier);
+        let base = base.rsplit_once('.').map_or(base, |x| x.0).to_string();
+        self.memoriser();
+        self.projet.textures.entry(cle.clone()).or_insert_with(|| crate::texture::Texture { nom: fichier.to_string(), octets: Arc::new(octets.to_vec()) });
+        if nom == DEFAUT {
+            let n = self.projet.nom_materiau_libre(if base.is_empty() { "materiau" } else { &base });
+            self.projet.materiaux.push((n.clone(), Materiau::neuf(None)));
+            let mut l = self.objets_choisis_a_materiau();
+            l.extend(self.projet.actif.filter(|k| !l.contains(k)));
+            for k in l {
+                self.projet.objets[k].materiau = n.clone();
+            }
+            nom = n;
+        }
+        if let Some((_, m)) = self.projet.materiaux.iter_mut().find(|x| x.0 == nom) {
+            m.texture = Some(cle);
+            m.couleur = "#ffffff".to_string();
+        }
+        self.a_sauver = true;
+        self.version_geo = None;
+        self.montrer_materiaux();
+        self.dire(format!("Image {} × {} sur « {nom} »", i.l, i.h));
+    }
+
+    fn onglet_materiaux(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        let actif = self.materiau_actif();
+        let titre = self.projet.actif.and_then(|k| self.projet.objets.get(k)).filter(|_| actif.is_some()).map_or("MATÉRIAUX".to_string(), |o| format!("OBJET ACTIF : {}", o.nom.to_uppercase()));
+        cx.section(b, &titre);
+        match &actif {
+            Some(n) => self.reglages_materiau(cx, b, n),
+            None => cx.paragraph(b, "Aucun objet actif : touchez un objet pour régler son matériau."),
+        }
+        cx.section(b, "BIBLIOTHÈQUE DU PROJET");
+        let nc = self.objets_choisis_a_materiau().len();
+        cx.paragraph(b, &match nc {
+            0 => "Choisissez des objets pour leur appliquer un matériau.".to_string(),
+            1 => "Toucher un matériau l'applique à l'objet choisi.".to_string(),
+            n => format!("Toucher un matériau l'applique aux {n} objets choisis."),
+        });
+        let lignes: Vec<(String, Color, usize)> = self.projet.materiaux.iter().map(|(n, m)| (n.clone(), octets_hex(&m.couleur), self.projet.objets.iter().filter(|o| o.materiau == *n && o.armature.is_none()).count())).collect();
+        for (k, (n, c, compte)) in lignes.iter().enumerate() {
+            let usage = match compte {
+                0 => "inutilisé".to_string(),
+                1 => "1 objet".to_string(),
+                x => format!("{x} objets"),
+            };
+            if cx.row(b, sub_id(id("mat-ligne"), k), &format!("{} · {usage}", nom_mat(n)), Some(*c), actif.as_ref() == Some(n)) {
+                self.appliquer_materiau(n);
+            }
+        }
+        if cx.button(b, id("mat-nouveau"), "Nouveau matériau") {
+            self.nouveau_materiau(None);
+        }
+    }
+
+    fn reglages_materiau(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, nom: &str) {
+        let Some(m) = self.projet.materiau(nom).cloned() else { return };
+        let d = cx.dp;
+        if nom == DEFAUT {
+            cx.paragraph(b, "Matériau par défaut, partagé : son nom ne change pas et il ne porte pas d'image.");
+        } else if cx.champ(b, id("mat-nom"), "Nom", coul(C::Texte), nom) {
+            self.saisir(Champ::MatNom);
+        }
+        cx.section(b, "IMAGE");
+        let image = m.texture.as_ref().filter(|i| self.projet.textures.contains_key(*i));
+        if let Some(i) = image {
+            let cote = 96.0 * d;
+            let a = self.aspect_de(i).unwrap_or(Aspect::CARRE);
+            let r = Rect::new(b.x, b.y + 4.0 * d + (1.0 - a.h) * cote / 2.0, cote * a.l, cote * a.h);
+            cx.dl.rrect(r, 0.0, coul(C::Fond));
+            cx.dl.image(r, i);
+            let t = self.projet.textures[i].nom.rsplit(['/', '\\']).next().unwrap_or("").to_string();
+            cx.text_at(b.x + cote + 12.0 * d, r.cy(), &t, 14.0, coul(C::Secondaire));
+            b.y += cote + 12.0 * d;
+            match cx.rangee(b, id("mat-image"), &[("Changer…", true), ("Retirer", true)]) {
+                Some(0) => self.choisir_image(),
+                Some(_) => {
+                    self.mat_saisie = false;
+                    self.regler_materiau(nom, |m| m.texture = None);
+                    self.mat_saisie = false;
+                    self.version_geo = None;
+                }
+                None => {}
+            }
+        } else if cx.button(b, id("mat-choisir"), "Choisir une image…") {
+            self.choisir_image();
+        }
+        let mut tenu = false;
+        cx.section(b, "EN JEU ET À L'EXPORT");
+        self.couleurs_materiau(cx, b, nom, &m, true, &mut tenu);
+        let (mut o, z) = (m.opacite as f32 * 100.0, id("mat-opacite"));
+        cx.slider(b, z, "Opacité", &format!("{:.0} %", o), &mut o, 0.0, 100.0);
+        tenu |= cx.ui.pressed(z);
+        if o != m.opacite as f32 * 100.0 {
+            self.regler_materiau(nom, |m| m.opacite = o as f64 / 100.0);
+        }
+        let (mut e, z) = (m.illumination as f32, id("mat-illum"));
+        let rang = (m.illumination.round() as usize).min(10);
+        cx.slider(b, z, "Éclairage", &format!("{rang} · {}", ILLUM[rang]), &mut e, 0.0, 10.0);
+        tenu |= cx.ui.pressed(z);
+        if e.round() as f64 != m.illumination {
+            self.regler_materiau(nom, |m| m.illumination = e.round() as f64);
+        }
+        cx.section(b, "À L'EXPORT SEULEMENT");
+        self.couleurs_materiau(cx, b, nom, &m, false, &mut tenu);
+        // Un fichier importé peut sortir des bornes : le curseur reste sur sa piste
+        let (brut, z) = (m.brillance as f32, id("mat-brillance"));
+        let mut v = brut.clamp(0.0, 1000.0);
+        let avant = v;
+        cx.slider(b, z, "Brillance", &format!("{brut:.0}"), &mut v, 0.0, 1000.0);
+        tenu |= cx.ui.pressed(z);
+        if v != avant {
+            self.regler_materiau(nom, |m| m.brillance = v.round() as f64);
+        }
+        let (brut, z) = (m.refraction as f32, id("mat-refraction"));
+        let mut v = brut.clamp(1.0, 3.0);
+        let avant = v;
+        cx.slider(b, z, "Réfraction", &format!("{brut:.2}"), &mut v, 1.0, 3.0);
+        tenu |= cx.ui.pressed(z);
+        if v != avant {
+            self.regler_materiau(nom, |m| m.refraction = v as f64);
+        }
+        match cx.rangee(b, id("mat-actions"), &[("Dupliquer", true), ("Supprimer", nom != DEFAUT)]) {
+            Some(0) => drop(self.nouveau_materiau(Some(nom))),
+            Some(_) => self.supprimer_materiau(nom),
+            None => {}
+        }
+        if !tenu {
+            self.mat_saisie = false;
+        }
+    }
+
+    /// Lignes de couleur : toucher déplie teinte, saturation, luminosité et code.
+    fn couleurs_materiau(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, nom: &str, m: &Materiau, a_l_ecran: bool, tenu: &mut bool) {
+        for (k, (libelle, ecran)) in COULEURS_MAT.iter().enumerate().filter(|x| x.1 .1 == a_l_ecran) {
+            let _ = ecran;
+            let c = octets_hex(couleur_mat(m, k));
+            let (ouvre, _) = cx.ligne_couleur(b, sub_id(id("mat-couleur"), k), sub_id(id("mat-couleur-raz"), k), libelle, c, false);
+            let ici = self.mat_couleur.as_ref().is_some_and(|o| o.0 == nom && o.1 == k);
+            if ouvre {
+                self.mat_couleur = if ici { None } else { Some((nom.to_string(), k, theme::vers_tsl(c))) };
+            }
+            let Some((_, _, tsl)) = self.mat_couleur.clone().filter(|o| o.0 == nom && o.1 == k) else { continue };
+            let mut neuf = tsl;
+            for (j, (n, max, unite)) in [("Teinte", 360.0, "°"), ("Saturation", 100.0, " %"), ("Luminosité", 100.0, " %")].iter().enumerate() {
+                let z = sub_id(sub_id(id("mat-tsl"), k), j);
+                cx.slider(b, z, n, &format!("{:.0}{unite}", neuf[j]), &mut neuf[j], 0.0, *max);
+                *tenu |= cx.ui.pressed(z);
+            }
+            if neuf != tsl {
+                let code = theme::hex(theme::depuis_tsl(neuf));
+                self.regler_materiau(nom, |x| *couleur_mat_mut(x, k) = code);
+                self.mat_couleur = Some((nom.to_string(), k, neuf));
+            }
+            if cx.champ(b, sub_id(id("mat-code"), k), "Code", coul(C::Texte), couleur_mat(m, k)) {
+                self.saisir(Champ::MatCode(k));
+            }
+        }
     }
 
     /// Objet que les modifieurs concernent : l'actif.
@@ -1552,6 +1942,11 @@ impl App {
                 }
                 let a = if axe < 3 { let mut u = [0.0; 3]; u[axe] = 1.0; u } else { vue };
                 t.revolution(RegleRevolution { axe: a, angle: if inverse { -angle } else { angle }, segments, fermer }, curseur)
+            }
+            Derniere::Projection { p, aspect } => {
+                let tout: Vec<usize> = (0..t.m.faces.len()).collect();
+                let faces = if t.sel.faces.is_empty() { tout } else { t.sel.faces.clone() };
+                t.projeter(&faces, p, aspect)
             }
             Derniere::Translation { .. } | Derniere::Rotation { .. } | Derniere::Echelle { .. } => unreachable!("posées plus haut"),
         }
@@ -2043,6 +2438,8 @@ impl App {
             (Champ::Nom, _) => return Some(objet?.nom.clone()),
             (Champ::Projet, _) => return Some(self.nom.clone()),
             (Champ::Couleur(i), _) => return Some(theme::hex(coul(theme::LIGNES[i].c))),
+            (Champ::MatNom, _) => return self.materiau_actif().map(|n| nom_mat(&n).to_string()),
+            (Champ::MatCode(k), _) => return self.materiau_actif().and_then(|n| self.projet.materiau(&n).map(|m| couleur_mat(m, k).to_string())),
             _ => return None,
         };
         Some(chiffres(v))
@@ -2223,6 +2620,21 @@ impl App {
             } else if p.cible == Champ::Projet {
                 self.nom = p.texte.trim().to_string();
                 self.a_sauver = true;
+            } else if p.cible == Champ::MatNom {
+                if let Some(n) = self.materiau_actif() {
+                    self.renommer_materiau(&n, &p.texte);
+                }
+            } else if let Champ::MatCode(k) = p.cible {
+                let Some(c) = theme::lire_hex(&p.texte) else {
+                    self.pave = Some(p);
+                    return self.dire("Code attendu : #rrggbb".into());
+                };
+                if let Some(n) = self.materiau_actif() {
+                    self.mat_saisie = false;
+                    self.regler_materiau(&n, |m| *couleur_mat_mut(m, k) = theme::hex(c));
+                    self.mat_saisie = false;
+                    self.mat_couleur = Some((n, k, theme::vers_tsl(c)));
+                }
             } else if let Champ::Couleur(i) = p.cible {
                 let Some(c) = theme::lire_hex(&p.texte) else {
                     self.pave = Some(p);
@@ -3095,9 +3507,13 @@ impl App {
                 self.panneau_uv(cx, corps);
             }
             Contenu::Scene => {
-                cx.tabs(id("onglets-scene"), onglets, &["Scène"], 0);
-                let mut b = cx.body(id("corps-scene"), corps, &self.scrolls);
-                self.panneau_scene(cx, &mut b);
+                self.onglet_scene = cx.tabs(id("onglets-scene"), onglets, &["Scène", "Matériaux"], self.onglet_scene);
+                let mut b = cx.body(sub_id(id("corps-scene"), self.onglet_scene), corps, &self.scrolls);
+                if self.onglet_scene == ONGLET_MATERIAUX {
+                    self.onglet_materiaux(cx, &mut b);
+                } else {
+                    self.panneau_scene(cx, &mut b);
+                }
                 cx.body_end(b, &mut self.scrolls);
             }
             Contenu::Modifieurs => {
@@ -3477,7 +3893,15 @@ impl App {
             A::AjouterEcrou => self.ouvrir_ajout(Prim::Ecrou),
             A::AjouterRondelle => self.ouvrir_ajout(Prim::Rondelle),
             A::AjouterTige => self.ouvrir_ajout(Prim::Tige),
+            A::ChoisirImage => self.choisir_image(),
             A::EditerUv => self.basculer(Contenu::Uv),
+            A::ProjeterVue => {
+                let (_, droite, haut, _) = self.repere();
+                self.projeter(uv::Projection::Vue { droite, haut });
+            }
+            A::ProjeterCube => self.projeter(uv::Projection::Cube),
+            A::ProjeterCylindre => self.projeter(uv::Projection::Cylindre { axe: 1 }),
+            A::ProjeterSphere => self.projeter(uv::Projection::Sphere { axe: 1 }),
             A::ModifBooleen => self.ajouter_modif("booleen"),
             A::ModifRepetition => self.ajouter_modif("repetition"),
             A::ToutChoisir => {
@@ -3600,6 +4024,7 @@ impl App {
                     cx.toggle(b, id("r-fermer"), "Fermer (souder)", fermer);
                 }
             }
+            Derniere::Projection { .. } => cx.paragraph(b, "L'axe se règle dans la vue UV."),
             Derniere::Proches { tolerance } => {
                 if cx.champ(b, id("r-tol"), "Tolérance", coul(C::Texte), &format!("{tolerance}")) {
                     self.saisir(Champ::Tolerance);
@@ -3758,6 +4183,10 @@ impl App {
             if !self.images_vues.insert(id.clone()) {
                 continue;
             }
+            if id == texture::DAMIER {
+                images.push((id, texture::damier()));
+                continue;
+            }
             let t = &self.projet.textures[&id];
             let nom = t.nom.clone();
             match texture::decoder(&t.octets) {
@@ -3768,7 +4197,7 @@ impl App {
                 Err(e) => self.dire(format!("Texture illisible : {nom} ({e})")),
             }
         }
-        let retraits: Vec<String> = self.images_vues.iter().filter(|id| !self.projet.textures.contains_key(*id)).cloned().collect();
+        let retraits: Vec<String> = self.images_vues.iter().filter(|id| *id != texture::DAMIER && !self.projet.textures.contains_key(*id)).cloned().collect();
         for id in &retraits {
             self.images_vues.remove(id);
         }
@@ -3823,13 +4252,18 @@ impl App {
             self.connus.remove(c);
         }
         let mut retraits = retraits;
-        // Le modèle montre la texture de la vue UV
-        let image_uv = if self.contenu == Contenu::Uv && self.shell.end.open { self.faces_uv().1 } else { None };
+        // Le modèle montre la texture de la vue UV, ou le damier s'il n'en a pas
+        let image_uv = if self.contenu == Contenu::Uv && self.shell.end.open && self.travail.is_some() { Some(self.faces_uv().1.unwrap_or(texture::DAMIER.to_string())) } else { None };
         if self.uv.texture != image_uv {
             self.uv.texture = image_uv.clone();
             self.version_geo = None;
         }
         besoin.extend(image_uv);
+        // Vignette de l'onglet Matériaux
+        if self.contenu == Contenu::Scene && self.onglet_scene == ONGLET_MATERIAUX {
+            let i = self.materiau_actif().and_then(|n| self.projet.materiau(&n)?.texture.clone());
+            besoin.extend(i.filter(|i| self.projet.textures.contains_key(i)));
+        }
         let geo_vue = self.vue_geo(&mut objets, &mut ajouts, &mut retraits);
         let (images, images_retraits) = self.images_a_charger(besoin);
         Scene {
@@ -3879,7 +4313,8 @@ impl App {
         let m = &t.m;
         let choisies: HashSet<usize> = if t.filtres[2] { t.sel.faces.iter().copied().collect() } else { HashSet::new() };
         // Seules les faces de cette image la portent
-        let porte: Vec<bool> = m.faces.iter().map(|f| image.is_none() || f.s.first().and_then(|i| t.proprio.get(*i)).and_then(|k| self.projet.texture_de(&self.projet.objets[*k])) == image.as_ref()).collect();
+        let cherchee = image.as_ref().filter(|i| *i != texture::DAMIER);
+        let porte: Vec<bool> = m.faces.iter().map(|f| image.is_none() || f.s.first().and_then(|i| t.proprio.get(*i)).and_then(|k| self.projet.texture_de(&self.projet.objets[*k])) == cherchee).collect();
         for (cle, garde) in [(CLE_FACES, false), (CLE_CHOISIES, true)] {
             ajouts.push((cle, Tampons { faces: vue::faces_si_uv(m, |k| choisies.contains(&k) == garde, |k| porte[k]), bandes: Vec::new(), bandes_idx: Vec::new(), fil: Vec::new() }));
         }
@@ -4532,6 +4967,7 @@ mod tests {
             b.app.contenu = Contenu::Modifieurs;
             b.images(3);
             b.app.contenu = Contenu::Scene;
+            b.app.onglet_scene = onglet % 2;
             b.images(3);
         }
         b.app.contenu = Contenu::Fichier;
@@ -5595,6 +6031,282 @@ mod tests {
         b.app.travail.as_ref().unwrap().m.faces[0].uv[0]
     }
 
+    /// Sphère sans UV, en Géométrie.
+    fn banc_sans_uv() -> Banc {
+        let mut b = Banc::pret();
+        let mut p = Projet::neuf();
+        p.objets[0].maillage = Arc::new(Maillage::sphere_uv(1.0, 16, 8));
+        b.app.remplacer(p, "");
+        b.app.choisir(Some(0));
+        b.app.entrer_geometrie();
+        b.app.travail.as_mut().unwrap().aucun(None);
+        b.images(1);
+        b
+    }
+
+    fn banc_mat() -> Banc {
+        let mut b = Banc::pret();
+        b.app.ouvrir("essai.gda", GDA.as_bytes());
+        b.app.choisir(Some(0));
+        b.app.contenu = Contenu::Scene;
+        b.app.onglet_scene = ONGLET_MATERIAUX;
+        b.app.shell.end.open = true;
+        b.images(60);
+        b
+    }
+
+    fn png_2_sur_1() -> Vec<u8> {
+        crate::texture::tests::png_de(4, 2, |x, _| [x as u8 * 60, 200, 100, 255])
+    }
+
+    #[test]
+    fn toucher_la_bibliotheque_applique_le_materiau_et_s_annule() {
+        let mut b = banc_mat();
+        let avant = b.app.projet.objets[0].materiau.clone();
+        b.app.nouveau_materiau(None);
+        let nom = b.app.projet.objets[0].materiau.clone();
+        assert_ne!(nom, avant);
+        assert_eq!(nom, "materiau");
+        b.images(2);
+        let k = b.app.projet.materiaux.iter().position(|x| x.0 == avant).unwrap();
+        // La ligne peut sortir du cadre : le corps se fait défiler, puis on touche
+        b.app.scrolls.insert(sub_id(id("corps-scene"), ONGLET_MATERIAUX), (1e6, 1e7));
+        b.images(2);
+        let z = b.ui.zone(sub_id(id("mat-ligne"), k)).expect("ligne");
+        b.appui(z.cx(), z.cy());
+        assert_eq!(b.app.projet.objets[0].materiau, avant);
+        b.app.annuler();
+        assert_eq!(b.app.projet.objets[0].materiau, nom);
+    }
+
+    #[test]
+    fn renommer_suit_les_objets_et_refuse_un_nom_pris() {
+        let mut b = banc_mat();
+        let n = b.app.nouveau_materiau(None);
+        b.app.renommer_materiau(&n, "  acier ");
+        assert_eq!(b.app.projet.objets[0].materiau, "acier");
+        assert!(b.app.projet.materiau(&n).is_none());
+        b.app.nouveau_materiau(None);
+        let e = b.app.projet.objets[0].materiau.clone();
+        b.app.renommer_materiau(&e, "acier");
+        assert_eq!(b.app.projet.objets[0].materiau, e);
+        b.app.renommer_materiau(DEFAUT, "x");
+        assert!(b.app.projet.materiau(DEFAUT).is_some());
+    }
+
+    #[test]
+    fn supprimer_rend_le_defaut_et_le_defaut_reste() {
+        let mut b = banc_mat();
+        let n = b.app.nouveau_materiau(None);
+        b.app.supprimer_materiau(&n);
+        assert_eq!(b.app.projet.objets[0].materiau, DEFAUT);
+        assert!(b.app.projet.materiau(&n).is_none());
+        b.app.supprimer_materiau(DEFAUT);
+        assert!(b.app.projet.materiau(DEFAUT).is_some());
+        b.app.annuler();
+        assert!(b.app.projet.materiau(&n).is_some());
+    }
+
+    #[test]
+    fn dupliquer_copie_les_reglages_sous_un_nom_libre() {
+        let mut b = banc_mat();
+        let n = b.app.nouveau_materiau(None);
+        b.app.regler_materiau(&n, |m| m.opacite = 0.25);
+        b.app.mat_saisie = false;
+        let c = b.app.nouveau_materiau(Some(&n));
+        assert_eq!(c, "materiau 2");
+        assert_eq!(b.app.projet.materiau(&c).unwrap().opacite, 0.25);
+    }
+
+    #[test]
+    fn glisser_un_reglage_ne_fait_qu_une_etape_et_montre_le_rendu_en_jeu() {
+        let mut b = banc_mat();
+        b.app.nouveau_materiau(None);
+        b.app.rendu = Rendu::Solide;
+        b.images(2);
+        let z = b.ui.zone(id("mat-opacite")).expect("curseur");
+        let m = (z.x + z.w * 0.3, z.cy());
+        assert_eq!(b.glisser((z.x + z.w * 0.8, z.cy()), m), 1);
+        let n = b.app.projet.objets[0].materiau.clone();
+        assert!(b.app.projet.materiau(&n).unwrap().opacite < 0.6);
+        assert!(b.app.rendu == Rendu::Jeu);
+    }
+
+    #[test]
+    fn une_couleur_s_ouvre_et_son_code_se_saisit() {
+        let mut b = banc_mat();
+        b.app.nouveau_materiau(None);
+        b.images(2);
+        let z = b.ui.zone(sub_id(id("mat-couleur"), 0)).expect("ligne");
+        b.appui(z.cx(), z.cy());
+        b.images(2);
+        assert!(b.ui.zone(sub_id(id("mat-code"), 0)).is_some());
+        b.app.saisir(Champ::MatCode(0));
+        b.app.pave.as_mut().unwrap().texte = "#102030".into();
+        b.app.valider_pave();
+        let n = b.app.projet.objets[0].materiau.clone();
+        assert_eq!(b.app.projet.materiau(&n).unwrap().couleur, "#102030");
+    }
+
+    #[test]
+    fn le_bouton_demande_une_image_et_le_defaut_cree_un_materiau() {
+        let mut b = banc_mat();
+        b.app.projet.objets[0].materiau = DEFAUT.to_string();
+        b.images(2);
+        let z = b.ui.zone(id("mat-choisir")).expect("bouton");
+        b.appui(z.cx(), z.cy());
+        assert_eq!(b.app.prendre_selecteur(), Some(Selecteur::Image));
+        b.app.recevoir_image("Pierre 1.png", &png_2_sur_1());
+        let n = b.app.projet.objets[0].materiau.clone();
+        assert_eq!(n, "Pierre 1");
+        let m = b.app.projet.materiau(&n).unwrap();
+        assert_eq!(m.couleur, "#ffffff");
+        assert!(m.texture.is_some());
+        assert!(b.app.projet.materiau(DEFAUT).unwrap().texture.is_none());
+        assert!(b.app.rendu == Rendu::Jeu);
+        // Gardée dans le projet, et la vignette se charge
+        assert!(b.app.projet.ecrire().contains("Pierre 1.png"));
+        let s = b.images(2);
+        assert!(s.objets[0].texture.is_some());
+        assert!(b.dl.images.iter().any(|i| Some(i) == b.app.projet.materiau(&n).unwrap().texture.as_ref()));
+        b.app.annuler();
+        assert_ne!(b.app.projet.objets[0].materiau, "Pierre 1");
+    }
+
+    #[test]
+    fn retirer_l_image_en_geometrie_se_voit_aussitot() {
+        let mut b = banc_sans_uv();
+        b.app.ouvrir_uv();
+        b.images(40);
+        b.app.choisir_image();
+        b.app.recevoir_image("mur.png", &png_2_sur_1());
+        let s = b.images(3);
+        assert!(s.objets.iter().any(|o| o.tampon == CLE_FACES && o.texture.is_some()));
+        b.app.contenu = Contenu::Scene;
+        b.app.onglet_scene = ONGLET_MATERIAUX;
+        b.images(40);
+        let z = b.ui.zone(sub_id(id("mat-image"), 1)).expect("Retirer");
+        b.appui(z.cx(), z.cy());
+        assert!(b.app.projet.materiau("mur").unwrap().texture.is_none());
+        let s = b.images(3);
+        assert!(!s.objets.iter().any(|o| o.tampon == CLE_FACES && o.texture.is_some()));
+    }
+
+    #[test]
+    fn afficher_le_panneau_ne_change_pas_un_materiau_hors_bornes() {
+        let mut b = banc_mat();
+        let n = b.app.nouveau_materiau(None);
+        b.app.regler_materiau(&n, |m| {
+            m.refraction = 0.5;
+            m.brillance = 2000.0;
+        });
+        b.app.mat_saisie = false;
+        b.app.a_sauver = false;
+        let e = b.app.histoire.annuler.len();
+        b.images(4);
+        assert_eq!(b.app.histoire.annuler.len(), e);
+        let m = b.app.projet.materiau(&n).unwrap();
+        assert_eq!((m.refraction, m.brillance), (0.5, 2000.0));
+    }
+
+    #[test]
+    fn une_image_illisible_ne_change_rien() {
+        let mut b = banc_mat();
+        let n = b.app.nouveau_materiau(None);
+        b.app.image_pour = Some(n.clone());
+        let e = b.app.histoire.annuler.len();
+        b.app.recevoir_image("x.png", b"pas une image");
+        assert!(b.app.projet.materiau(&n).unwrap().texture.is_none());
+        assert_eq!(b.app.histoire.annuler.len(), e);
+        assert!(b.app.image_pour.is_none());
+        // Sans demande en cours, un document arrivé n'a pas d'effet
+        b.app.recevoir_image("y.png", &png_2_sur_1());
+        assert!(b.app.projet.textures.is_empty());
+    }
+
+    #[test]
+    fn l_image_arrive_dans_la_vue_uv_et_sa_forme_guide_la_projection() {
+        let mut b = banc_sans_uv();
+        b.app.ouvrir_uv();
+        b.images(40);
+        let z = b.ui.zone(sub_id(id("uv-mode"), 4)).expect("bouton Image");
+        b.appui(z.cx(), z.cy());
+        assert_eq!(b.app.prendre_selecteur(), Some(Selecteur::Image));
+        b.app.recevoir_image("mur.png", &png_2_sur_1());
+        assert_eq!(b.app.projet.objets[0].materiau, "mur");
+        b.app.agir(crate::actions::Action::ProjeterCube);
+        assert!(matches!(b.app.derniere, Some(Derniere::Projection { aspect: Aspect { l, h }, .. }) if l == 1.0 && h == 0.5));
+        let s = b.images(3);
+        let id_image = b.app.projet.materiau("mur").unwrap().texture.clone();
+        assert!(s.objets.iter().any(|o| o.tampon == CLE_FACES && o.texture == id_image));
+    }
+
+    #[test]
+    fn projeter_donne_des_uv_ouvre_la_vue_et_s_annule() {
+        let mut b = banc_sans_uv();
+        assert!(b.app.faces_uv().0.is_empty());
+        let n = b.app.histoire.annuler.len();
+        b.app.agir(crate::actions::Action::ProjeterSphere);
+        assert_eq!(b.app.histoire.annuler.len(), n + 1);
+        assert!(b.app.contenu == Contenu::Uv && b.app.shell.end.open);
+        let f = b.app.travail.as_ref().unwrap().m.faces.len();
+        assert_eq!(b.app.faces_uv().0.len(), f);
+        // Le panneau se dessine, et le modèle montre le damier
+        let s = b.images(40);
+        assert!(s.objets.iter().any(|o| o.tampon == CLE_FACES && o.texture.as_deref() == Some(texture::DAMIER)));
+        assert!(b.dl.images.iter().any(|i| i == texture::DAMIER));
+        assert!(s.images.is_empty() || s.images.iter().all(|i| i.0 == texture::DAMIER));
+        b.app.annuler();
+        assert!(b.app.faces_uv().0.is_empty());
+    }
+
+    #[test]
+    fn changer_l_axe_rejoue_sans_nouvelle_etape() {
+        let mut b = banc_sans_uv();
+        b.app.agir(crate::actions::Action::ProjeterCylindre);
+        b.images(40);
+        let (n, avant) = (b.app.histoire.annuler.len(), b.app.travail.as_ref().unwrap().m.faces[3].uv.clone());
+        let z = b.ui.zone(sub_id(id("uv-axe"), 2)).expect("axes proposés");
+        b.appui(z.cx(), z.cy());
+        assert_eq!(b.app.histoire.annuler.len(), n);
+        assert!(matches!(b.app.derniere, Some(Derniere::Projection { p: uv::Projection::Cylindre { axe: 2 }, .. })));
+        assert_ne!(b.app.travail.as_ref().unwrap().m.faces[3].uv, avant);
+        // Déplacer ensuite met fin au réglage de la projection
+        b.images(2);
+        let a = sur_uv(&b, b.app.travail.as_ref().unwrap().m.faces[3].uv[0]);
+        b.glisser(a, (a.0 + 40.0, a.1));
+        b.images(2);
+        assert!(b.app.derniere.is_none() && b.ui.zone(sub_id(id("uv-axe"), 2)).is_none());
+    }
+
+    #[test]
+    fn seules_les_faces_choisies_se_projettent() {
+        let mut b = banc_sans_uv();
+        let t = b.app.travail.as_mut().unwrap();
+        t.sel.ajouter(crate::geometrie::El::F(5));
+        b.app.agir(crate::actions::Action::ProjeterCube);
+        let m = &b.app.travail.as_ref().unwrap().m;
+        assert!(uv::complete(m, 5) && !uv::complete(m, 4));
+    }
+
+    #[test]
+    fn une_projection_suit_la_forme_de_l_image() {
+        let mut b = banc_sans_uv();
+        // L'image du modèle est lue même si la vue ne l'a pas encore montrée
+        let octets = include_bytes!("../tests/donnees/cube-texture.glb");
+        let mut c = Banc::pret();
+        c.app.ouvrir("cube-texture.glb", octets);
+        c.app.choisir(Some(0));
+        c.app.entrer_geometrie();
+        c.images(1);
+        c.app.agir(crate::actions::Action::ProjeterCube);
+        assert!(matches!(c.app.derniere, Some(Derniere::Projection { .. })));
+        assert!(!c.app.uv.aspects.is_empty());
+        // Sans texture : tuile carrée
+        b.app.agir(crate::actions::Action::ProjeterCube);
+        assert!(matches!(b.app.derniere, Some(Derniere::Projection { aspect: Aspect::CARRE, .. })));
+    }
+
     #[test]
     fn la_vue_uv_prend_la_moitie_de_l_ecran_et_quitte_la_geometrie_avec_elle() {
         let mut b = banc_uv();
@@ -5733,7 +6445,7 @@ mod tests {
     }
 
     #[test]
-    fn sans_uv_la_vue_le_dit_sans_erreur() {
+    fn sans_uv_la_vue_propose_les_projections() {
         let mut b = Banc::pret();
         b.app.choisir(Some(0));
         b.app.entrer_geometrie();

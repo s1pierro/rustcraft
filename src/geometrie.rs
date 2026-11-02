@@ -392,6 +392,24 @@ impl Travail {
         Travail { m: Arc::new(m), proprio, sel, edites: l, filtres, sale: false, version: 0 }
     }
 
+    /// Projette les faces données : celles qui n'avaient pas d'UV en reçoivent.
+    pub fn projeter(&mut self, faces: &[usize], p: crate::uv::Projection, a: crate::uv::Aspect) -> Bilan {
+        if faces.is_empty() {
+            return Err("Aucune face à projeter".into());
+        }
+        let l = crate::uv::projeter(&self.m, faces, p, a);
+        let m = self.mm();
+        for &f in faces {
+            let n = m.faces[f].s.len();
+            m.faces[f].uv.resize(n, [0.0; 2]);
+        }
+        for ((f, k), uv) in l {
+            m.faces[f].uv[k] = uv;
+        }
+        self.maj();
+        Ok(Some(format!("{} face{} projetée{}", faces.len(), pl(faces.len()), pl(faces.len()))))
+    }
+
     /// Nouvelles coordonnées des coins donnés. Toucher aux UV ne change pas la sélection.
     pub fn poser_uv(&mut self, valeurs: &[(crate::uv::Coin, crate::uv::Uv)]) {
         let m = self.mm();

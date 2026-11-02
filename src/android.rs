@@ -122,7 +122,8 @@ struct Shared {
     dp: f32,
     /// Fichier reçu d'une autre application, à ouvrir.
     /// Noms et contenus, et s'ils s'ajoutent à la scène au lieu de la remplacer.
-    fichier: Option<(Vec<(String, Vec<u8>)>, bool)>,
+    /// Documents reçus et la demande qui les a appelés (`Selecteur`, 0 : Ouvrir avec).
+    fichier: Option<(Vec<(String, Vec<u8>)>, i32)>,
     /// Sélection multiple en cours de réception.
     lot: Vec<(String, Vec<u8>)>,
     /// Dossier privé de l'application.
@@ -218,8 +219,12 @@ fn render_loop() -> Result<(), String> {
             continue;
         };
         render.set_dp(dp);
-        if let Some((fichiers, ajout)) = fichier {
-            if ajout {
+        if let Some((fichiers, demande)) = fichier {
+            if demande == Selecteur::Image as i32 {
+                if let Some((nom, contenu)) = fichiers.first() {
+                    app.recevoir_image(nom, contenu);
+                }
+            } else if demande == Selecteur::Importer as i32 {
                 app.importer_fichiers(fichiers);
             } else if let Some((nom, contenu)) = fichiers.first() {
                 app.ouvrir(nom, contenu);
@@ -415,7 +420,7 @@ unsafe fn nom_document(env: Jni, resolver: Obj, uri: Obj) -> String {
 }
 
 /// Fichier transmis à l'activité (Ouvrir avec, Partager), s'il y en a un.
-unsafe fn fichier_recu(activity: *mut ANativeActivity) -> Option<(Vec<(String, Vec<u8>)>, bool)> {
+unsafe fn fichier_recu(activity: *mut ANativeActivity) -> Option<(Vec<(String, Vec<u8>)>, i32)> {
     let (env, moi) = ((*activity).env as Jni, (*activity).clazz);
     let intent = objet0(env, moi, c"getIntent", c"()Landroid/content/Intent;")?;
     let uri = objet0(env, intent, c"getData", c"()Landroid/net/Uri;").or_else(|| {
@@ -424,7 +429,7 @@ unsafe fn fichier_recu(activity: *mut ANativeActivity) -> Option<(Vec<(String, V
         let r = f(env, intent, m, chaine(env, c"android.intent.extra.STREAM"));
         if exception(env) || r.is_null() { None } else { Some(r) }
     })?;
-    Some((vec![lire_uri(env, moi, uri)?], false))
+    Some((vec![lire_uri(env, moi, uri)?], 0))
 }
 
 /// Ouvre le document désigné et le lit en entier.
@@ -488,7 +493,7 @@ unsafe extern "C" fn fichier_choisi(env: Jni, moi: Obj, uri: Obj, demande: i32, 
     let mut s = SHARED.lock().unwrap();
     s.lot.push(f);
     if reste == 0 {
-        s.fichier = Some((std::mem::take(&mut s.lot), demande == Selecteur::Importer as i32));
+        s.fichier = Some((std::mem::take(&mut s.lot), demande));
         WAKE.notify_all();
     }
 }

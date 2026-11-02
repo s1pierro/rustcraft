@@ -69,6 +69,11 @@ pub enum Action {
     SommetsAretes,
     SommetsFaces,
     EditerUv,
+    ProjeterVue,
+    ProjeterCube,
+    ProjeterCylindre,
+    ProjeterSphere,
+    ChoisirImage,
 }
 
 /// Panneau où figure l'opération.
@@ -225,7 +230,8 @@ impl Contexte {
             Inverser | Separer | SupprimerFaces | AucuneFace | FacesSommets | FacesAretes => self.geo && nf > 0,
             Trianguler => self.geo && self.grande_face,
             Boucle => self.geo && self.anneau,
-            EditerUv => self.geo,
+            ChoisirImage => self.actif,
+            EditerUv | ProjeterVue | ProjeterCube | ProjeterCylindre | ProjeterSphere => self.geo,
             Dissoudre => self.geo && matches!(self.dissolution, Some(Ok(()))),
             Revolution => self.geo && n + na > 0,
             Lies => self.geo && self.actif,
@@ -770,6 +776,46 @@ pub const CATALOGUE: &[Op] = &[
         aide: "ouvrir ou fermer la vue UV à côté du modèle : les faces choisies y apparaissent, toutes si aucune ne l’est ; le modèle montre la texture et suit chaque déplacement",
         barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "UV", defaut: true }),
     },
+    Op {
+        action: Action::ProjeterVue,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Projeter : vue",
+        aide: "à plat, tel que l’écran montre le modèle : les faces choisies, toutes si aucune ne l’est",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Vue", defaut: false }),
+    },
+    Op {
+        action: Action::ProjeterCube,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Projeter : cube",
+        aide: "six côtés, chaque face allant à celui qu’elle regarde : bâtiments, caisses, formes anguleuses",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Cube", defaut: false }),
+    },
+    Op {
+        action: Action::ProjeterCylindre,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Projeter : cylindre",
+        aide: "le corps déroulé autour d’un axe, les faces du dessus et du dessous en disques : roues, troncs, membres",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Cylindre", defaut: false }),
+    },
+    Op {
+        action: Action::ProjeterSphere,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Projeter : sphère",
+        aide: "longitude et latitude autour d’un axe : têtes, planètes, formes rondes",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Sphère", defaut: false }),
+    },
+    Op {
+        action: Action::ChoisirImage,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Choisir une image…",
+        aide: "donner une image PNG ou JPEG au matériau de l’objet actif ; le matériau par défaut, partagé, n’en porte pas : un nouveau matériau est créé",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Image", defaut: false }),
+    },
 ];
 
 #[cfg(test)]
@@ -782,7 +828,7 @@ mod tests {
         for (k, o) in CATALOGUE.iter().enumerate() {
             assert_eq!(o.action as usize, k, "{:?}", o.action);
         }
-        assert_eq!(CATALOGUE.len(), Action::EditerUv as usize + 1);
+        assert_eq!(CATALOGUE.len(), Action::ChoisirImage as usize + 1);
     }
 
     #[test]

@@ -22,6 +22,25 @@ pub struct Image {
     pub rgba: Vec<u8>,
 }
 
+/// Identifiant du damier : n'est le contenu d'aucune image du projet.
+pub const DAMIER: &str = "damier";
+
+/// Damier de huit cases par côté : il montre l'étirement d'une projection sans texture.
+pub fn damier() -> Image {
+    const COTE: u32 = 256;
+    let mut rgba = Vec::with_capacity((COTE * COTE * 4) as usize);
+    for y in 0..COTE {
+        for x in 0..COTE {
+            let (cx, cy) = (x / 32, y / 32);
+            let v = if (cx + cy) % 2 == 0 { 215 } else { 120 };
+            // Un quart de tuile plus chaud : le haut gauche se reconnaît sur le modèle
+            let c = if cx < 4 && cy < 4 { [v, v - 40, v - 70] } else { [v, v, v] };
+            rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    Image { l: COTE, h: COTE, rgba }
+}
+
 /// Identifiant tiré du contenu (FNV-1a) : une même image n'est gardée qu'une fois.
 pub fn identifiant(octets: &[u8]) -> String {
     let h = octets.iter().fold(0xcbf29ce484222325u64, |h, o| (h ^ *o as u64).wrapping_mul(0x100000001b3));

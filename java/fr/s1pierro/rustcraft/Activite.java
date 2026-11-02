@@ -14,6 +14,8 @@ import android.widget.Toast;
 public class Activite extends NativeActivity {
     /** Selecteur::Importer : un fichier 3D s'accompagne de son .mtl et de ses images. */
     private static final int IMPORTER = 2;
+    /** Selecteur::Image : une seule image, pour un matériau. */
+    private static final int IMAGE = 3;
 
     /** Appelée depuis le fil de rendu. La demande revient avec le résultat. */
     public void choisir(final int demande) {
@@ -22,7 +24,8 @@ public class Activite extends NativeActivity {
             public void run() {
                 Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
-                i.setType("*/*"); // .gda et .obj n'ont pas de type reconnu partout
+                // .gda et .obj n'ont pas de type reconnu partout
+                i.setType(demande == IMAGE ? "image/*" : "*/*");
                 i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, demande == IMPORTER);
                 try {
                     startActivityForResult(i, demande);
