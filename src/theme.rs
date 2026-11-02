@@ -28,6 +28,7 @@ pub enum C {
     Envers,
     Arete,
     Sommet,
+    Couture,
     FaceChoisie,
     AreteChoisie,
     SommetChoisi,
@@ -61,7 +62,7 @@ const fn l(cle: &'static str, c: C, libelle: &'static str, groupe: &'static str,
     Ligne { cle, c, libelle, groupe, defaut }
 }
 
-pub const NB: usize = 30;
+pub const NB: usize = 31;
 pub const LIGNES: [Ligne; NB] = [
     l("accent", C::Accent, "Accent", "Interface", Hex(0x2a1fd1)),
     l("relief", C::Relief, "Relief", "Interface", Hex(0xff5a36)),
@@ -84,6 +85,7 @@ pub const LIGNES: [Ligne; NB] = [
     l("envers", C::Envers, "Envers des faces", "Géométrie", De(C::Relief)),
     l("arete", C::Arete, "Arêtes", "Géométrie", De(C::Texte)),
     l("sommet", C::Sommet, "Sommets", "Géométrie", De(C::Texte)),
+    l("couture", C::Couture, "Coutures", "Géométrie", Hex(0xe0392b)),
     l("face-choisie", C::FaceChoisie, "Faces", "Sélection (géométrie)", VersBlanc(C::Accent, 0.35)),
     l("arete-choisie", C::AreteChoisie, "Arêtes", "Sélection (géométrie)", De(C::Accent)),
     l("sommet-choisi", C::SommetChoisi, "Sommets", "Sélection (géométrie)", De(C::Accent)),

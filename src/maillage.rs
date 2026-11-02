@@ -63,6 +63,9 @@ pub struct Maillage {
     pub faces: Vec<Face>,
     /// Arêtes libres : sans face, lignes « l » de l'OBJ.
     pub fils: Vec<Arete>,
+    /// Arêtes où le dépliage coupe. Une arête disparue reste sans effet : seules
+    /// `coutures_valides` comptent.
+    pub coutures: Vec<Arete>,
 }
 
 /// Où placer le sommet issu d'une fusion.
@@ -213,7 +216,35 @@ fn faces_de(listes: Vec<Vec<usize>>) -> Vec<Face> {
 
 impl Maillage {
     pub fn new(sommets: Vec<P3>, faces: Vec<Face>, fils: Vec<Arete>) -> Maillage {
-        Maillage { sommets, faces, fils }
+        Maillage { sommets, faces, fils, coutures: Vec::new() }
+    }
+
+    #[cfg(test)]
+    pub fn supprimer_faces_pour_test(&mut self, faces: &[usize]) {
+        let mut k = 0;
+        self.faces.retain(|_| {
+            k += 1;
+            !faces.contains(&(k - 1))
+        });
+    }
+
+    /// Coutures qui sont encore des arêtes de face, chacune une fois.
+    pub fn coutures_valides(&self) -> Vec<Arete> {
+        let voulues: HashSet<Cle> = self.coutures.iter().map(|a| cle(a[0], a[1])).collect();
+        if voulues.is_empty() {
+            return Vec::new();
+        }
+        let mut vues = HashSet::new();
+        let mut l = Vec::new();
+        for f in &self.faces {
+            for k in 0..f.s.len() {
+                let c = cle(f.s[k], f.s[(k + 1) % f.s.len()]);
+                if voulues.contains(&c) && vues.insert(c) {
+                    l.push([c.0, c.1]);
+                }
+            }
+        }
+        l
     }
 
     // ----- Données des projets ---------------------------------------------
@@ -239,6 +270,11 @@ impl Maillage {
         if self.faces.iter().any(|f| !f.uv.is_empty()) {
             let l = self.faces.iter().map(|f| J::Liste(f.uv.iter().flatten().map(|c| J::Num(arrondi(*c as f64 * 1e5) / 1e5)).collect())).collect();
             d.push(("uv".to_string(), J::Liste(l)));
+        }
+        // Comme les UV, à côté de ce que GDA lit
+        let c = self.coutures_valides();
+        if !c.is_empty() {
+            d.push(("c".to_string(), J::Liste(c.iter().map(|a| J::Liste(vec![J::Num(a[0] as f64), J::Num(a[1] as f64)])).collect())));
         }
         J::Objet(d)
     }
@@ -285,7 +321,10 @@ impl Maillage {
                 fils.push([i as usize, j as usize]);
             }
         }
-        Some(Maillage { sommets, faces, fils })
+        // Des coutures illisibles ne coûtent que les coutures
+        let n = sommets.len();
+        let coutures = d.get("c").and_then(J::liste).map_or(Vec::new(), |l| l.iter().filter_map(|a| a.nombres::<2>()).map(|[i, j]| [i as usize, j as usize]).filter(|a| a[0] < n && a[1] < n).collect());
+        Some(Maillage { sommets, faces, fils, coutures })
     }
 
     /// Arêtes libres mises en ordre : sans doublon, ni boucle sur un sommet, ni
@@ -686,6 +725,10 @@ impl Maillage {
         for a in &mut self.fils {
             *a = [n[a[0]] as usize, n[a[1]] as usize];
         }
+        self.coutures.retain(|a| !retires.contains(&a[0]) && !retires.contains(&a[1]));
+        for a in &mut self.coutures {
+            *a = [n[a[0]] as usize, n[a[1]] as usize];
+        }
         n
     }
 
@@ -735,7 +778,7 @@ impl Maillage {
             recoller(f, &m);
         }
         self.faces.retain(|f| distincts(&f.s) >= 3);
-        for a in &mut self.fils {
+        for a in self.fils.iter_mut().chain(&mut self.coutures) {
             *a = [vers[a[0]], vers[a[1]]];
         }
         self.nettoyer_fils();
@@ -1080,6 +1123,15 @@ impl Maillage {
             }
         }
         self.fils = fils;
+        self.coutures = self.coutures.iter().flat_map(|&[a, b]| match nouveaux.get(&cle(a, b)) {
+            None => vec![[a, b]],
+            Some(l) => {
+                let mut c = vec![a.min(b)];
+                c.extend_from_slice(l);
+                c.push(a.max(b));
+                c.windows(2).map(|w| [w[0], w[1]]).collect()
+            }
+        }).collect();
         nouveaux
     }
 
@@ -1250,6 +1302,16 @@ impl Maillage {
             faces.push(Face { s: t, m: f.m, uv });
         }
         self.faces = faces;
+        let coutures = self.coutures.iter().flat_map(|&[a, b]| match depuis(a, b) {
+            None => vec![[a, b]],
+            Some(l) => {
+                let mut c = vec![a];
+                c.extend(l);
+                c.push(b);
+                c.windows(2).map(|w| [w[0], w[1]]).collect()
+            }
+        }).collect();
+        self.coutures = coutures;
         (aretes, table)
     }
 
@@ -1335,7 +1397,7 @@ impl Maillage {
             recoller(f, &m);
         }
         self.faces.retain(|f| distincts(&f.s) >= 3);
-        for a in &mut self.fils {
+        for a in self.fils.iter_mut().chain(&mut self.coutures) {
             *a = [n[a[0]], n[a[1]]];
         }
         self.nettoyer_fils()
@@ -1443,6 +1505,9 @@ impl Maillage {
             }
             for a in &m.fils {
                 r.fils.push([a[0] + base, a[1] + base]);
+            }
+            for a in &m.coutures {
+                r.coutures.push([a[0] + base, a[1] + base]);
             }
         }
         r
@@ -2553,6 +2618,23 @@ mod tests_uv {
         assert!(obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").faces[0].uv.is_empty());
         // Un indice hors liste : la face reste, sans UV
         assert!(obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nf 1/1 2/1 3/9\n").faces[0].uv.is_empty());
+    }
+
+    #[test]
+    fn les_coutures_suivent_les_sommets_renumerotes() {
+        let mut m = Maillage::boite(1.0, 1.0, 1.0);
+        let a = m.aretes();
+        m.coutures = a.clone();
+        let x = m.sommets.len() - 1;
+        m.supprimer_sommets(&[0]);
+        assert!(m.coutures.iter().flatten().all(|i| *i < x));
+        let v = m.coutures_valides();
+        assert!(!v.is_empty() && v.len() < a.len());
+        let mut d = Maillage::depuis_donnees(&m.vers_donnees()).unwrap();
+        assert_eq!(d.coutures_valides().len(), v.len());
+        // Une arête disparue ne compte plus, et un fichier abîmé ne coûte que ses coutures
+        d.faces.clear();
+        assert!(d.coutures_valides().is_empty());
     }
 
     #[test]

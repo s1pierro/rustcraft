@@ -148,6 +148,8 @@ pub struct GeoTampons {
     pub choisis: Vec<f32>,
     /// Bandes : position, autre bout, côté.
     pub bandes: Vec<f32>,
+    /// Bandes des coutures.
+    pub coutures: Vec<f32>,
 }
 
 pub struct GeoVue {
@@ -163,6 +165,7 @@ pub struct CouleursVue {
     pub grille: [f32; 3],
     pub axes: [[f32; 3]; 3],
     pub arete: [f32; 3],
+    pub couture: [f32; 3],
     pub sommet: [f32; 3],
     pub arete_choisie: [f32; 3],
     pub sommet_choisi: [f32; 3],
@@ -178,6 +181,7 @@ impl CouleursVue {
             grille: f(C::Grille),
             axes: COUL_AXES.map(f),
             arete: f(C::Arete),
+            couture: f(C::Couture),
             sommet: f(C::Sommet),
             arete_choisie: f(C::AreteChoisie),
             sommet_choisi: f(C::SommetChoisi),
@@ -227,6 +231,9 @@ pub enum Derniere {
     Echelle { s: P3, pivot: P3 },
     /// Faces cibles relues à chaque rejeu : la sélection n'a pas changé.
     Projection { p: uv::Projection, aspect: Aspect },
+    /// Comme la projection : les faces de la vue UV, relues à chaque rejeu.
+    MiseEnPage { page: uv::Page, aspect: Aspect },
+    Depliage { page: uv::Page },
 }
 
 impl Derniere {
@@ -258,6 +265,8 @@ impl Derniere {
             Derniere::Rotation { .. } => "Rotation",
             Derniere::Echelle { .. } => "Échelle",
             Derniere::Projection { .. } => "Projection UV",
+            Derniere::MiseEnPage { .. } => "Mise en page UV",
+            Derniere::Depliage { .. } => "Dépliage UV",
         }
     }
 }
@@ -561,11 +570,12 @@ struct EditeurUv {
     aspects: HashMap<String, Aspect>,
     /// Texture que le modèle montre.
     texture: Option<String>,
+    page: uv::Page,
 }
 
 impl Default for EditeurUv {
     fn default() -> EditeurUv {
-        EditeurUv { sel: HashSet::new(), ilots: false, lies: true, outil: OutilUv::Deplacer, axes: [true; 2], cadre: None, vu: [0.0, 0.0, 1.0], aspect: Aspect::CARRE, prise: None, aspects: HashMap::new(), texture: None }
+        EditeurUv { page: uv::Page::DEFAUT, sel: HashSet::new(), ilots: false, lies: true, outil: OutilUv::Deplacer, axes: [true; 2], cadre: None, vu: [0.0, 0.0, 1.0], aspect: Aspect::CARRE, prise: None, aspects: HashMap::new(), texture: None }
     }
 }
 
@@ -975,7 +985,8 @@ impl App {
     fn panneau_uv(&mut self, cx: &mut Cx, corps: Rect) {
         let d = cx.dp;
         let avec_axe = matches!(self.derniere, Some(Derniere::Projection { p: uv::Projection::Cylindre { .. } | uv::Projection::Sphere { .. }, .. }));
-        let bas = (if avec_axe { 254.0 } else { 204.0 } * d).min(corps.h * 0.5);
+        let en_page = matches!(self.derniere, Some(Derniere::MiseEnPage { .. } | Derniere::Depliage { .. }));
+        let bas = ((if avec_axe { 354.0 } else { 304.0 } + if en_page { 64.0 } else { 0.0 }) * d).min(corps.h * 0.5);
         let toile = Rect::new(corps.x, corps.y, corps.w, corps.h - bas);
         let (faces, tex, masquees) = self.faces_uv();
         self.toile_uv(cx, toile, &faces, tex.as_deref());
@@ -1025,6 +1036,46 @@ impl App {
                 }
             }
         }
+        match cx.bascules(&mut b, id("uv-couture"), &[("Couture", false), ("Sans couture", false), ("Depuis UV", false), ("Déplier", false)], 4) {
+            Some(0) => self.operer(|t| t.marquer_coutures(true)),
+            Some(1) => self.operer(|t| t.marquer_coutures(false)),
+            Some(2) => self.coutures_depuis_uv(),
+            Some(_) => self.deplier(),
+            None => {}
+        }
+        let page = self.uv.page;
+        let mut neuve = page;
+        match cx.bascules(&mut b, id("uv-page"), &[("Mettre en page", false), ("Même densité", page.egaliser), ("Rotation", page.tourner)], 3) {
+            Some(0) => self.mettre_en_page(),
+            Some(1) => neuve.egaliser = !page.egaliser,
+            Some(2) => neuve.tourner = !page.tourner,
+            _ => {}
+        }
+        if en_page {
+            let (mut v, shown) = (neuve.marge * 100.0, format!("{:.1} %", neuve.marge * 100.0));
+            cx.slider(&mut b, id("uv-marge"), "Marge", &shown, &mut v, 0.0, 4.0);
+            neuve.marge = v / 100.0;
+        }
+        // Un réglage changé après coup rejoue la mise en page, sans nouvelle étape
+        if neuve != page {
+            self.uv.page = neuve;
+            match self.derniere {
+                Some(Derniere::MiseEnPage { aspect, .. }) => self.rejouer(Derniere::MiseEnPage { page: neuve, aspect }),
+                // Les morceaux à plat sont là : la marge ne demande que de les ranger
+                Some(Derniere::Depliage { .. }) if neuve.tourner == page.tourner && neuve.egaliser == page.egaliser => {
+                    let groupes = self.groupes_par_image();
+                    if let Some(t) = &mut self.travail {
+                        for (f, a) in &groupes {
+                            let _ = t.mettre_en_page(f, neuve, *a);
+                        }
+                    }
+                    self.derniere = Some(Derniere::Depliage { page: neuve });
+                    self.a_sauver = true;
+                }
+                Some(Derniere::Depliage { .. }) => self.rejouer(Derniere::Depliage { page: neuve }),
+                _ => {}
+            }
+        }
         let u = &mut self.uv;
         match cx.bascules(&mut b, id("uv-mode"), &[("Points", !u.ilots), ("Îlots", u.ilots), ("Coins liés", u.lies), ("Cadrer", false), ("Image…", false)], 5) {
             Some(0) | Some(1) => {
@@ -1047,6 +1098,49 @@ impl App {
             None => {}
         }
         cx.body_end(b, &mut self.scrolls);
+    }
+
+    fn faces_visees(&self) -> Vec<usize> {
+        let Some(t) = &self.travail else { return Vec::new() };
+        if t.sel.faces.is_empty() { (0..t.m.faces.len()).collect() } else { t.sel.faces.clone() }
+    }
+
+    fn coutures_depuis_uv(&mut self) {
+        let f = self.faces_visees();
+        self.operer(|t| t.coutures_depuis_uv(&f));
+    }
+
+    /// Déplie les faces choisies, ou toutes.
+    pub fn deplier(&mut self) {
+        self.uv.sel.clear();
+        self.lancer(Derniere::Depliage { page: self.uv.page });
+        self.ouvrir_uv();
+    }
+
+    /// Faces visées par image : chacune a sa tuile.
+    fn groupes_par_image(&mut self) -> Vec<(Vec<usize>, Aspect)> {
+        let faces = self.faces_visees();
+        let Some(t) = &self.travail else { return Vec::new() };
+        let mut groupes: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+        for f in faces {
+            let i = t.m.faces[f].s.first().and_then(|i| t.proprio.get(*i)).and_then(|k| self.projet.texture_de(&self.projet.objets[*k])).cloned();
+            match groupes.iter_mut().find(|g| g.0 == i) {
+                Some(g) => g.1.push(f),
+                None => groupes.push((i, vec![f])),
+            }
+        }
+        groupes.into_iter().map(|(i, f)| (f, i.and_then(|i| self.aspect_de(&i)).unwrap_or(Aspect::CARRE))).collect()
+    }
+
+    /// Range les îlots de la vue UV dans leur image.
+    pub fn mettre_en_page(&mut self) {
+        let (faces, tex, _) = self.faces_uv();
+        if faces.is_empty() {
+            return self.dire("Pas d'UV à ranger : choisissez d'abord une projection".into());
+        }
+        let aspect = tex.and_then(|i| self.aspect_de(&i)).unwrap_or(Aspect::CARRE);
+        self.lancer(Derniere::MiseEnPage { page: self.uv.page, aspect });
+        self.ouvrir_uv();
     }
 
     /// Projette les faces visées, sous la forme de l'image qu'elles portent.
@@ -1916,6 +2010,16 @@ impl App {
     }
 
     fn executer(&mut self, d: Derniere) -> Bilan {
+        if let Derniere::MiseEnPage { page, aspect } = d {
+            let faces = self.faces_uv().0;
+            let Some(t) = &mut self.travail else { return Ok(None) };
+            return t.mettre_en_page(&faces, page, aspect);
+        }
+        if let Derniere::Depliage { page } = d {
+            let groupes = self.groupes_par_image();
+            let Some(t) = &mut self.travail else { return Ok(None) };
+            return t.deplier(&groupes, page);
+        }
         let transfo = match d {
             Derniere::Translation { d } => Some(Transfo::Translation(d)),
             Derniere::Echelle { s, pivot } => Some(Transfo::Echelle { s, c: pivot }),
@@ -1943,6 +2047,7 @@ impl App {
                 let a = if axe < 3 { let mut u = [0.0; 3]; u[axe] = 1.0; u } else { vue };
                 t.revolution(RegleRevolution { axe: a, angle: if inverse { -angle } else { angle }, segments, fermer }, curseur)
             }
+            Derniere::MiseEnPage { .. } | Derniere::Depliage { .. } => unreachable!("traitées plus haut"),
             Derniere::Projection { p, aspect } => {
                 let tout: Vec<usize> = (0..t.m.faces.len()).collect();
                 let faces = if t.sel.faces.is_empty() { tout } else { t.sel.faces.clone() };
@@ -3894,6 +3999,11 @@ impl App {
             A::AjouterRondelle => self.ouvrir_ajout(Prim::Rondelle),
             A::AjouterTige => self.ouvrir_ajout(Prim::Tige),
             A::ChoisirImage => self.choisir_image(),
+            A::MettreEnPage => self.mettre_en_page(),
+            A::MarquerCoutures => self.operer(|t| t.marquer_coutures(true)),
+            A::EffacerCoutures => self.operer(|t| t.marquer_coutures(false)),
+            A::CouturesDepuisUv => self.coutures_depuis_uv(),
+            A::Deplier => self.deplier(),
             A::EditerUv => self.basculer(Contenu::Uv),
             A::ProjeterVue => {
                 let (_, droite, haut, _) = self.repere();
@@ -4025,6 +4135,7 @@ impl App {
                 }
             }
             Derniere::Projection { .. } => cx.paragraph(b, "L'axe se règle dans la vue UV."),
+            Derniere::MiseEnPage { .. } | Derniere::Depliage { .. } => cx.paragraph(b, "La marge, la densité et la rotation se règlent dans la vue UV."),
             Derniere::Proches { tolerance } => {
                 if cx.champ(b, id("r-tol"), "Tolérance", coul(C::Texte), &format!("{tolerance}")) {
                     self.saisir(Champ::Tolerance);
@@ -4337,6 +4448,14 @@ impl App {
                         g.choisis.extend(f3(m.sommets[i]));
                     }
                 }
+            }
+        }
+        for [i, j] in m.coutures_valides() {
+            let (p, q) = (f3(m.sommets[i]), f3(m.sommets[j]));
+            for (a, b, c) in [(p, q, 1.0), (p, q, -1.0), (q, p, -1.0), (p, q, -1.0), (q, p, 1.0), (q, p, -1.0)] {
+                g.coutures.extend(a);
+                g.coutures.extend(b);
+                g.coutures.push(c);
             }
         }
         if t.filtres[1] {
@@ -6239,6 +6358,174 @@ mod tests {
         let s = b.images(3);
         let id_image = b.app.projet.materiau("mur").unwrap().texture.clone();
         assert!(s.objets.iter().any(|o| o.tampon == CLE_FACES && o.texture == id_image));
+    }
+
+    fn banc_page() -> Banc {
+        let mut b = banc_sans_uv();
+        b.app.agir(crate::actions::Action::ProjeterCube);
+        b.images(40);
+        b
+    }
+
+    fn uv_de(b: &Banc) -> Vec<Vec<[f32; 2]>> {
+        b.app.travail.as_ref().unwrap().m.faces.iter().map(|f| f.uv.clone()).collect()
+    }
+
+    /// Une boîte, ses arêtes verticales et le tour du dessus marqués par le panneau.
+    fn banc_boite() -> Banc {
+        let mut b = Banc::pret();
+        let mut p = Projet::neuf();
+        p.objets[0].maillage = Arc::new(Maillage::boite(2.0, 2.0, 2.0));
+        b.app.remplacer(p, "");
+        b.app.choisir(Some(0));
+        b.app.entrer_geometrie();
+        b.app.travail.as_mut().unwrap().aucun(None);
+        b.app.ouvrir_uv();
+        b.images(40);
+        b
+    }
+
+    fn coutures_de(b: &Banc) -> Vec<Arete> {
+        b.app.travail.as_ref().unwrap().m.coutures_valides()
+    }
+
+    fn choisir_toutes_les_aretes(b: &mut Banc) {
+        let t = b.app.travail.as_mut().unwrap();
+        t.sel.aretes = t.m.aretes();
+    }
+
+    #[test]
+    fn marquer_effacer_et_annuler_une_couture_depuis_le_panneau() {
+        let mut b = banc_boite();
+        let z = b.ui.zone(sub_id(id("uv-couture"), 0)).expect("bouton");
+        b.appui(z.cx(), z.cy());
+        assert!(coutures_de(&b).is_empty());
+        choisir_toutes_les_aretes(&mut b);
+        b.appui(z.cx(), z.cy());
+        assert_eq!(coutures_de(&b).len(), 12);
+        let z1 = b.ui.zone(sub_id(id("uv-couture"), 1)).unwrap();
+        b.app.travail.as_mut().unwrap().sel.aretes.truncate(2);
+        b.appui(z1.cx(), z1.cy());
+        assert_eq!(coutures_de(&b).len(), 10);
+        b.app.annuler();
+        assert_eq!(coutures_de(&b).len(), 12);
+    }
+
+    #[test]
+    fn deplier_annuler_et_regler_la_marge_sans_nouvelle_etape() {
+        let mut b = banc_boite();
+        choisir_toutes_les_aretes(&mut b);
+        let n0 = b.app.histoire.annuler.len();
+        b.app.operer(|t| t.marquer_coutures(true));
+        b.app.travail.as_mut().unwrap().sel.aretes.clear();
+        b.app.agir(crate::actions::Action::Deplier);
+        assert_eq!(b.app.histoire.annuler.len(), n0 + 2);
+        assert!(b.app.travail.as_ref().unwrap().m.faces.iter().all(|f| f.uv.len() == f.s.len()));
+        b.images(30);
+        let (n, u) = (b.app.histoire.annuler.len(), uv_de(&b));
+        let z = b.ui.zone(id("uv-marge")).expect("marge");
+        b.glisser((z.x + z.w * 0.2, z.cy()), (z.x + z.w * 0.8, z.cy()));
+        assert_eq!(b.app.histoire.annuler.len(), n);
+        assert_ne!(uv_de(&b), u);
+        b.app.annuler();
+        assert!(b.app.travail.as_ref().unwrap().m.faces.iter().all(|f| f.uv.is_empty()));
+    }
+
+    #[test]
+    fn deplier_un_morceau_ferme_laisse_tout_en_place() {
+        let mut b = banc_boite();
+        let n = b.app.histoire.annuler.len();
+        b.app.agir(crate::actions::Action::Deplier);
+        assert_eq!(b.app.histoire.annuler.len(), n);
+        assert!(b.app.travail.as_ref().unwrap().m.faces.iter().all(|f| f.uv.is_empty()));
+    }
+
+    #[test]
+    fn les_coutures_viennent_des_uv_et_reviennent_du_projet() {
+        let mut b = banc_boite();
+        b.app.agir(crate::actions::Action::ProjeterCube);
+        b.app.agir(crate::actions::Action::CouturesDepuisUv);
+        assert_eq!(coutures_de(&b).len(), 12);
+        b.app.sortir_geometrie();
+        assert_eq!(b.app.projet.objets[0].maillage.coutures_valides().len(), 12);
+        let p = Projet::lire(&b.app.projet.ecrire()).unwrap();
+        assert_eq!(p.objets[0].maillage.coutures_valides().len(), 12);
+    }
+
+    #[test]
+    fn la_vue_montre_les_coutures_et_une_boucle_les_garde() {
+        let mut b = banc_boite();
+        choisir_toutes_les_aretes(&mut b);
+        b.app.operer(|t| t.marquer_coutures(true));
+        let a = coutures_de(&b)[0];
+        let n = coutures_de(&b).len();
+        let t = b.app.travail.as_mut().unwrap();
+        t.boucle(Some(a), 1, 0.0, false, false).unwrap();
+        assert_eq!(coutures_de(&b).len(), n + 4);
+        let t = b.app.travail.as_mut().unwrap();
+        t.sel.aretes = vec![coutures_de_liste(t)];
+        t.subdiviser(1).unwrap();
+        assert_eq!(coutures_de(&b).len(), n + 5);
+    }
+
+    fn coutures_de_liste(t: &Travail) -> Arete {
+        t.m.coutures_valides()[0]
+    }
+
+    #[test]
+    fn la_mise_en_page_se_lance_du_panneau_et_s_annule() {
+        let mut b = banc_page();
+        let avant = uv_de(&b);
+        let (n, z) = (b.app.histoire.annuler.len(), b.ui.zone(sub_id(id("uv-page"), 0)).expect("bouton"));
+        b.appui(z.cx(), z.cy());
+        assert_eq!(b.app.histoire.annuler.len(), n + 1);
+        assert_ne!(uv_de(&b), avant);
+        assert!(matches!(b.app.derniere, Some(Derniere::MiseEnPage { .. })));
+        b.app.annuler();
+        assert_eq!(uv_de(&b), avant);
+    }
+
+    #[test]
+    fn changer_un_reglage_rejoue_sans_nouvelle_etape() {
+        let mut b = banc_page();
+        b.app.agir(crate::actions::Action::MettreEnPage);
+        b.images(30);
+        let (n, u) = (b.app.histoire.annuler.len(), uv_de(&b));
+        let z = b.ui.zone(sub_id(id("uv-page"), 1)).expect("densité");
+        b.appui(z.cx(), z.cy());
+        assert!(!b.app.uv.page.egaliser);
+        assert_eq!(b.app.histoire.annuler.len(), n);
+        b.images(3);
+        let z = b.ui.zone(id("uv-marge")).expect("marge");
+        b.glisser((z.x + z.w * 0.2, z.cy()), (z.x + z.w * 0.8, z.cy()));
+        assert!(b.app.uv.page.marge > 0.02);
+        assert_eq!(b.app.histoire.annuler.len(), n);
+        assert_ne!(uv_de(&b), u);
+    }
+
+    #[test]
+    fn un_reglage_change_avant_coup_ne_touche_a_rien() {
+        let mut b = banc_page();
+        let u = uv_de(&b);
+        let z = b.ui.zone(sub_id(id("uv-page"), 2)).expect("rotation");
+        b.appui(z.cx(), z.cy());
+        assert!(b.app.uv.page.tourner);
+        assert_eq!(uv_de(&b), u);
+    }
+
+    #[test]
+    fn sans_uv_la_mise_en_page_le_dit_et_seules_les_faces_de_la_vue_bougent() {
+        let mut b = banc_sans_uv();
+        let n = b.app.histoire.annuler.len();
+        b.app.agir(crate::actions::Action::MettreEnPage);
+        assert_eq!(b.app.histoire.annuler.len(), n);
+        let mut b = banc_page();
+        let u = uv_de(&b);
+        b.app.travail.as_mut().unwrap().sel.faces = vec![0, 1];
+        b.app.agir(crate::actions::Action::MettreEnPage);
+        let v = uv_de(&b);
+        assert_ne!(u[0], v[0]);
+        assert_eq!(u[2..], v[2..]);
     }
 
     #[test]

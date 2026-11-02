@@ -309,7 +309,7 @@ pub struct Renderer {
     bande_largeur: i32,
     bande_couleur: i32,
     /// Fil, points et bandes de la copie de travail : (vao, vbo, sommets).
-    geo: [(u32, u32, i32); 4],
+    geo: [(u32, u32, i32); 5],
     dp: f32,
 }
 
@@ -419,7 +419,7 @@ impl Renderer {
             (gl.glBufferData)(ARRAY_BUFFER, (g.len() * 4) as isize, g.as_ptr() as *const c_void, 0x88E4);
             (gl.glEnableVertexAttribArray)(0);
             (gl.glVertexAttribPointer)(0, 3, FLOAT, 0, 12, std::ptr::null());
-            let mut geo = [(0, 0, 0); 4];
+            let mut geo = [(0, 0, 0); 5];
             for (n, g) in geo.iter_mut().enumerate() {
                 (gl.glGenVertexArrays)(1, &mut g.0);
                 (gl.glGenBuffers)(1, &mut g.1);
@@ -532,7 +532,7 @@ impl Renderer {
                 self.images.insert(id.clone(), t);
             }
             if let Some(t) = s.geo.as_ref().and_then(|g| g.maj.as_ref()) {
-                for (n, (l, taille)) in [(&t.lignes, 3), (&t.points, 3), (&t.choisis, 3), (&t.bandes, 7)].into_iter().enumerate() {
+                for (n, (l, taille)) in [(&t.lignes, 3), (&t.points, 3), (&t.choisis, 3), (&t.bandes, 7), (&t.coutures, 7)].into_iter().enumerate() {
                     (gl.glBindBuffer)(ARRAY_BUFFER, self.geo[n].1);
                     (gl.glBufferData)(ARRAY_BUFFER, (l.len() * 4) as isize, l.as_ptr() as *const c_void, 0x88E8);
                     self.geo[n].2 = (l.len() / taille) as i32;
@@ -629,6 +629,11 @@ impl Renderer {
         (gl.glUseProgram)(self.bande);
         (gl.glUniformMatrix4fv)(self.bande_mvp, 1, 0, s.vue_proj.as_ptr());
         (gl.glUniform2f)(self.bande_res, vw as f32, vh as f32);
+        (gl.glUniform1f)(self.bande_largeur, 3.0 * self.dp);
+        let c = s.couleurs.couture;
+        (gl.glUniform4f)(self.bande_couleur, c[0], c[1], c[2], 1.0);
+        (gl.glBindVertexArray)(self.geo[4].0);
+        (gl.glDrawArrays)(TRIANGLES, 0, self.geo[4].2);
         (gl.glUniform1f)(self.bande_largeur, 4.0 * self.dp);
         let c = s.couleurs.arete_choisie;
         (gl.glUniform4f)(self.bande_couleur, c[0], c[1], c[2], 1.0);

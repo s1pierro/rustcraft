@@ -74,6 +74,11 @@ pub enum Action {
     ProjeterCylindre,
     ProjeterSphere,
     ChoisirImage,
+    MettreEnPage,
+    MarquerCoutures,
+    EffacerCoutures,
+    CouturesDepuisUv,
+    Deplier,
 }
 
 /// Panneau où figure l'opération.
@@ -231,7 +236,8 @@ impl Contexte {
             Trianguler => self.geo && self.grande_face,
             Boucle => self.geo && self.anneau,
             ChoisirImage => self.actif,
-            EditerUv | ProjeterVue | ProjeterCube | ProjeterCylindre | ProjeterSphere => self.geo,
+            EditerUv | ProjeterVue | ProjeterCube | ProjeterCylindre | ProjeterSphere | MettreEnPage | CouturesDepuisUv | Deplier => self.geo,
+            MarquerCoutures | EffacerCoutures => self.geo && na > 0,
             Dissoudre => self.geo && matches!(self.dissolution, Some(Ok(()))),
             Revolution => self.geo && n + na > 0,
             Lies => self.geo && self.actif,
@@ -816,6 +822,46 @@ pub const CATALOGUE: &[Op] = &[
         aide: "donner une image PNG ou JPEG au matériau de l’objet actif ; le matériau par défaut, partagé, n’en porte pas : un nouveau matériau est créé",
         barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Image", defaut: false }),
     },
+    Op {
+        action: Action::MettreEnPage,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Mettre en page",
+        aide: "ranger les îlots de la vue UV dans l’image, sans chevauchement, à la plus grande échelle qui tienne",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Page", defaut: false }),
+    },
+    Op {
+        action: Action::MarquerCoutures,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Marquer les coutures",
+        aide: "marquer les arêtes choisies comme coutures : le dépliage coupera là",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Couture", defaut: false }),
+    },
+    Op {
+        action: Action::EffacerCoutures,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Effacer les coutures",
+        aide: "retirer les coutures des arêtes choisies",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Sans cout.", defaut: false }),
+    },
+    Op {
+        action: Action::CouturesDepuisUv,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Coutures depuis les UV",
+        aide: "marquer une couture là où les UV de deux faces voisines se séparent déjà",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Depuis UV", defaut: false }),
+    },
+    Op {
+        action: Action::Deplier,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Déplier",
+        aide: "mettre à plat les faces choisies, ou toutes, coupées à leurs coutures, avec le moins de déformation possible, puis les ranger dans l’image",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Déplier", defaut: false }),
+    },
 ];
 
 #[cfg(test)]
@@ -828,7 +874,7 @@ mod tests {
         for (k, o) in CATALOGUE.iter().enumerate() {
             assert_eq!(o.action as usize, k, "{:?}", o.action);
         }
-        assert_eq!(CATALOGUE.len(), Action::ChoisirImage as usize + 1);
+        assert_eq!(CATALOGUE.len(), Action::Deplier as usize + 1);
     }
 
     #[test]

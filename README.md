@@ -7,7 +7,7 @@ ni WebView, dans un APK très léger.
 
 ## État
 
-Version 0.15 : **édition en modes Scène et Géométrie, modifieurs, visserie, UV et matériaux**.
+Version 0.17 : **édition en modes Scène et Géométrie, modifieurs, visserie, UV et matériaux**.
 
 - Projets `.gda` des formats 1 à 9, fichiers OBJ, STL, glTF et GLB
 - Rendus Solide, En jeu et Rayons X, éclairage de GDA
@@ -45,13 +45,19 @@ Version 0.15 : **édition en modes Scène et Géométrie, modifieurs, visserie, 
   annulation, zoom à deux doigts ; le modèle montre la texture et suit chaque geste
 - Projections UV selon la vue, en cube, cylindre ou sphère, sur les faces choisies ou
   toutes, à la forme de l'image, axe réglable ; un damier montre l'étirement sans texture
+- Mise en page UV : les îlots de la vue rangés dans l'image sans chevauchement, à la
+  plus grande échelle qui tienne, même densité et rotation au choix, marge réglable
+- Coutures et dépliage LSCM : marquer ou effacer des coutures sur les arêtes, en rouge
+  sur le modèle, ou les tirer des UV existantes ; déplier les faces choisies ou toutes
+  avec le moins de déformation possible, à la densité du modèle, à l'endroit et le haut
+  en haut, puis ranger les morceaux, image par image ; enregistrées dans le `.gda`
 - Curseur 3D : vers l'origine, vers la sélection, sélection vers le curseur
 - Panneau Fichier à trois onglets : Projet (nom, enregistrement `.gda`, ouverture,
   nouvelle scène), Importer par le sélecteur d'Android, Exporter en OBJ, STL ou GLB la
   scène complète ou les seuls objets choisis, et `.mtl`, dans Téléchargements
   (Android 10 ou plus) ; sauvegarde automatique d'un lancement à l'autre
 
-Pas encore disponibles : mise en page et dépliage UV, déplacement entre sets, curseur 3D à la main,
+Pas encore disponibles : déplacement entre sets, curseur 3D à la main,
 armatures (conservées dans le projet, ni affichées ni appliquées à l'export). En mode
 Géométrie, les objets sont édités sans leurs modifieurs.
 

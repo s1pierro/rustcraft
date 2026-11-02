@@ -410,6 +410,90 @@ impl Travail {
         Ok(Some(format!("{} face{} projetée{}", faces.len(), pl(faces.len()), pl(faces.len()))))
     }
 
+    /// Range les îlots des faces données dans leur tuile.
+    pub fn mettre_en_page(&mut self, faces: &[usize], page: crate::uv::Page, a: crate::uv::Aspect) -> Bilan {
+        let Some(d) = crate::uv::mettre_en_page(&self.m, faces, page, a) else {
+            return Err("Trop d'îlots pour cette marge".into());
+        };
+        self.poser_uv(&d.coins);
+        Ok(Some(format!("{} îlot{} rangé{} · {:.0} % de l'image", d.ilots, pl(d.ilots), pl(d.ilots), d.remplissage * 100.0)))
+    }
+
+    /// Marque les arêtes choisies comme coutures, ou les efface.
+    pub fn marquer_coutures(&mut self, marquer: bool) -> Bilan {
+        let l = self.sel.aretes.clone();
+        if l.is_empty() {
+            return Err("Choisissez d'abord des arêtes".into());
+        }
+        let cles: HashSet<Arete> = l.iter().map(|a| arete(a[0], a[1])).collect();
+        let m = self.mm();
+        m.coutures.retain(|a| !cles.contains(&arete(a[0], a[1])));
+        if marquer {
+            m.coutures.extend(l.iter().copied());
+        }
+        self.maj();
+        let n = l.len();
+        Ok(Some(format!("{n} couture{} {}", pl(n), if marquer { format!("marquée{}", pl(n)) } else { format!("effacée{}", pl(n)) })))
+    }
+
+    /// Une couture là où les UV de deux faces voisines se séparent déjà.
+    pub fn coutures_depuis_uv(&mut self, faces: &[usize]) -> Bilan {
+        let mut par_arete: HashMap<Arete, Vec<crate::uv::Coin>> = HashMap::new();
+        for &f in faces.iter().filter(|f| crate::uv::complete(&self.m, **f)) {
+            let s = &self.m.faces[f].s;
+            for k in 0..s.len() {
+                par_arete.entry(arete(s[k], s[(k + 1) % s.len()])).or_default().push((f, k));
+            }
+        }
+        let uv_de = |(f, k): crate::uv::Coin, i: usize| {
+            let x = &self.m.faces[f];
+            (0..2).map(|d| (k + d) % x.s.len()).find(|c| x.s[*c] == i).map(|c| x.uv[c])
+        };
+        let mut neuves = Vec::new();
+        for (a, l) in &par_arete {
+            let [x, y] = l[..] else { continue };
+            if a.iter().any(|i| match (uv_de(x, *i), uv_de(y, *i)) {
+                (Some(p), Some(q)) => (p[0] - q[0]).hypot(p[1] - q[1]) > 1e-6,
+                _ => false,
+            }) {
+                neuves.push(*a);
+            }
+        }
+        if neuves.is_empty() {
+            return Err("Aucune séparation dans ces UV".into());
+        }
+        let n = neuves.len();
+        self.mm().coutures.extend(neuves);
+        self.maj();
+        Ok(Some(format!("{n} couture{} tirée{} des UV", pl(n), pl(n))))
+    }
+
+    /// Déplie chaque groupe de faces dans sa tuile. Rien ne change si l'un d'eux échoue.
+    pub fn deplier(&mut self, groupes: &[(Vec<usize>, crate::uv::Aspect)], page: crate::uv::Page) -> Bilan {
+        if groupes.iter().all(|g| g.0.is_empty()) {
+            return Err("Aucune face à déplier".into());
+        }
+        let mut faits = Vec::with_capacity(groupes.len());
+        for (faces, a) in groupes {
+            faits.push(crate::uv::deplier(&self.m, faces, page, *a)?);
+        }
+        let m = self.mm();
+        for f in groupes.iter().flat_map(|g| &g.0) {
+            let n = m.faces[*f].s.len();
+            m.faces[*f].uv.resize(n, [0.0; 2]);
+        }
+        for d in &faits {
+            self.poser_uv(&d.disposition.coins);
+        }
+        let (n, r) = (faits.iter().map(|d| d.disposition.ilots).sum::<usize>(), faits.iter().map(|d| d.retournes).sum::<usize>());
+        let couvert = faits[0].disposition.remplissage;
+        Ok(Some(if r > 0 {
+            format!("{n} morceau{} · {r} triangle{} retourné{} : ajoutez des coutures", if n > 1 { "x" } else { "" }, pl(r), pl(r))
+        } else {
+            format!("{n} morceau{} déplié{} · {:.0} % de l'image", if n > 1 { "x" } else { "" }, pl(n), couvert * 100.0)
+        }))
+    }
+
     /// Nouvelles coordonnées des coins donnés. Toucher aux UV ne change pas la sélection.
     pub fn poser_uv(&mut self, valeurs: &[(crate::uv::Coin, crate::uv::Uv)]) {
         let m = self.mm();
@@ -469,6 +553,11 @@ impl Travail {
         }
         for a in &m.fils {
             parts.get_mut(&self.proprio[a[0]]).unwrap().fils.push([local[a[0]], local[a[1]]]);
+        }
+        for a in m.coutures_valides() {
+            if self.proprio[a[0]] == self.proprio[a[1]] {
+                parts.get_mut(&self.proprio[a[0]]).unwrap().coutures.push([local[a[0]], local[a[1]]]);
+            }
         }
         let mut sels = self.par_objet(&local);
         for k in self.edites.clone() {

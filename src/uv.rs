@@ -398,6 +398,1002 @@ pub fn projeter(m: &Maillage, faces: &[usize], p: Projection, a: Aspect) -> Vec<
     r
 }
 
+/// Réglages de la mise en page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Page {
+    /// Part de la tuile autour des îlots et entre eux.
+    pub marge: f32,
+    /// Chaque îlot peut pivoter pour mieux remplir la tuile.
+    pub tourner: bool,
+    /// Un même nombre de pixels par unité du modèle, sur tous les îlots.
+    pub egaliser: bool,
+}
+
+impl Page {
+    pub const DEFAUT: Page = Page { marge: 1.0 / 128.0, tourner: false, egaliser: true };
+}
+
+/// Résultat d'une mise en page.
+pub struct Disposition {
+    pub coins: Vec<(Coin, Uv)>,
+    pub ilots: usize,
+    /// Part de la tuile couverte par les faces, de 0 à 1.
+    pub remplissage: f32,
+}
+
+/// Aire d'un polygone du modèle, plan ou non.
+fn aire_3d(m: &Maillage, f: usize) -> f64 {
+    let s = &m.faces[f].s;
+    let mut n = [0.0; 3];
+    for k in 1..s.len().saturating_sub(1) {
+        let (o, a, b) = (m.sommets[s[0]], m.sommets[s[k]], m.sommets[s[k + 1]]);
+        let (u, v) = ([0, 1, 2].map(|i| a[i] - o[i]), [0, 1, 2].map(|i| b[i] - o[i]));
+        n[0] += u[1] * v[2] - u[2] * v[1];
+        n[1] += u[2] * v[0] - u[0] * v[2];
+        n[2] += u[0] * v[1] - u[1] * v[0];
+    }
+    scal(n, n).sqrt() / 2.0
+}
+
+/// Aire d'un polygone dans le plan de la tuile.
+fn aire_plan(m: &Maillage, f: usize, (tl, th): (f64, f64)) -> f64 {
+    let p: Vec<[f64; 2]> = m.faces[f].uv.iter().map(|q| [q[0] as f64 * tl, q[1] as f64 * th]).collect();
+    (0..p.len()).map(|k| p[k][0] * p[(k + 1) % p.len()][1] - p[(k + 1) % p.len()][0] * p[k][1]).sum::<f64>().abs() / 2.0
+}
+
+/// Échelle de chaque îlot pour que tous aient la même densité. Un îlot sans aire ne dit
+/// rien de la sienne : il prend l'échelle médiane.
+fn densites(m: &Maillage, ilots: &[Vec<Coin>], tuile: (f64, f64)) -> Vec<f64> {
+    let brut: Vec<Option<f64>> = ilots
+        .iter()
+        .map(|l| {
+            let f: HashSet<usize> = l.iter().map(|c| c.0).collect();
+            let (a3, a2) = f.iter().fold((0.0, 0.0), |(a, b), f| (a + aire_3d(m, *f), b + aire_plan(m, *f, tuile)));
+            (a3 > 1e-18 && a2 > 1e-18).then(|| (a3 / a2).sqrt())
+        })
+        .collect();
+    let mut connues: Vec<f64> = brut.iter().flatten().copied().collect();
+    connues.sort_by(f64::total_cmp);
+    let mediane = connues.get(connues.len() / 2).copied().unwrap_or(1.0);
+    brut.into_iter().map(|x| x.unwrap_or(mediane)).collect()
+}
+
+/// Pivote l'îlot pour que sa boîte soit la plus petite : elle s'appuie sur un côté de
+/// son enveloppe. Un îlot presque aussi serré tel quel ne bouge pas.
+fn serrer(l: &mut Ilot) {
+    let mut p: Vec<[f64; 2]> = l.iter().map(|x| x.1).collect();
+    p.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    p.dedup();
+    if p.len() < 3 {
+        return;
+    }
+    let tourne = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    let mut env: Vec<[f64; 2]> = Vec::new();
+    for sens in 0..2 {
+        let debut = env.len();
+        let parcours: Vec<[f64; 2]> = if sens == 0 { p.clone() } else { p.iter().rev().copied().collect() };
+        for q in parcours {
+            while env.len() >= debut + 2 && tourne(env[env.len() - 2], env[env.len() - 1], q) <= 0.0 {
+                env.pop();
+            }
+            env.push(q);
+        }
+        env.pop();
+    }
+    let aire = |c: f64, s: f64| {
+        let (mut a, mut b) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+        for q in &env {
+            let r = [q[0] * c + q[1] * s, q[1] * c - q[0] * s];
+            for k in 0..2 {
+                a[k] = a[k].min(r[k]);
+                b[k] = b[k].max(r[k]);
+            }
+        }
+        (b[0] - a[0]) * (b[1] - a[1])
+    };
+    let (mut meilleur, mut c, mut s) = (aire(1.0, 0.0) * 0.99, 1.0, 0.0);
+    for k in 0..env.len() {
+        let (a, b) = (env[k], env[(k + 1) % env.len()]);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let n = dx.hypot(dy);
+        if n > 0.0 && aire(dx / n, dy / n) < meilleur {
+            (meilleur, c, s) = (aire(dx / n, dy / n), dx / n, dy / n);
+        }
+    }
+    for x in l.iter_mut() {
+        let q = x.1;
+        x.1 = [q[0] * c + q[1] * s, q[1] * c - q[0] * s];
+    }
+}
+
+/// Range des boîtes dans un rectangle, chacune le plus bas possible sur la ligne de ciel
+/// des précédentes : un rang (x, sommet, largeur) par palier. Rend la place de chaque
+/// boîte et si elle a pivoté d'un quart de tour.
+fn ciel(tailles: &[[f64; 2]], ordre: &[usize], (l, h): (f64, f64), ecart: f64, tourner: bool) -> Option<Vec<([f64; 2], bool)>> {
+    const JEU: f64 = 1e-9;
+    let mut paliers: Vec<[f64; 3]> = vec![[0.0, 0.0, l]];
+    let mut places = vec![([0.0; 2], false); tailles.len()];
+    for &k in ordre {
+        let [w0, t0] = tailles[k];
+        let mut mieux: Option<(f64, f64, f64, f64, f64, bool)> = None;
+        for quart in [false, true] {
+            if quart && !tourner {
+                break;
+            }
+            let (w, t) = if quart { (t0, w0) } else { (w0, t0) };
+            for i in 0..paliers.len() {
+                let x = paliers[i][0];
+                if x + w > l + JEU {
+                    break;
+                }
+                // La marge compte aussi à droite : un palier voisin plus haut peut la border
+                let y = paliers[i..].iter().take_while(|p| p[0] < x + w + ecart - JEU).fold(paliers[i][1], |y, p| y.max(p[1]));
+                if y + t <= h + JEU && mieux.is_none_or(|m| (y + t, x) < (m.0, m.1)) {
+                    mieux = Some((y + t, x, y, w, t, quart));
+                }
+            }
+        }
+        let (_, x, y, w, t, quart) = mieux?;
+        places[k] = ([x, y], quart);
+        let fin = (x + w + ecart).min(l);
+        let mut suite: Vec<[f64; 3]> = Vec::with_capacity(paliers.len() + 2);
+        let mut poser = |p: [f64; 3]| match suite.last_mut() {
+            Some(d) if d[1] == p[1] => d[2] += p[2],
+            _ if p[2] > 0.0 => suite.push(p),
+            _ => {}
+        };
+        for p in paliers.iter().filter(|p| p[0] < x) {
+            poser([p[0], p[1], (p[0] + p[2]).min(x) - p[0]]);
+        }
+        poser([x, y + t + ecart, fin - x]);
+        for p in paliers.iter().filter(|p| p[0] + p[2] > fin) {
+            let a = p[0].max(fin);
+            poser([a, p[1], p[0] + p[2] - a]);
+        }
+        paliers = suite;
+    }
+    Some(places)
+}
+
+/// Range les îlots des faces données dans la tuile, à la plus grande échelle commune qui
+/// tienne, marges comprises. Les îlots restent rigides et ne sont jamais retournés ; ce
+/// sont leurs boîtes qui se rangent. `None` : la marge ne laisse pas la place.
+pub fn mettre_en_page(m: &Maillage, faces: &[usize], page: Page, a: Aspect) -> Option<Disposition> {
+    let (tl, th) = (a.l as f64, a.h as f64);
+    let groupes = ilots(m, faces);
+    let echelles = if page.egaliser { densites(m, &groupes, (tl, th)) } else { vec![1.0; groupes.len()] };
+    let plans: Vec<Ilot> = groupes
+        .iter()
+        .zip(&echelles)
+        .map(|(l, s)| l.iter().map(|c| (*c, { let q = uv_de(m, *c); [q[0] as f64 * tl * s, q[1] as f64 * th * s] })).collect())
+        .collect();
+    disposer(&plans, page, a)
+}
+
+/// Range des îlots donnés dans le plan.
+fn disposer(plans: &[Ilot], page: Page, a: Aspect) -> Option<Disposition> {
+    let droite = ranger(plans.to_vec(), Page { tourner: false, ..page }, a);
+    if !page.tourner {
+        return droite;
+    }
+    // Pivoter n'aide pas toujours : une longue bande seule tient mieux en diagonale
+    let tournee = ranger(plans.to_vec(), page, a);
+    match (&droite, &tournee) {
+        (Some(d), Some(t)) if d.remplissage >= t.remplissage => droite,
+        (Some(_), None) => droite,
+        _ => tournee,
+    }
+}
+
+/// Aire d'un îlot : ses coins, face par face et dans l'ordre.
+fn aire_ilot(l: &Ilot) -> f64 {
+    let mut faces: HashMap<usize, Vec<(usize, [f64; 2])>> = HashMap::new();
+    for ((f, k), p) in l {
+        faces.entry(*f).or_default().push((*k, *p));
+    }
+    faces.values_mut().map(|c| {
+        c.sort_by_key(|x| x.0);
+        let n = c.len();
+        (0..n).map(|k| c[k].1[0] * c[(k + 1) % n].1[1] - c[(k + 1) % n].1[0] * c[k].1[1]).sum::<f64>().abs() / 2.0
+    }).sum()
+}
+
+fn ranger(mut plans: Vec<Ilot>, page: Page, a: Aspect) -> Option<Disposition> {
+    let (tl, th) = (a.l as f64, a.h as f64);
+    if page.tourner {
+        plans.iter_mut().for_each(serrer);
+    }
+    let marge = page.marge as f64;
+    let (ul, uh) = (tl - 2.0 * marge, th - 2.0 * marge);
+    let boites: Vec<[f64; 4]> = plans.iter().map(etendue).collect();
+    let bases: Vec<[f64; 2]> = boites.iter().map(|b| [b[2], b[3]]).collect();
+    let trie = |f: &dyn Fn(&[f64; 2]) -> f64| {
+        let mut o: Vec<usize> = (0..bases.len()).collect();
+        o.sort_by(|a, b| f(&bases[*b]).total_cmp(&f(&bases[*a])));
+        o
+    };
+    let ordres = [trie(&|b| b[1]), trie(&|b| b[0]), trie(&|b| b[0] * b[1]), trie(&|b| b[0].max(b[1]))];
+    let essai = |k: f64| {
+        let tailles: Vec<[f64; 2]> = bases.iter().map(|b| [b[0] * k, b[1] * k]).collect();
+        ordres.iter().find_map(|o| ciel(&tailles, o, (ul, uh), marge, page.tourner).map(|p| (p, tailles.clone())))
+    };
+    let mut trouve = essai(0.0)?;
+    let cote = |f: &dyn Fn(&[f64; 2]) -> f64| bases.iter().map(f).fold(0.0, f64::max).max(1e-12);
+    let plafond = if page.tourner {
+        ul.min(uh).max(ul.max(uh) * cote(&|b| b[0].min(b[1])) / cote(&|b| b[0].max(b[1]))) / cote(&|b| b[0].min(b[1]))
+    } else {
+        (ul / cote(&|b| b[0])).min(uh / cote(&|b| b[1]))
+    };
+    let surface: f64 = bases.iter().map(|b| b[0] * b[1]).sum();
+    let plafond = if surface > 0.0 { plafond.min((ul * uh / surface).sqrt()) } else { plafond };
+    let mut k = 0.0;
+    let (mut bas, mut haut) = (0.0, plafond);
+    for essais in 0..20 {
+        // Un îlot seul, ou des îlots égaux, atteignent souvent le plafond
+        let x = if essais == 0 { haut } else { (bas + haut) / 2.0 };
+        match essai(x) {
+            Some(r) => {
+                (trouve, k, bas) = (r, x, x);
+                if essais == 0 {
+                    break;
+                }
+            }
+            None => haut = x,
+        }
+    }
+    let (places, tailles) = trouve;
+    let (mut large, mut grand) = (0.0_f64, 0.0_f64);
+    for (([x, y], quart), [w, t]) in places.iter().zip(&tailles) {
+        let (w, t) = if *quart { (*t, *w) } else { (*w, *t) };
+        large = large.max(x + w);
+        grand = grand.max(y + t);
+    }
+    let (dx, dy) = ((tl - large) / 2.0, (th - grand) / 2.0);
+    let mut coins = Vec::new();
+    for (i, l) in plans.iter().enumerate() {
+        let ([x, y], quart) = places[i];
+        let b = boites[i];
+        for (c, q) in l {
+            let (u, v) = (q[0] - b[0], q[1] - b[1]);
+            let (u, v) = if quart { (v, b[2] - u) } else { (u, v) };
+            coins.push((*c, [((dx + x + u * k) / tl) as f32, ((dy + y + v * k) / th) as f32]));
+        }
+    }
+    let couvert: f64 = plans.iter().map(aire_ilot).sum::<f64>() * k * k;
+    Some(Disposition { coins, ilots: plans.len(), remplissage: (couvert / (tl * th)) as f32 })
+}
+
+#[cfg(test)]
+mod tests_page {
+    use super::*;
+    use crate::maillage::Maillage;
+
+    /// Un cube projeté : six îlots carrés.
+    fn cube() -> Maillage {
+        cube_pour(Aspect::CARRE)
+    }
+
+    fn cube_pour(a: Aspect) -> Maillage {
+        let mut m = Maillage::boite(2.0, 2.0, 2.0);
+        let faces: Vec<usize> = (0..m.faces.len()).collect();
+        for ((f, k), q) in projeter(&m, &faces, Projection::Cube, a) {
+            let n = m.faces[f].s.len();
+            m.faces[f].uv.resize(n, [0.0; 2]);
+            m.faces[f].uv[k] = q;
+        }
+        m
+    }
+
+    fn applique(m: &mut Maillage, d: &Disposition) {
+        for ((f, k), q) in &d.coins {
+            m.faces[*f].uv[*k] = *q;
+        }
+    }
+
+    fn tout(m: &Maillage) -> Vec<usize> {
+        (0..m.faces.len()).collect()
+    }
+
+    fn range(m: &mut Maillage, page: Page, a: Aspect) {
+        let d = mettre_en_page(m, &tout(m), page, a).unwrap();
+        applique(m, &d);
+    }
+
+    /// Boîtes des îlots, dans le plan.
+    fn boites(m: &Maillage, a: Aspect) -> Vec<[f32; 4]> {
+        ilots(m, &tout(m)).iter().map(|l| {
+            let (mut p, mut q) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for c in l {
+                let w = uv_de(m, *c);
+                let w = [w[0] * a.l, w[1] * a.h];
+                for k in 0..2 {
+                    p[k] = p[k].min(w[k]);
+                    q[k] = q[k].max(w[k]);
+                }
+            }
+            [p[0], p[1], q[0], q[1]]
+        }).collect()
+    }
+
+    fn verifie_rangement(m: &Maillage, a: Aspect, marge: f32) {
+        let b = boites(m, a);
+        for (i, x) in b.iter().enumerate() {
+            assert!(x[0] >= marge - 1e-4 && x[1] >= marge - 1e-4, "{x:?}");
+            assert!(x[2] <= a.l - marge + 1e-4 && x[3] <= a.h - marge + 1e-4, "{x:?}");
+            for y in &b[i + 1..] {
+                let separes = x[2] + marge <= y[0] + 1e-4 || y[2] + marge <= x[0] + 1e-4 || x[3] + marge <= y[1] + 1e-4 || y[3] + marge <= x[1] + 1e-4;
+                assert!(separes, "{x:?} {y:?}");
+            }
+        }
+    }
+
+    /// Aire signée d'une face : son signe dit si l'îlot a été retourné.
+    fn signe(m: &Maillage, f: usize) -> f32 {
+        let p = &m.faces[f].uv;
+        (0..p.len()).map(|k| p[k][0] * p[(k + 1) % p.len()][1] - p[(k + 1) % p.len()][0] * p[k][1]).sum()
+    }
+
+    #[test]
+    fn les_ilots_ne_se_touchent_pas_et_restent_dans_la_tuile() {
+        for (a, tourner) in [(Aspect::CARRE, false), (Aspect::CARRE, true), (Aspect { l: 1.0, h: 0.5 }, false), (Aspect { l: 0.25, h: 1.0 }, true)] {
+            let mut m = cube();
+            let page = Page { tourner, ..Page::DEFAUT };
+            let d = mettre_en_page(&m, &tout(&m), page, a).unwrap();
+            assert_eq!(d.ilots, 6);
+            applique(&mut m, &d);
+            verifie_rangement(&m, a, page.marge);
+        }
+    }
+
+    #[test]
+    fn six_carres_remplissent_mieux_la_tuile_que_les_rangees_de_la_projection() {
+        let m = cube();
+        let d = mettre_en_page(&m, &tout(&m), Page::DEFAUT, Aspect::CARRE).unwrap();
+        // Trois colonnes, deux rangs : 6/9 de la tuile, moins les marges
+        assert!(d.remplissage > 0.6, "{}", d.remplissage);
+    }
+
+    #[test]
+    fn la_meme_densite_ramene_un_ilot_retreci_a_sa_taille() {
+        let mut m = cube();
+        for q in &mut m.faces[0].uv {
+            *q = [q[0] / 4.0, q[1] / 4.0];
+        }
+        let f = tout(&m);
+        let aire = |m: &Maillage, f: usize| aire_plan(m, f, (1.0, 1.0));
+        let mut gardee = m.clone();
+        applique(&mut gardee, &mettre_en_page(&m, &f, Page { egaliser: false, ..Page::DEFAUT }, Aspect::CARRE).unwrap());
+        assert!((aire(&gardee, 1) / aire(&gardee, 0) - 16.0).abs() < 0.01);
+        range(&mut m, Page::DEFAUT, Aspect::CARRE);
+        assert!((aire(&m, 1) / aire(&m, 0) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn la_densite_tient_compte_de_la_forme_de_l_image() {
+        let a = Aspect { l: 1.0, h: 0.5 };
+        let mut m = cube_pour(a);
+        range(&mut m, Page::DEFAUT, a);
+        // À l'écran, le carré du modèle reste carré
+        let b = boites(&m, a);
+        for x in b {
+            assert!(((x[2] - x[0]) / (x[3] - x[1]) - 1.0).abs() < 0.01, "{x:?}");
+        }
+    }
+
+    #[test]
+    fn un_ilot_garde_sa_forme_ses_soudures_et_son_sens() {
+        for tourner in [false, true] {
+            let mut m = cube();
+            let f = tout(&m);
+            let (avant, points) = (f.iter().map(|x| signe(&m, *x)).collect::<Vec<_>>(), points(&m, &f).len());
+            let long = |m: &Maillage, f: usize| {
+                let p = &m.faces[f].uv;
+                (p[0][0] - p[1][0]).hypot(p[0][1] - p[1][1]) / (p[2][0] - p[1][0]).hypot(p[2][1] - p[1][1])
+            };
+            let rapports: Vec<f32> = f.iter().map(|x| long(&m, *x)).collect();
+            range(&mut m, Page { tourner, ..Page::DEFAUT }, Aspect::CARRE);
+            assert_eq!(super::points(&m, &f).len(), points);
+            for x in &f {
+                assert!(signe(&m, *x) * avant[*x] > 0.0, "îlot retourné");
+                assert!((long(&m, *x) - rapports[*x]).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn sans_rotation_un_ilot_garde_son_orientation() {
+        let mut m = cube();
+        let v = |m: &Maillage, f: usize| {
+            let p = &m.faces[f].uv;
+            let n = (p[1][0] - p[0][0]).hypot(p[1][1] - p[0][1]);
+            [(p[1][0] - p[0][0]) / n, (p[1][1] - p[0][1]) / n]
+        };
+        let avant: Vec<_> = tout(&m).iter().map(|f| v(&m, *f)).collect();
+        range(&mut m, Page::DEFAUT, Aspect::CARRE);
+        for f in tout(&m) {
+            assert!((v(&m, f)[0] - avant[f][0]).abs() < 1e-3 && (v(&m, f)[1] - avant[f][1]).abs() < 1e-3);
+        }
+    }
+
+    /// Des faces sans sommet commun, une par liste d'UV.
+    fn eparses(uv: &[Vec<Uv>]) -> Maillage {
+        let mut m = Maillage::boite(1.0, 1.0, 1.0);
+        let modele = m.faces[0].clone();
+        let (mut sommets, mut faces) = (Vec::new(), Vec::new());
+        for q in uv {
+            let mut f = modele.clone();
+            f.s = q.iter().map(|p| {
+                sommets.push([p[0] as f64, p[1] as f64, 0.0]);
+                sommets.len() - 1
+            }).collect();
+            f.uv = q.clone();
+            faces.push(f);
+        }
+        (m.sommets, m.faces) = (sommets, faces);
+        m
+    }
+
+    /// Bande de biais, longue de 0,4 et large de 0,04.
+    fn bande(angle: f32, o: f32) -> Vec<Uv> {
+        let (c, s) = (angle.to_radians().cos(), angle.to_radians().sin());
+        [[0.0, 0.0], [0.4, 0.0], [0.4, 0.04], [0.0, 0.04]].iter().map(|p: &[f32; 2]| [o + p[0] * c - p[1] * s, o + p[0] * s + p[1] * c]).collect()
+    }
+
+    #[test]
+    fn la_rotation_couche_les_ilots_de_biais() {
+        let m = eparses(&(0..6).map(|i| bande(45.0, 0.1 * i as f32)).collect::<Vec<_>>());
+        let f = tout(&m);
+        let p = Page { egaliser: false, ..Page::DEFAUT };
+        let d0 = mettre_en_page(&m, &f, p, Aspect::CARRE).unwrap();
+        let d1 = mettre_en_page(&m, &f, Page { tourner: true, ..p }, Aspect::CARRE).unwrap();
+        assert!(d1.remplissage > d0.remplissage * 3.0, "{} {}", d1.remplissage, d0.remplissage);
+    }
+
+    #[test]
+    fn la_rotation_ne_fait_jamais_perdre_de_place() {
+        let m = eparses(&[bande(45.0, 0.3)]);
+        let f = tout(&m);
+        let p = Page { egaliser: false, ..Page::DEFAUT };
+        let d0 = mettre_en_page(&m, &f, p, Aspect::CARRE).unwrap();
+        let d1 = mettre_en_page(&m, &f, Page { tourner: true, ..p }, Aspect::CARRE).unwrap();
+        assert!(d1.remplissage >= d0.remplissage);
+    }
+
+    #[test]
+    fn beaucoup_d_ilots_se_rangent_sans_chevauchement_et_une_marge_trop_grande_est_refusee() {
+        let uv: Vec<Vec<Uv>> = (0..3000).map(|i| {
+            let (x, l, t) = ((i % 7) as f32 * 0.1, 0.02 + (i % 11) as f32 * 0.01, 0.02 + (i % 5) as f32 * 0.02);
+            vec![[x, 0.0], [x + l, 0.0], [x + l, t], [x, t]]
+        }).collect();
+        let mut m = eparses(&uv);
+        let t = std::time::Instant::now();
+        let d = mettre_en_page(&m, &tout(&m), Page::DEFAUT, Aspect::CARRE);
+        eprintln!("3000 îlots : {:?}", t.elapsed());
+        let d = d.expect("place");
+        assert_eq!(d.ilots, 3000);
+        assert!(d.remplissage > 0.1, "{}", d.remplissage);
+        assert!(mettre_en_page(&m, &tout(&m), Page { marge: 0.2, ..Page::DEFAUT }, Aspect::CARRE).is_none());
+        // Marge de la plus petite taille d'image courante : le rangement reste juste
+        let p = Page { marge: 1.0 / 2048.0, ..Page::DEFAUT };
+        range(&mut m, p, Aspect::CARRE);
+        verifie_rangement(&m, Aspect::CARRE, p.marge);
+    }
+
+    #[test]
+    fn les_faces_sans_aire_ne_font_pas_de_nan() {
+        let mut m = cube();
+        for f in &mut m.faces {
+            for q in &mut f.uv {
+                *q = [0.5, 0.5];
+            }
+        }
+        let d = mettre_en_page(&m, &tout(&m), Page::DEFAUT, Aspect::CARRE).unwrap();
+        assert!(d.coins.iter().all(|(_, q)| q[0].is_finite() && q[1].is_finite()));
+    }
+}
+
+/// Arêtes où un dépliage coupe : celles marquées, celles qui bordent plus de deux faces,
+/// et celles de deux faces de sens opposés, qui ne se déplient pas d'un seul tenant.
+/// Chaque carte est un morceau d'un seul tenant, à plat ; un sommet coupé y compte double.
+struct Carte {
+    /// Coin → sommet de la carte.
+    coins: Vec<(Coin, usize)>,
+    positions: Vec<P3>,
+    triangles: Vec<[usize; 3]>,
+}
+
+fn racine(p: &mut [usize], mut x: usize) -> usize {
+    while p[x] != x {
+        p[x] = p[p[x]];
+        x = p[x];
+    }
+    x
+}
+
+fn cartes(m: &Maillage, faces: &[usize]) -> Vec<Carte> {
+    let cle_a = |a: usize, b: usize| (a.min(b), a.max(b));
+    let coutures: HashSet<(usize, usize)> = m.coutures_valides().iter().map(|a| cle_a(a[0], a[1])).collect();
+    let mut debut = Vec::with_capacity(faces.len());
+    let mut nb = 0;
+    for &f in faces {
+        debut.push(nb);
+        nb += m.faces[f].s.len();
+    }
+    let mut pf: Vec<usize> = (0..faces.len()).collect();
+    let mut pc: Vec<usize> = (0..nb).collect();
+    // Arête → rang de la face, coin de départ, sens
+    let mut par_arete: HashMap<(usize, usize), Vec<(usize, usize, bool)>> = HashMap::new();
+    for (r, &f) in faces.iter().enumerate() {
+        let s = &m.faces[f].s;
+        for k in 0..s.len() {
+            let (a, b) = (s[k], s[(k + 1) % s.len()]);
+            par_arete.entry(cle_a(a, b)).or_default().push((r, k, a < b));
+        }
+    }
+    for (c, l) in &par_arete {
+        let [x, y] = l[..] else { continue };
+        if coutures.contains(c) || x.2 == y.2 {
+            continue;
+        }
+        let (rx, ry) = (racine(&mut pf, x.0), racine(&mut pf, y.0));
+        pf[rx] = ry;
+        // Les deux faces parcourent l'arête en sens opposés
+        let (nx, ny) = (m.faces[faces[x.0]].s.len(), m.faces[faces[y.0]].s.len());
+        for (a, b) in [(debut[x.0] + x.1, debut[y.0] + (y.1 + 1) % ny), (debut[x.0] + (x.1 + 1) % nx, debut[y.0] + y.1)] {
+            let (ra, rb) = (racine(&mut pc, a), racine(&mut pc, b));
+            pc[ra] = rb;
+        }
+    }
+    let mut rangs: HashMap<usize, usize> = HashMap::new();
+    let mut l: Vec<Carte> = Vec::new();
+    let mut sommets: Vec<HashMap<usize, usize>> = Vec::new();
+    for (r, &f) in faces.iter().enumerate() {
+        let n = rangs.len();
+        let c = *rangs.entry(racine(&mut pf, r)).or_insert(n);
+        if c == l.len() {
+            l.push(Carte { coins: Vec::new(), positions: Vec::new(), triangles: Vec::new() });
+            sommets.push(HashMap::new());
+        }
+        let s = &m.faces[f].s;
+        let mut locaux = HashMap::new();
+        for (k, &i) in s.iter().enumerate() {
+            let q = racine(&mut pc, debut[r] + k);
+            let v = *sommets[c].entry(q).or_insert_with(|| {
+                l[c].positions.push(m.sommets[i]);
+                l[c].positions.len() - 1
+            });
+            l[c].coins.push(((f, k), v));
+            locaux.insert(i, v);
+        }
+        l[c].triangles.extend(m.trianguler(s).iter().map(|t| t.map(|i| locaux[&i])));
+    }
+    l
+}
+
+/// Moindres carrés conformes (Lévy et al., 2002) : chaque triangle veut rester semblable
+/// à lui-même, deux sommets du bord fixés. Rend la position de chaque sommet ; `None` si
+/// la carte n'a pas de bord. Résolu par gradient conjugué, sans jamais former la matrice.
+fn lscm(c: &Carte) -> Option<Vec<[f64; 2]>> {
+    let n = c.positions.len();
+    let mut compte: HashMap<(usize, usize), u32> = HashMap::new();
+    for t in &c.triangles {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            *compte.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let bord: Vec<usize> = compte.iter().filter(|x| *x.1 == 1).flat_map(|x| [x.0 .0, x.0 .1]).collect();
+    let d2 = |a: usize, b: usize| {
+        let (p, q) = (c.positions[a], c.positions[b]);
+        [0, 1, 2].map(|k| (p[k] - q[k]).powi(2)).iter().sum::<f64>()
+    };
+    let loin = |de: usize| bord.iter().copied().max_by(|x, y| d2(de, *x).total_cmp(&d2(de, *y)).then(x.cmp(y)));
+    let pin_a = loin(*bord.iter().min()?)?;
+    let pin_b = loin(pin_a)?;
+    if pin_a == pin_b {
+        return None;
+    }
+    let ecart = d2(pin_a, pin_b).sqrt().max(1e-12);
+    // Variables : u puis v de chaque sommet ; PIN : fixé
+    const PIN: u32 = u32::MAX;
+    let mut rang = vec![0u32; 2 * n];
+    let mut libres = 0;
+    for i in 0..n {
+        for k in 0..2 {
+            rang[2 * i + k] = if i == pin_a || i == pin_b {
+                PIN
+            } else {
+                libres += 1;
+                libres - 1
+            };
+        }
+    }
+    let libres = libres as usize;
+    let fixe = |i: usize, k: usize| if i == pin_b && k == 0 { ecart } else { 0.0 };
+    // Deux lignes par triangle, trois sommets de deux coordonnées chacune
+    let mut lignes: Vec<([u32; 6], [f64; 6])> = Vec::with_capacity(2 * c.triangles.len());
+    let mut second: Vec<f64> = Vec::with_capacity(2 * c.triangles.len());
+    for t in &c.triangles {
+        let (p0, p1, p2) = (c.positions[t[0]], c.positions[t[1]], c.positions[t[2]]);
+        let e = [0, 1, 2].map(|k| p1[k] - p0[k]);
+        let f = [0, 1, 2].map(|k| p2[k] - p0[k]);
+        let l = scal(e, e).sqrt();
+        if l < 1e-12 {
+            continue;
+        }
+        let x2 = scal(f, e) / l;
+        let y2 = (scal(f, f) - x2 * x2).max(0.0).sqrt();
+        let double = l * y2;
+        if double < 1e-14 {
+            continue;
+        }
+        let p = [[0.0, 0.0], [l, 0.0], [x2, y2]];
+        let w = 1.0 / double.sqrt();
+        let (mut cols, mut re, mut im) = ([0u32; 6], [0.0; 6], [0.0; 6]);
+        for j in 0..3 {
+            let (a, b) = (p[(j + 2) % 3], p[(j + 1) % 3]);
+            let (wr, wi) = ((a[0] - b[0]) * w, (a[1] - b[1]) * w);
+            cols[2 * j] = rang[2 * t[j]];
+            cols[2 * j + 1] = rang[2 * t[j] + 1];
+            re[2 * j] = wr;
+            re[2 * j + 1] = -wi;
+            im[2 * j] = wi;
+            im[2 * j + 1] = wr;
+        }
+        for v in [re, im] {
+            let mut b = 0.0;
+            for j in 0..3 {
+                for k in 0..2 {
+                    if cols[2 * j + k] == PIN {
+                        b -= v[2 * j + k] * fixe(t[j], k);
+                    }
+                }
+            }
+            lignes.push((cols, v));
+            second.push(b);
+        }
+    }
+    let fois = |x: &[f64], y: &mut [f64]| {
+        for (r, (l, v)) in y.iter_mut().zip(&lignes) {
+            *r = (0..6).filter(|k| l[*k] != PIN).map(|k| v[k] * x[l[k] as usize]).sum();
+        }
+    };
+    let transposee = |x: &[f64], y: &mut [f64]| {
+        y.fill(0.0);
+        for (r, (l, v)) in x.iter().zip(&lignes) {
+            for k in 0..6 {
+                if l[k] != PIN {
+                    y[l[k] as usize] += v[k] * r;
+                }
+            }
+        }
+    };
+    let mut diag = vec![0.0; libres];
+    for (l, v) in &lignes {
+        for k in 0..6 {
+            if l[k] != PIN {
+                diag[l[k] as usize] += v[k] * v[k];
+            }
+        }
+    }
+    let inverse: Vec<f64> = diag.iter().map(|d| if *d > 0.0 { 1.0 / d } else { 0.0 }).collect();
+    // Départ : à plat dans le plan moyen, les deux points fixes à leur place
+    let mut x = vec![0.0; libres];
+    {
+        let (a, b) = (c.positions[pin_a], c.positions[pin_b]);
+        let axe = [0, 1, 2].map(|k| (b[k] - a[k]) / ecart);
+        let mut normale = [0.0; 3];
+        for t in &c.triangles {
+            let (p, q, r) = (c.positions[t[0]], c.positions[t[1]], c.positions[t[2]]);
+            let (e, f) = ([0, 1, 2].map(|k| q[k] - p[k]), [0, 1, 2].map(|k| r[k] - p[k]));
+            normale[0] += e[1] * f[2] - e[2] * f[1];
+            normale[1] += e[2] * f[0] - e[0] * f[2];
+            normale[2] += e[0] * f[1] - e[1] * f[0];
+        }
+        let croix = [normale[1] * axe[2] - normale[2] * axe[1], normale[2] * axe[0] - normale[0] * axe[2], normale[0] * axe[1] - normale[1] * axe[0]];
+        let l = scal(croix, croix).sqrt();
+        for i in 0..n {
+            let d = [0, 1, 2].map(|k| c.positions[i][k] - a[k]);
+            if rang[2 * i] != PIN {
+                x[rang[2 * i] as usize] = scal(d, axe);
+                if l > 1e-12 {
+                    x[rang[2 * i + 1] as usize] = scal(d, croix) / l;
+                }
+            }
+        }
+    }
+    let mut r = vec![0.0; lignes.len()];
+    fois(&x, &mut r);
+    r.iter_mut().zip(&second).for_each(|(a, b)| *a = b - *a);
+    let mut s = vec![0.0; libres];
+    transposee(&r, &mut s);
+    let mut z: Vec<f64> = s.iter().zip(&inverse).map(|(a, b)| a * b).collect();
+    let mut p = z.clone();
+    let mut gamma: f64 = s.iter().zip(&z).map(|(a, b)| a * b).sum();
+    let depart = gamma;
+    let mut q = vec![0.0; lignes.len()];
+    for _ in 0..(4 * libres + 200).min(30000) {
+        if gamma <= depart * 1e-20 || gamma == 0.0 {
+            break;
+        }
+        fois(&p, &mut q);
+        let d: f64 = q.iter().map(|a| a * a).sum();
+        if d <= 0.0 {
+            break;
+        }
+        let alpha = gamma / d;
+        x.iter_mut().zip(&p).for_each(|(a, b)| *a += alpha * b);
+        r.iter_mut().zip(&q).for_each(|(a, b)| *a -= alpha * b);
+        transposee(&r, &mut s);
+        z.iter_mut().zip(s.iter().zip(&inverse)).for_each(|(a, (b, c))| *a = b * c);
+        let nouveau: f64 = s.iter().zip(&z).map(|(a, b)| a * b).sum();
+        let beta = nouveau / gamma;
+        gamma = nouveau;
+        p.iter_mut().zip(&z).for_each(|(a, b)| *a = b + beta * *a);
+    }
+    Some((0..n).map(|i| [0, 1].map(|k| if rang[2 * i + k] == PIN { fixe(i, k) } else { x[rang[2 * i + k] as usize] })).collect())
+}
+
+/// Met une carte dépliée à l'échelle du modèle, à l'endroit (l'image n'est pas vue en
+/// miroir, le haut du modèle vers le haut de l'image). Rend les triangles retournés.
+fn redresser(c: &Carte, p: &mut [[f64; 2]]) -> usize {
+    let signee = |p: &[[f64; 2]], t: &[usize; 3]| {
+        let (a, b, d) = (p[t[0]], p[t[1]], p[t[2]]);
+        ((b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0])) / 2.0
+    };
+    let total: f64 = c.triangles.iter().map(|t| signee(p, t)).sum();
+    // v descend : une face vue de l'extérieur tourne en sens négatif
+    if total > 0.0 {
+        p.iter_mut().for_each(|q| q[0] = -q[0]);
+    }
+    let a2: f64 = c.triangles.iter().map(|t| signee(p, t).abs()).sum();
+    let a3: f64 = c.triangles.iter().map(|t| {
+        let (a, b, d) = (c.positions[t[0]], c.positions[t[1]], c.positions[t[2]]);
+        let (e, f) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| d[k] - a[k]));
+        let n = [e[1] * f[2] - e[2] * f[1], e[2] * f[0] - e[0] * f[2], e[0] * f[1] - e[1] * f[0]];
+        scal(n, n).sqrt() / 2.0
+    }).sum();
+    if a2 > 1e-18 && a3 > 1e-18 {
+        let s = (a3 / a2).sqrt();
+        p.iter_mut().for_each(|q| *q = [q[0] * s, q[1] * s]);
+    }
+    let mut g = [0.0, 0.0];
+    for t in &c.triangles {
+        let (a, b, d) = (p[t[0]], p[t[1]], p[t[2]]);
+        let (ha, hb, hd) = (c.positions[t[0]][1], c.positions[t[1]][1], c.positions[t[2]][1]);
+        g[0] -= (ha * (b[1] - d[1]) + hb * (d[1] - a[1]) + hd * (a[1] - b[1])) / 2.0;
+        g[1] -= (ha * (d[0] - b[0]) + hb * (a[0] - d[0]) + hd * (b[0] - a[0])) / 2.0;
+    }
+    // Une pièce à plat n'a pas de haut : seule une pente nette la fait pivoter
+    if g[0].hypot(g[1]) > 0.2 * a3.max(1e-18) {
+        let theta = -std::f64::consts::FRAC_PI_2 - g[1].atan2(g[0]);
+        let (sin, cos) = theta.sin_cos();
+        p.iter_mut().for_each(|q| *q = [q[0] * cos - q[1] * sin, q[0] * sin + q[1] * cos]);
+    }
+    c.triangles.iter().filter(|t| signee(p, t) > 1e-12 * a3.max(1e-12)).count()
+}
+
+/// Résultat d'un dépliage.
+pub struct Depliage {
+    pub disposition: Disposition,
+    /// Triangles que le dépliage a retournés : il manque des coutures.
+    pub retournes: usize,
+}
+
+/// Déplie les faces données, coupées à leurs coutures et à leur bord, puis range les
+/// morceaux dans la tuile. Ils ont tous la densité du modèle.
+pub fn deplier(m: &Maillage, faces: &[usize], page: Page, a: Aspect) -> Result<Depliage, String> {
+    let mut plans: Vec<Ilot> = Vec::new();
+    let mut retournes = 0;
+    for c in cartes(m, faces) {
+        let mut p = lscm(&c).ok_or("Un morceau est fermé : marquez une couture dessus")?;
+        retournes += redresser(&c, &mut p);
+        plans.push(c.coins.iter().map(|(coin, v)| (*coin, p[*v])).collect());
+    }
+    let disposition = disposer(&plans, page, a).ok_or("Trop de morceaux pour cette marge")?;
+    Ok(Depliage { disposition, retournes })
+}
+
+#[cfg(test)]
+mod tests_depliage {
+    use super::*;
+    use crate::maillage::Maillage;
+
+    fn tout(m: &Maillage) -> Vec<usize> {
+        (0..m.faces.len()).collect()
+    }
+
+    fn applique(m: &mut Maillage, d: &Disposition) {
+        for f in &mut m.faces {
+            f.uv = vec![[0.0; 2]; f.s.len()];
+        }
+        for ((f, k), q) in &d.coins {
+            m.faces[*f].uv[*k] = *q;
+        }
+    }
+
+    fn deplie(m: &mut Maillage) -> Depliage {
+        let d = deplier(m, &tout(m), Page::DEFAUT, Aspect::CARRE).unwrap();
+        applique(m, &d.disposition);
+        d
+    }
+
+    /// Rapports des côtés de chaque face entre UV et modèle : tous égaux si rien n'est étiré.
+    fn etirement(m: &Maillage) -> f64 {
+        let mut r: Vec<f64> = Vec::new();
+        for f in &m.faces {
+            for k in 0..f.s.len() {
+                let j = (k + 1) % f.s.len();
+                let (a, b) = (m.sommets[f.s[k]], m.sommets[f.s[j]]);
+                let l3 = [0, 1, 2].map(|c| (a[c] - b[c]).powi(2)).iter().sum::<f64>().sqrt();
+                let l2 = ((f.uv[k][0] - f.uv[j][0]) as f64).hypot((f.uv[k][1] - f.uv[j][1]) as f64);
+                r.push(l2 / l3);
+            }
+        }
+        let (a, b) = (r.iter().copied().fold(f64::MAX, f64::min), r.iter().copied().fold(0.0, f64::max));
+        b / a
+    }
+
+    fn sens(m: &Maillage, f: usize) -> f32 {
+        let p = &m.faces[f].uv;
+        (0..p.len()).map(|k| p[k][0] * p[(k + 1) % p.len()][1] - p[(k + 1) % p.len()][0] * p[k][1]).sum()
+    }
+
+    fn grille(n: usize) -> Maillage {
+        let sommets = (0..=n).flat_map(|j| (0..=n).map(move |i| [i as f64, j as f64 * 0.5, (j as f64 * 0.4).sin() * 0.0])).collect();
+        let faces = (0..n).flat_map(|j| (0..n).map(move |i| {
+            let c = |x: usize, y: usize| y * (n + 1) + x;
+            Face { s: vec![c(i, j), c(i + 1, j), c(i + 1, j + 1), c(i, j + 1)], m: crate::maillage::defaut(), uv: Vec::new() }
+        })).collect();
+        Maillage::new(sommets, faces, Vec::new())
+    }
+
+    use crate::maillage::Face;
+
+    /// Cube coupé en croix : sept arêtes.
+    fn cube_coupe() -> Maillage {
+        let mut m = Maillage::boite(2.0, 2.0, 2.0);
+        let aretes = m.aretes();
+        let p = |i: usize| m.sommets[i];
+        // Tout le tour du dessus sauf une arête, plus les quatre verticales sauf une
+        let haut: Vec<_> = aretes.iter().copied().filter(|a| p(a[0])[1] > 0.0 && p(a[1])[1] > 0.0).collect();
+        let debout: Vec<_> = aretes.iter().copied().filter(|a| (p(a[0])[1] > 0.0) != (p(a[1])[1] > 0.0)).collect();
+        // La dernière arête rejoint le sommet du bas que les verticales ont laissé
+        let pris: Vec<usize> = debout[..3].iter().flatten().copied().collect();
+        let bas = aretes.iter().copied().find(|a| p(a[0])[1] < 0.0 && p(a[1])[1] < 0.0 && (pris.contains(&a[0]) != pris.contains(&a[1]))).unwrap();
+        let mut tour = vec![haut[0]];
+        while tour.len() < 3 {
+            let suite = haut.iter().find(|a| !tour.contains(a) && tour.iter().flatten().any(|i| a.contains(i))).unwrap();
+            tour.push(*suite);
+        }
+        m.coutures = tour.iter().chain(&debout[..3]).copied().chain([bas]).collect();
+        m
+    }
+
+    #[test]
+    fn un_plan_se_deplie_sans_aucune_deformation() {
+        let mut m = grille(6);
+        let d = deplie(&mut m);
+        assert_eq!((d.disposition.ilots, d.retournes), (1, 0));
+        assert!(etirement(&m) < 1.01, "{}", etirement(&m));
+    }
+
+    #[test]
+    fn un_cylindre_coupe_se_deroule_en_rectangle() {
+        let mut m = Maillage::cylindre(1.0, 3.0, 24, false);
+        let pointes: Vec<usize> = (0..m.faces.len()).filter(|f| m.faces[*f].s.len() != 4).collect();
+        m.supprimer_faces_pour_test(&pointes);
+        let cote = m.aretes().into_iter().find(|a| (m.sommets[a[0]][1] - m.sommets[a[1]][1]).abs() > 1.0).unwrap();
+        m.coutures = vec![cote];
+        let d = deplie(&mut m);
+        assert_eq!(d.disposition.ilots, 1);
+        assert_eq!(d.retournes, 0);
+        assert!(etirement(&m) < 1.05, "{}", etirement(&m));
+    }
+
+    #[test]
+    fn une_couture_reste_soudee_sur_le_modele_et_coupe_dans_l_image() {
+        let mut m = Maillage::cylindre(1.0, 3.0, 12, false);
+        let pointes: Vec<usize> = (0..m.faces.len()).filter(|f| m.faces[*f].s.len() != 4).collect();
+        m.supprimer_faces_pour_test(&pointes);
+        let n = m.sommets.len();
+        let cote = m.aretes().into_iter().find(|a| (m.sommets[a[0]][1] - m.sommets[a[1]][1]).abs() > 1.0).unwrap();
+        m.coutures = vec![cote];
+        deplie(&mut m);
+        assert_eq!(m.sommets.len(), n);
+        // Les deux bouts de la couture ont chacun deux places
+        assert_eq!(points(&m, &tout(&m)).len(), n + 2);
+    }
+
+    #[test]
+    fn un_cube_coupe_est_six_carres_parfaits() {
+        let mut m = cube_coupe();
+        let d = deplie(&mut m);
+        assert_eq!((d.disposition.ilots, d.retournes), (1, 0));
+        assert!(etirement(&m) < 1.01, "{}", etirement(&m));
+    }
+
+    #[test]
+    fn des_coutures_tout_autour_font_des_morceaux() {
+        let mut m = Maillage::boite(2.0, 2.0, 2.0);
+        m.coutures = m.aretes();
+        let d = deplie(&mut m);
+        assert_eq!(d.disposition.ilots, 6);
+        assert!(etirement(&m) < 1.01);
+    }
+
+    #[test]
+    fn un_morceau_ferme_est_refuse() {
+        let m = Maillage::sphere_uv(1.0, 12, 8);
+        let e = deplier(&m, &tout(&m), Page::DEFAUT, Aspect::CARRE).err().unwrap();
+        assert!(e.contains("fermé"), "{e}");
+    }
+
+    #[test]
+    fn seules_les_faces_visees_se_deplient_et_le_reste_fait_bord() {
+        // Le bord des faces visées suffit : la sphère n'est pas fermée pour elles
+        let m = Maillage::sphere_uv(1.0, 12, 8);
+        let faces: Vec<usize> = (0..m.faces.len() / 2).collect();
+        let d = deplier(&m, &faces, Page::DEFAUT, Aspect::CARRE).unwrap();
+        assert!(d.disposition.coins.iter().all(|((f, _), _)| *f < faces.len()));
+    }
+
+    #[test]
+    fn le_depliage_est_vu_a_l_endroit_comme_une_projection() {
+        let mut m = cube_coupe();
+        deplie(&mut m);
+        let mut p = Maillage::boite(2.0, 2.0, 2.0);
+        for ((f, k), q) in { let t = tout(&p); for f in &mut p.faces { f.uv = vec![[0.0; 2]; f.s.len()]; } projeter(&p, &t, Projection::Cube, Aspect::CARRE) } {
+            p.faces[f].uv[k] = q;
+        }
+        for f in tout(&m) {
+            assert!(sens(&m, f) * sens(&p, f) > 0.0, "face {f} en miroir");
+        }
+    }
+
+    #[test]
+    fn le_haut_du_modele_est_en_haut_de_l_image() {
+        let mut m = Maillage::cylindre(1.0, 6.0, 24, false);
+        let pointes: Vec<usize> = (0..m.faces.len()).filter(|f| m.faces[*f].s.len() != 4).collect();
+        m.supprimer_faces_pour_test(&pointes);
+        let cote = m.aretes().into_iter().find(|a| (m.sommets[a[0]][1] - m.sommets[a[1]][1]).abs() > 1.0).unwrap();
+        m.coutures = vec![cote];
+        deplie(&mut m);
+        for f in &m.faces {
+            for k in 0..f.s.len() {
+                for j in 0..f.s.len() {
+                    if m.sommets[f.s[k]][1] > m.sommets[f.s[j]][1] + 1.0 {
+                        assert!(f.uv[k][1] < f.uv[j][1], "{:?}", f.uv);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn une_tete_decoupee_se_deplie_sans_retournement() {
+        // Sphère ouverte d'un méridien, de pôle à pôle
+        let mut m = Maillage::sphere_uv(1.0, 32, 16);
+        let (a, b): (Vec<_>, Vec<_>) = m.sommets.iter().enumerate().map(|(i, _)| i).partition(|i| m.sommets[*i][2].abs() < 1e-9 && m.sommets[*i][0] >= -1e-9);
+        let _ = b;
+        let mut aretes: Vec<_> = m.aretes().into_iter().filter(|e| a.contains(&e[0]) && a.contains(&e[1])).collect();
+        m.coutures.append(&mut aretes);
+        let t = std::time::Instant::now();
+        let d = deplie(&mut m);
+        eprintln!("sphère : {:?}, {} retournés", t.elapsed(), d.retournes);
+        assert_eq!(d.disposition.ilots, 1);
+        assert!(m.faces.iter().flat_map(|f| &f.uv).all(|q| (0.0..=1.0).contains(&q[0]) && (0.0..=1.0).contains(&q[1])));
+    }
+
+    #[test]
+    fn deux_faces_de_sens_opposes_se_separent() {
+        let mut m = grille(2);
+        m.faces[0].s.reverse();
+        let d = deplie(&mut m);
+        assert_eq!(d.disposition.ilots, 2);
+    }
+}
+
 #[cfg(test)]
 mod tests_projection {
     use super::*;

@@ -60,6 +60,9 @@ fn main() {
         Vue { nom: "uv", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "uv-sphere", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "uv-cube", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "uv-page", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "uv-deplie", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "uv-page-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "uv-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "vis", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "vis-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
@@ -161,7 +164,7 @@ fn main() {
             if s.nom != "uv" {
                 let mut p = Projet::neuf();
                 p.objets[0].nom = "forme".into();
-                p.objets[0].maillage = Arc::new(if s.nom == "uv-sphere" { Maillage::sphere_uv(1.0, 32, 16) } else { Maillage::boite(2.0, 1.0, 1.0) });
+                p.objets[0].maillage = Arc::new(if s.nom == "uv-sphere" || s.nom.starts_with("uv-page") || s.nom == "uv-deplie" { Maillage::sphere_uv(1.0, 32, 16) } else { Maillage::boite(2.0, 1.0, 1.0) });
                 app.remplacer(p, "projection");
                 app.choisir(Some(0));
             }
@@ -169,6 +172,30 @@ fn main() {
             match s.nom {
                 "uv-sphere" => app.projeter(rustcraft::uv::Projection::Sphere { axe: 1 }),
                 "uv-cube" => app.projeter(rustcraft::uv::Projection::Cube),
+                "uv-deplie" => {
+                    let t = app.travail.as_mut().unwrap();
+                    let (m, mut aretes) = (&t.m, Vec::new());
+                    for e in m.aretes() {
+                        let (p, q) = (m.sommets[e[0]], m.sommets[e[1]]);
+                        if (p[2].abs() < 1e-6 && p[0] >= -1e-6 && q[2].abs() < 1e-6 && q[0] >= -1e-6) || (p[1].abs() < 1e-6 && q[1].abs() < 1e-6) {
+                            aretes.push(e);
+                        }
+                    }
+                    t.sel.aretes = aretes;
+                    t.marquer_coutures(true).unwrap();
+                    t.sel.aretes.clear();
+                    let t0 = std::time::Instant::now();
+                    app.deplier();
+                    println!("dépliage : {:.0} ms, {} faces", t0.elapsed().as_secs_f64() * 1e3, app.travail.as_ref().unwrap().m.faces.len());
+                }
+                "uv-page" | "uv-page-telephone" => {
+                    app.projeter(rustcraft::uv::Projection::Sphere { axe: 1 });
+                    let t = app.travail.as_mut().unwrap();
+                    t.sel.faces = (0..t.m.faces.len() / 2).collect();
+                    app.projeter(rustcraft::uv::Projection::Cube);
+                    app.travail.as_mut().unwrap().sel.faces.clear();
+                    app.mettre_en_page();
+                }
                 _ => app.ouvrir_uv(),
             }
         }
