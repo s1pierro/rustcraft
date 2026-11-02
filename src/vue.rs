@@ -34,6 +34,11 @@ pub fn faces(m: &Maillage) -> Vec<f32> {
 
 /// Les faces retenues par `garde`, d'après leur rang.
 pub fn faces_si(m: &Maillage, garde: impl Fn(usize) -> bool) -> Vec<f32> {
+    faces_si_uv(m, garde, |_| true)
+}
+
+/// Comme `faces_si` ; seules les faces retenues par `avec_uv` portent leurs UV.
+pub fn faces_si_uv(m: &Maillage, garde: impl Fn(usize) -> bool, avec_uv: impl Fn(usize) -> bool) -> Vec<f32> {
     let mut v = Vec::with_capacity(m.faces.len() * 6 * FACE_F32);
     for (k, f) in m.faces.iter().enumerate() {
         if !garde(k) {
@@ -44,7 +49,7 @@ pub fn faces_si(m: &Maillage, garde: impl Fn(usize) -> bool) -> Vec<f32> {
             for i in t {
                 pousser(&mut v, m.sommets[i]);
                 pousser(&mut v, n);
-                let uv = f.s.iter().position(|x| *x == i).and_then(|k| f.uv.get(k)).filter(|_| f.uv.len() == f.s.len());
+                let uv = f.s.iter().position(|x| *x == i).and_then(|c| f.uv.get(c)).filter(|_| avec_uv(k) && f.uv.len() == f.s.len());
                 v.extend_from_slice(uv.unwrap_or(&[SANS_UV; 2]));
             }
         }

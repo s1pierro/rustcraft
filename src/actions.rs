@@ -68,6 +68,7 @@ pub enum Action {
     AretesFaces,
     SommetsAretes,
     SommetsFaces,
+    EditerUv,
 }
 
 /// Panneau où figure l'opération.
@@ -224,6 +225,7 @@ impl Contexte {
             Inverser | Separer | SupprimerFaces | AucuneFace | FacesSommets | FacesAretes => self.geo && nf > 0,
             Trianguler => self.geo && self.grande_face,
             Boucle => self.geo && self.anneau,
+            EditerUv => self.geo,
             Dissoudre => self.geo && matches!(self.dissolution, Some(Ok(()))),
             Revolution => self.geo && n + na > 0,
             Lies => self.geo && self.actif,
@@ -760,6 +762,14 @@ pub const CATALOGUE: &[Op] = &[
         aide: "remplacer les sommets sélectionnés par les faces dont tous les sommets sont sélectionnés (le type face devient sélectionnable)",
         barre: Some(Barre { groupe: Groupe::Sommets, glyphe: "◭", court: "S → faces", defaut: false }),
     },
+    Op {
+        action: Action::EditerUv,
+        menu: Menu::Geometrie,
+        rubrique: "Coordonnées de texture",
+        libelle: "Éditer les UV",
+        aide: "ouvrir ou fermer la vue UV à côté du modèle : les faces choisies y apparaissent, toutes si aucune ne l’est ; le modèle montre la texture et suit chaque déplacement",
+        barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "UV", defaut: true }),
+    },
 ];
 
 #[cfg(test)]
@@ -772,7 +782,7 @@ mod tests {
         for (k, o) in CATALOGUE.iter().enumerate() {
             assert_eq!(o.action as usize, k, "{:?}", o.action);
         }
-        assert_eq!(CATALOGUE.len(), Action::SommetsFaces as usize + 1);
+        assert_eq!(CATALOGUE.len(), Action::EditerUv as usize + 1);
     }
 
     #[test]
@@ -823,10 +833,11 @@ mod tests {
     #[test]
     fn barre_de_geometrie_commence_par_le_type_actif() {
         let c = Choix::new();
-        assert!(barre(&Contexte { geo: true, ..Default::default() }, &c).is_empty());
+        // Sans sélection, il reste la vue UV
+        assert_eq!(noms(&barre(&Contexte { geo: true, ..Default::default() }, &c)), ["UV"]);
         let x = Contexte { geo: true, actif: true, type_actif: Some(Groupe::Sommets), sommets: 3, faces: 1, ..Default::default() };
         let g: Vec<Groupe> = barre(&x, &c).iter().map(|e| e.0).collect();
-        assert_eq!(g, [Groupe::ElementActif, Groupe::Sommets, Groupe::Faces]);
+        assert_eq!(g, [Groupe::ElementActif, Groupe::Sommets, Groupe::Faces, Groupe::Geo]);
         let n = noms(&barre(&x, &c));
         assert_eq!(n[..3], ["Liés", "Face", "Fusionner"]);
         assert!(!n.contains(&"Arête"), "il faut deux sommets exactement");

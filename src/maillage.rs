@@ -29,6 +29,11 @@ pub struct Face {
     pub uv: Vec<[f32; 2]>,
 }
 
+fn mix_uv(a: [f32; 2], b: [f32; 2], t: f64) -> [f32; 2] {
+    let t = t as f32;
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+}
+
 /// Retire les voisins égaux d'un polygone fermé.
 fn sans_doublons(s: &[usize]) -> Vec<usize> {
     (0..s.len()).filter(|&k| s[k] != s[(k + 1) % s.len()]).map(|k| s[k]).collect()
@@ -1039,22 +1044,28 @@ impl Maillage {
         }
         for f in &mut self.faces {
             let mut s = Vec::with_capacity(f.s.len());
+            let avec_uv = f.uv.len() == f.s.len();
+            let mut uv = Vec::with_capacity(f.uv.len());
             for k in 0..f.s.len() {
                 let (a, b) = (f.s[k], f.s[(k + 1) % f.s.len()]);
                 s.push(a);
+                if avec_uv {
+                    uv.push(f.uv[k]);
+                }
                 if let Some(l) = nouveaux.get(&cle(a, b)) {
                     if a < b {
                         s.extend_from_slice(l);
                     } else {
                         s.extend(l.iter().rev());
                     }
+                    if avec_uv {
+                        let n = l.len() + 1;
+                        uv.extend((1..n).map(|m| mix_uv(f.uv[k], f.uv[(k + 1) % f.s.len()], m as f64 / n as f64)));
+                    }
                 }
             }
-            // De nouveaux coins n'ont pas de coordonnées ; une face intacte garde les siennes
-            if s.len() != f.s.len() {
-                f.uv.clear();
-            }
             f.s = s;
+            f.uv = uv;
         }
         let mut fils = Vec::with_capacity(self.fils.len());
         for &[a, b] in &self.fils {
@@ -1162,23 +1173,29 @@ impl Maillage {
             .collect();
         let [i0, j0] = an.rails[an.depart];
         let l0 = dist(self.sommets[i0], self.sommets[j0]);
-        let mut nouveaux: HashMap<Cle, (usize, Vec<usize>)> = HashMap::new();
+        let mut nouveaux: HashMap<Cle, (usize, Vec<usize>, Vec<f64>)> = HashMap::new();
         for &[a, b] in &an.rails {
             let (p, q) = (self.sommets[a], self.sommets[b]);
             let l = dist(p, q);
             let mut ids = Vec::with_capacity(coupes);
+            let mut places = Vec::with_capacity(coupes);
             for &t in &ts {
                 let mut u = t;
                 if uniforme && l > 0.0 {
                     u = (if inverser { 1.0 - (1.0 - t) * l0 / l } else { t * l0 / l }).clamp(0.001, 0.999);
                 }
                 ids.push(self.sommets.len());
+                places.push(u);
                 self.sommets.push(mix(p, q, u));
             }
-            nouveaux.insert(cle(a, b), (a, ids));
+            nouveaux.insert(cle(a, b), (a, ids, places));
         }
         let depuis = |a: usize, b: usize| -> Option<Vec<usize>> {
-            nouveaux.get(&cle(a, b)).map(|(d, l)| if *d == a { l.clone() } else { l.iter().rev().copied().collect() })
+            nouveaux.get(&cle(a, b)).map(|(d, l, _)| if *d == a { l.clone() } else { l.iter().rev().copied().collect() })
+        };
+        // Place des nouveaux sommets de a vers b, dans l'ordre de `depuis`
+        let places = |a: usize, b: usize| -> Vec<f64> {
+            nouveaux.get(&cle(a, b)).map_or(Vec::new(), |(d, _, p)| if *d == a { p.clone() } else { p.iter().rev().map(|u| 1.0 - u).collect() })
         };
         let quads: HashSet<usize> = an.quads.iter().copied().collect();
         let (mut aretes, mut faces) = (Vec::new(), Vec::with_capacity(self.faces.len()));
@@ -1195,8 +1212,17 @@ impl Maillage {
                     c
                 };
                 let (c0, c3) = (bande(p0, p1), bande(p3, p2));
+                let avec_uv = f.uv.len() == 4;
+                let long = |x: usize, y: usize, a: usize, b: usize| -> Vec<[f32; 2]> {
+                    let mut l = vec![f.uv[a]];
+                    l.extend(places(x, y).iter().map(|u| mix_uv(f.uv[a], f.uv[b], *u)));
+                    l.push(f.uv[b]);
+                    l
+                };
+                let (u0, u3) = if avec_uv { (long(p0, p1, k, (k + 1) % 4), long(p3, p2, (k + 3) % 4, (k + 2) % 4)) } else { (Vec::new(), Vec::new()) };
                 for m in 0..c0.len() - 1 {
-                    faces.push(Face { s: vec![c0[m], c0[m + 1], c3[m + 1], c3[m]], m: f.m.clone(), uv: Vec::new() });
+                    let uv = if avec_uv { vec![u0[m], u0[m + 1], u3[m + 1], u3[m]] } else { Vec::new() };
+                    faces.push(Face { s: vec![c0[m], c0[m + 1], c3[m + 1], c3[m]], m: f.m.clone(), uv });
                 }
                 for m in 1..c0.len() - 1 {
                     aretes.push([c0[m], c3[m]]);
@@ -1206,13 +1232,21 @@ impl Maillage {
             }
             table.push(Some(faces.len()));
             let mut t = Vec::with_capacity(s.len());
+            let avec_uv = f.uv.len() == s.len();
+            let mut uv = Vec::with_capacity(f.uv.len());
             for k in 0..s.len() {
+                let suivant = (k + 1) % s.len();
                 t.push(s[k]);
-                if let Some(l) = depuis(s[k], s[(k + 1) % s.len()]) {
+                if avec_uv {
+                    uv.push(f.uv[k]);
+                }
+                if let Some(l) = depuis(s[k], s[suivant]) {
                     t.extend(l);
+                    if avec_uv {
+                        uv.extend(places(s[k], s[suivant]).iter().map(|u| mix_uv(f.uv[k], f.uv[suivant], *u)));
+                    }
                 }
             }
-            let uv = if t.len() == s.len() { f.uv } else { Vec::new() };
             faces.push(Face { s: t, m: f.m, uv });
         }
         self.faces = faces;
@@ -2554,13 +2588,13 @@ mod tests_uv {
     }
 
     #[test]
-    fn subdiviser_n_efface_que_les_uv_des_faces_coupees() {
+    fn subdiviser_ne_touche_qu_aux_uv_des_faces_coupees() {
         let mut m = Maillage::default();
         m.sommets = vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [5.0, 0.0, 0.0], [6.0, 0.0, 0.0], [5.0, 1.0, 0.0]];
         m.faces.push(Face { s: vec![0, 1, 2], m: defaut(), uv: vec![[0.1; 2]; 3] });
         m.faces.push(Face { s: vec![3, 4, 5], m: defaut(), uv: vec![[0.2; 2]; 3] });
         m.subdiviser(&[[0, 1]], 1);
-        assert!(m.faces[0].uv.is_empty());
+        assert_eq!(m.faces[0].uv.len(), 4);
         assert_eq!(m.faces[1].uv, vec![[0.2; 2]; 3]);
     }
 

@@ -392,6 +392,15 @@ impl Travail {
         Travail { m: Arc::new(m), proprio, sel, edites: l, filtres, sale: false, version: 0 }
     }
 
+    /// Nouvelles coordonnées des coins donnés. Toucher aux UV ne change pas la sélection.
+    pub fn poser_uv(&mut self, valeurs: &[(crate::uv::Coin, crate::uv::Uv)]) {
+        let m = self.mm();
+        for ((f, k), uv) in valeurs {
+            m.faces[*f].uv[*k] = *uv;
+        }
+        self.maj();
+    }
+
     fn maj(&mut self) {
         self.version += 1;
         self.sel.nettoyer(&self.m);
@@ -692,7 +701,11 @@ impl Travail {
             table.push(None);
             for t in m.trianguler(&f.s) {
                 nouvelles.push(faces.len());
-                faces.push(face(&f.m, t.to_vec()));
+                let mut n = face(&f.m, t.to_vec());
+                if f.uv.len() == f.s.len() {
+                    n.uv = t.iter().filter_map(|i| f.s.iter().position(|x| x == i).map(|k| f.uv[k])).collect();
+                }
+                faces.push(n);
             }
         }
         m.faces = faces;
@@ -1385,6 +1398,66 @@ mod tests {
         assert_eq!(s.vers_donnees().s, [3]);
         s.montrer(T::S);
         assert_eq!(s.sommets, [3]);
+    }
+
+    /// Cube dont chaque face couvre toute l'image, dans l'ordre de ses sommets.
+    fn cube_uv() -> Travail {
+        let mut m = Maillage::cube(2.0);
+        for f in &mut m.faces {
+            f.uv = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        }
+        Travail::ouvrir(&[Objet::neuf("c", m)], &[0], 0, [true; 3])
+    }
+
+    #[test]
+    fn subdiviser_interpole_les_uv() {
+        let mut t = cube_uv();
+        let a = t.m.faces[0].s[0..2].try_into().unwrap();
+        t.sel.ajouter(El::A(a));
+        t.subdiviser(1).unwrap();
+        let f = &t.m.faces[0];
+        assert_eq!(f.s.len(), 5);
+        assert_eq!(f.uv, vec![[0.0, 0.0], [0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        // Toutes les faces gardent une UV par coin
+        assert!(t.m.faces.iter().all(|f| f.uv.len() == f.s.len()));
+    }
+
+    #[test]
+    fn la_boucle_de_coupe_garde_les_uv_et_suit_le_glissement() {
+        for g in [0.0, 0.5] {
+            let mut t = cube_uv();
+            let a = t.m.faces[0].s[0..2].try_into().unwrap();
+            t.boucle(Some(a), 1, g, false, false).unwrap();
+            assert!(t.m.faces.iter().all(|f| f.uv.len() == f.s.len()), "{g}");
+            // Chaque nouveau sommet garde, sur ses coins, la place qu'il a sur l'arête
+            for f in &t.m.faces {
+                for (k, i) in f.s.iter().enumerate() {
+                    if *i >= 8 {
+                        let u = f.uv[k];
+                        assert!(u.iter().all(|x| (0.0..=1.0).contains(x)));
+                        assert!(u.iter().any(|x| *x > 0.0 && *x < 1.0), "{u:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn trianguler_garde_les_uv() {
+        let mut t = cube_uv();
+        t.sel.ajouter(El::F(0));
+        t.trianguler().unwrap();
+        assert!(t.m.faces.iter().all(|f| f.uv.len() == f.s.len()));
+    }
+
+    #[test]
+    fn les_uv_posees_reviennent_a_l_objet() {
+        let mut t = cube_uv();
+        let mut o = vec![Objet::neuf("c", Maillage::cube(2.0))];
+        t.poser_uv(&[((0, 0), [0.25, 0.75])]);
+        assert!(t.sale);
+        t.ranger(&mut o);
+        assert_eq!(o[0].maillage.faces[0].uv[0], [0.25, 0.75]);
     }
 
     #[test]

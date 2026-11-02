@@ -59,12 +59,16 @@ pub struct Cmd {
     pub first: usize,
     pub count: usize,
     pub clip: Option<Rect>,
+    /// Image à la place de l'atlas : rang dans `DrawList::images`.
+    pub image: Option<usize>,
 }
 
 #[derive(Default)]
 pub struct DrawList {
     pub vertices: Vec<Vertex>,
     pub cmds: Vec<Cmd>,
+    /// Identifiants des images demandées par `image`.
+    pub images: Vec<String>,
     clip: Option<Rect>,
 }
 
@@ -72,6 +76,7 @@ impl DrawList {
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.cmds.clear();
+        self.images.clear();
         self.clip = None;
     }
 
@@ -82,8 +87,8 @@ impl DrawList {
     fn push(&mut self, q: [Vertex; 4]) {
         let clip = self.clip;
         match self.cmds.last_mut() {
-            Some(c) if c.clip == clip => c.count += 6,
-            _ => self.cmds.push(Cmd { first: self.vertices.len(), count: 6, clip }),
+            Some(c) if c.clip == clip && c.image.is_none() => c.count += 6,
+            _ => self.cmds.push(Cmd { first: self.vertices.len(), count: 6, clip, image: None }),
         }
         self.vertices.extend_from_slice(&[q[0], q[1], q[2], q[2], q[1], q[3]]);
     }
@@ -126,6 +131,16 @@ impl DrawList {
             Vertex { pos: [cx + lx * ux - ly * uy, cy + lx * uy + ly * ux], local: [lx, ly], shape, uv: [0.0, 0.0], color }
         };
         self.push([corner(-1., -1.), corner(1., -1.), corner(-1., 1.), corner(1., 1.)]);
+    }
+
+    /// Texture du projet sur tout `r` : première ligne de l'image en haut.
+    pub fn image(&mut self, r: Rect, id: &str) {
+        let c = [255, 255, 255, 255];
+        let v = |x: f32, y: f32, u: f32, w: f32| Vertex { pos: [x, y], local: [0.0, 0.0], shape: [0.0, 0.0, -2.0, 0.0], uv: [u, w], color: c };
+        let first = self.vertices.len();
+        self.vertices.extend_from_slice(&[v(r.x, r.y, 0.0, 0.0), v(r.right(), r.y, 1.0, 0.0), v(r.x, r.bottom(), 0.0, 1.0), v(r.x, r.bottom(), 0.0, 1.0), v(r.right(), r.y, 1.0, 0.0), v(r.right(), r.bottom(), 1.0, 1.0)]);
+        self.images.push(id.to_string());
+        self.cmds.push(Cmd { first, count: 6, clip: self.clip, image: Some(self.images.len() - 1) });
     }
 
     pub fn glyph(&mut self, r: Rect, uv0: [f32; 2], uv1: [f32; 2], color: Color) {

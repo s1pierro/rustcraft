@@ -43,6 +43,8 @@ pub enum Sense {
     Scroll,
     /// Absorbe le doigt sans rien faire : le fond d'un panneau.
     Sink,
+    /// Comme `Drag` pour un doigt ; deux doigts déplacent et pincent la vue de la zone.
+    Toile,
 }
 
 #[derive(Clone, Copy)]
@@ -98,6 +100,15 @@ impl Default for Gesture {
     }
 }
 
+/// Geste à deux doigts sur une toile, depuis la dernière image.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pince {
+    pub pan: (f32, f32),
+    pub zoom: f32,
+    /// Milieu des deux doigts.
+    pub centre: (f32, f32),
+}
+
 /// Appui bref sur l'espace de travail.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tap {
@@ -135,6 +146,11 @@ pub struct Ui {
     longs: Vec<Id>,
     /// Un événement vient d'être traité : voir `a_redessiner`.
     agite: bool,
+    pinces: HashMap<Id, Pince>,
+    /// Toiles dont le geste est passé à deux doigts : plus de glissé ni d'appui.
+    a_deux: Vec<Id>,
+    /// Appui bref sur une toile : où.
+    tap_toile: Option<(Id, f32, f32)>,
 }
 
 impl Ui {
@@ -159,6 +175,9 @@ impl Ui {
             ecoutes_next: Vec::new(),
             longs: Vec::new(),
             agite: false,
+            pinces: HashMap::new(),
+            a_deux: Vec::new(),
+            tap_toile: None,
         }
     }
 
@@ -185,6 +204,16 @@ impl Ui {
                         Sense::Click { .. } => Owner::Widget(r.id),
                         Sense::Drag => {
                             self.drags.insert(r.id, Drag { x, y, moved: false, depart: (x, y) });
+                            Owner::Widget(r.id)
+                        }
+                        Sense::Toile => {
+                            if self.pointers.iter().any(|p| p.owner == Owner::Widget(r.id)) {
+                                self.drags.remove(&r.id);
+                                self.a_deux.push(r.id);
+                            } else {
+                                self.a_deux.retain(|i| *i != r.id);
+                                self.drags.insert(r.id, Drag { x, y, moved: false, depart: (x, y) });
+                            }
                             Owner::Widget(r.id)
                         }
                         Sense::Scroll => Owner::Scroll(r.id),
@@ -223,6 +252,20 @@ impl Ui {
                 Some(Sense::Click { scroll: Some(s) }) if slid => self.pointers[i].owner = Owner::Scroll(s),
                 Some(Sense::Drag) => {
                     self.drags.insert(w, Drag { x, y, moved: slid, depart: (sx, sy) });
+                }
+                Some(Sense::Toile) => {
+                    let autre = self.pointers.iter().find(|p| p.owner == Owner::Widget(w) && p.id != id).copied();
+                    if let Some(o) = autre {
+                        let avant = (ox - o.x).hypot(oy - o.y).max(1.0);
+                        let apres = (x - o.x).hypot(y - o.y).max(1.0);
+                        let e = self.pinces.entry(w).or_insert(Pince { pan: (0.0, 0.0), zoom: 1.0, centre: (0.0, 0.0) });
+                        e.zoom *= apres / avant;
+                        e.pan.0 += (x - ox) / 2.0;
+                        e.pan.1 += (y - oy) / 2.0;
+                        e.centre = ((x + o.x) / 2.0, (y + o.y) / 2.0);
+                    } else if !self.a_deux.contains(&w) {
+                        self.drags.insert(w, Drag { x, y, moved: slid, depart: (sx, sy) });
+                    }
                 }
                 _ => {}
             },
@@ -277,8 +320,16 @@ impl Ui {
             self.dernier_appui = if double { None } else { Some((x, y, t)) };
         }
         let Owner::Widget(w) = p.owner else { return };
-        if matches!(self.region(w).map(|r| r.sense), Some(Sense::Drag)) {
+        let sens = self.region(w).map(|r| r.sense);
+        if matches!(sens, Some(Sense::Drag)) {
             self.drags.remove(&w);
+        }
+        if sens == Some(Sense::Toile) {
+            self.drags.remove(&w);
+            if !self.a_deux.contains(&w) && !p.slid {
+                self.tap_toile = Some((w, p.start.0, p.start.1));
+            }
+            return;
         }
         if p.slid {
             return;
@@ -326,6 +377,23 @@ impl Ui {
     pub fn drag(&mut self, id: Id, rect: Rect) -> Option<Drag> {
         self.region_add(id, rect, Sense::Drag);
         self.drags.get(&id).copied()
+    }
+
+    /// Toile : le glissé à un doigt, comme `drag`.
+    pub fn toile(&mut self, id: Id, rect: Rect) -> Option<Drag> {
+        self.region_add(id, rect, Sense::Toile);
+        self.drags.get(&id).copied()
+    }
+
+    pub fn take_pince(&mut self, id: Id) -> Option<Pince> {
+        self.pinces.remove(&id)
+    }
+
+    pub fn take_tap_toile(&mut self, id: Id) -> Option<(f32, f32)> {
+        self.tap_toile.filter(|t| t.0 == id).map(|t| {
+            self.tap_toile = None;
+            (t.1, t.2)
+        })
     }
 
     pub fn pressed(&self, id: Id) -> bool {
@@ -451,6 +519,36 @@ mod tests {
 
     fn down(u: &mut Ui, i: i32, x: f32, y: f32) {
         u.event(Event::Down { id: i, x, y }, 0.0);
+    }
+
+    #[test]
+    fn une_toile_suit_un_doigt_puis_pince_a_deux() {
+        const TOILE: Id = id("toile");
+        let mut u = ui();
+        u.region_add(TOILE, Rect::new(200., 200., 100., 100.), Sense::Toile);
+        u.end_frame();
+        u.region_add(TOILE, Rect::new(200., 200., 100., 100.), Sense::Toile);
+        // Un doigt : un glissé, pas d'appui
+        down(&mut u, 0, 210., 210.);
+        u.event(Event::Move { id: 0, x: 240., y: 210. }, 0.1);
+        assert!(u.toile(TOILE, Rect::new(200., 200., 100., 100.)).is_some_and(|d| d.moved && d.x == 240.));
+        u.event(Event::Up { id: 0 }, 0.2);
+        assert!(u.take_tap_toile(TOILE).is_none());
+        // Appui bref
+        down(&mut u, 0, 220., 230.);
+        u.event(Event::Up { id: 0 }, 0.3);
+        assert_eq!(u.take_tap_toile(TOILE), Some((220., 230.)));
+        // Deux doigts : plus de glissé, un pincement, et aucun appui en partant
+        down(&mut u, 0, 210., 250.);
+        down(&mut u, 1, 250., 250.);
+        assert!(u.toile(TOILE, Rect::new(200., 200., 100., 100.)).is_none());
+        u.event(Event::Move { id: 1, x: 290., y: 250. }, 0.4);
+        let p = u.take_pince(TOILE).unwrap();
+        assert_eq!(p.zoom, 2.0);
+        assert_eq!(p.centre, (250., 250.));
+        u.event(Event::Up { id: 0 }, 0.5);
+        u.event(Event::Up { id: 1 }, 0.5);
+        assert!(u.take_tap_toile(TOILE).is_none());
     }
 
     #[test]

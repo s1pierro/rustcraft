@@ -16,8 +16,8 @@ pub struct Panel {
     pub open: bool,
     /// Déploiement, de 0 (fermé) à 1 (ouvert).
     pub anim: f32,
-    /// Taille choisie à la poignée : [paysage, portrait].
-    custom: [Option<f32>; 2],
+    /// Taille choisie à la poignée : paysage, portrait, puis les mêmes en panneau large.
+    custom: [Option<f32>; 4],
 }
 
 impl Panel {
@@ -50,6 +50,8 @@ pub struct Shell {
     pub start: Panel,
     pub end: Panel,
     pub dp: f32,
+    /// Le panneau de fin montre une vue de travail : il prend la moitié de l'écran.
+    pub large: bool,
 }
 
 const MIN_PANEL_DP: f32 = 200.0;
@@ -57,7 +59,7 @@ const HANDLE_DP: f32 = 28.0;
 
 impl Shell {
     pub fn new(dp: f32) -> Shell {
-        Shell { start: Panel::default(), end: Panel::default(), dp }
+        Shell { start: Panel::default(), end: Panel::default(), dp, large: false }
     }
 
     pub fn animating(&self) -> bool {
@@ -67,15 +69,19 @@ impl Shell {
     /// Tailles des panneaux une fois ouverts.
     fn sizes(&self, screen: Rect) -> (f32, f32) {
         let landscape = screen.w >= screen.h;
-        let (avail, def_start, def_end) = if landscape {
+        let (avail, def_start, mut def_end) = if landscape {
             (screen.w, (288.0 * self.dp).min(0.30 * screen.w), (384.0 * self.dp).min(0.40 * screen.w))
         } else {
             (screen.h, (320.0 * self.dp).min(0.32 * screen.h), (448.0 * self.dp).min(0.45 * screen.h))
         };
+        if self.large {
+            def_end = 0.5 * avail;
+        }
         let both = self.start.open && self.end.open;
         let (max_start, max_end) = if both { (0.28, 0.42) } else { (0.70, 0.70) };
         let o = if landscape { 0 } else { 1 };
-        (self.start.custom[o].unwrap_or(def_start).min(max_start * avail), self.end.custom[o].unwrap_or(def_end).min(max_end * avail))
+        let oe = o + if self.large { 2 } else { 0 };
+        (self.start.custom[o].unwrap_or(def_start).min(max_start * avail), self.end.custom[oe].unwrap_or(def_end).min(max_end * avail))
     }
 
     /// Avance les animations de `dt` secondes et place chaque zone.
@@ -122,14 +128,16 @@ impl Shell {
             (Side::Start, false) => y - screen.y,
             (Side::End, false) => screen.bottom() - y,
         };
+        let large = if side == Side::End && self.large { 2 } else { 0 };
         let panel = if side == Side::Start { &mut self.start } else { &mut self.end };
-        panel.custom[if landscape { 0 } else { 1 }] = Some(size.max(MIN_PANEL_DP * self.dp));
+        panel.custom[large + if landscape { 0 } else { 1 }] = Some(size.max(MIN_PANEL_DP * self.dp));
     }
 
     /// Double appui sur la poignée : retour à la taille par défaut de cette orientation.
     pub fn reset_size(&mut self, side: Side, screen: Rect) {
+        let large = if side == Side::End && self.large { 2 } else { 0 };
         let panel = if side == Side::Start { &mut self.start } else { &mut self.end };
-        panel.custom[if screen.w >= screen.h { 0 } else { 1 }] = None;
+        panel.custom[large + if screen.w >= screen.h { 0 } else { 1 }] = None;
     }
 }
 
@@ -195,6 +203,18 @@ mod tests {
         assert_eq!(settle(&mut s, LAND).end.w, 920.);
         assert_eq!(settle(&mut s, PORT).end.h, 672.); // l'autre orientation n'a pas bougé
         s.reset_size(Side::End, LAND);
+        assert!(settle(&mut s, LAND).end.w < 768.1);
+    }
+
+    #[test]
+    fn le_panneau_large_prend_la_moitie_et_garde_sa_taille_a_part() {
+        let mut s = opened(false, true);
+        s.large = true;
+        assert_eq!(settle(&mut s, LAND).end.w, 960.);
+        assert_eq!(settle(&mut s, PORT).end.h, 960.);
+        s.resize(Side::End, LAND, 1200., 0.);
+        assert_eq!(settle(&mut s, LAND).end.w, 720.);
+        s.large = false;
         assert!(settle(&mut s, LAND).end.w < 768.1);
     }
 

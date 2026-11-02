@@ -50,7 +50,13 @@ uniform sampler2D u_atlas;
 out vec4 o_color;
 void main() {
   float a;
-  if (v_shape.z < 0.0) {
+  if (v_shape.z < -1.5) {
+    // Image en sRGB, lue en linéaire : retour au sRGB de l'interface
+    vec4 t = texture(u_atlas, v_uv);
+    vec3 c = 1.055 * pow(max(t.rgb, 0.0), vec3(1.0 / 2.4)) - 0.055;
+    o_color = vec4(c * t.a, t.a);
+    return;
+  } else if (v_shape.z < 0.0) {
     a = texture(u_atlas, v_uv).r;
   } else {
     vec2 q = abs(v_local) - v_shape.xy + v_shape.z;
@@ -787,7 +793,18 @@ impl Renderer {
                     }
                     None => (gl.glDisable)(SCISSOR),
                 }
+                // Une image pas encore chargée laisse voir le fond
+                let image = c.image.and_then(|i| dl.images.get(i)).and_then(|i| self.images.get(i));
+                if c.image.is_some() && image.is_none() {
+                    continue;
+                }
+                if let Some(t) = image {
+                    (gl.glBindTexture)(TEXTURE_2D, *t);
+                }
                 (gl.glDrawArrays)(TRIANGLES, c.first as i32, c.count as i32);
+                if image.is_some() {
+                    (gl.glBindTexture)(TEXTURE_2D, self.atlas);
+                }
             }
             (gl.glBindVertexArray)(0);
         }

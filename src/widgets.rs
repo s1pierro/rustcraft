@@ -388,17 +388,22 @@ impl Cx<'_> {
 
     /// Choix exclusif en pilules, `par_ligne` sur chaque ligne. Rend celui touché.
     pub fn choix(&mut self, b: &mut Body, cle: Id, l: &[&str], choisi: Option<usize>, par_ligne: usize) -> Option<usize> {
+        let c: Vec<(&str, bool)> = l.iter().enumerate().map(|(k, x)| (*x, choisi == Some(k))).collect();
+        self.bascules(b, cle, &c, par_ligne)
+    }
+
+    /// Pilules allumées ou non, `par_ligne` sur chaque ligne. Rend celle touchée.
+    pub fn bascules(&mut self, b: &mut Body, cle: Id, l: &[(&str, bool)], par_ligne: usize) -> Option<usize> {
         let (ecart, h) = (6.0 * self.dp, 40.0 * self.dp);
         let w = (b.w - ecart * (par_ligne - 1) as f32) / par_ligne as f32;
         let mut touche = None;
-        for (k, label) in l.iter().enumerate() {
+        for (k, (label, on)) in l.iter().enumerate() {
             let r = Rect::new(b.x + (w + ecart) * (k % par_ligne) as f32, b.y + 4.0 * self.dp + (h + ecart) * (k / par_ligne) as f32, w, h);
             if self.ui.click(sub_id(cle, k), r, Some(b.id)) {
                 touche = Some(k);
             }
-            let on = choisi == Some(k);
-            self.dl.rrect(r, h / 2.0, if on { coul(C::Accent) } else { coul(C::Fond) });
-            self.centered(r, label, 14.0, if on { BLANC } else { coul(C::Texte) });
+            self.dl.rrect(r, h / 2.0, if *on { coul(C::Accent) } else { coul(C::Fond) });
+            self.centered(r, label, 14.0, if *on { BLANC } else { coul(C::Texte) });
         }
         b.y += (h + ecart) * l.len().div_ceil(par_ligne) as f32 + 4.0 * self.dp;
         touche

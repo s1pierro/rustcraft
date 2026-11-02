@@ -28,5 +28,6 @@ pub mod primitives;
 pub mod visserie;
 pub mod theme;
 pub mod ui;
+pub mod uv;
 pub mod vue;
 pub mod widgets;

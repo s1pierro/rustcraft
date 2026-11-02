@@ -17,6 +17,7 @@ use crate::primitives::{self, Genre, Prim, Valeurs, V};
 use crate::projet::{Materiau, Objet, Projet};
 use crate::shell::{Layout, Shell, Side};
 use crate::texture::{self, Image};
+use crate::uv::{self, Aspect, Coin, Uv};
 use crate::ui::{id, sub_id, Id, Sense};
 use crate::vue::{self, Tampons};
 use crate::widgets::{Cx, Icon, Scrolls};
@@ -30,6 +31,7 @@ const NOM_PROJET: Id = id("nom-projet");
 const FICHIERS: Id = id("pastille-fichier");
 const SCENE: Id = id("pastille-scene");
 const CONTEXTE: Id = id("pastille-contexte");
+const TOILE_UV: Id = id("toile-uv");
 const MODIFIEURS: Id = id("pastille-modifieurs");
 const REGLAGES: Id = id("reglages");
 const AIDE: Id = id("aide");
@@ -490,7 +492,64 @@ pub enum Contenu {
     Ajout,
     /// Modifieurs de l'objet actif.
     Modifieurs,
+    /// Vue UV de la copie de travail, dans le panneau élargi.
+    Uv,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum OutilUv {
+    Deplacer,
+    Tourner,
+    Echelle,
+}
+
+/// Geste en cours sur la vue UV.
+enum PriseUv {
+    Boite { fin: (f32, f32) },
+    Transfo { departs: Vec<(Coin, Uv)>, pivot: Uv, dernier: Option<uv::Geste> },
+}
+
+/// État de la vue UV. La sélection est à elle : les faces choisies en 3D disent ce
+/// qu'on y voit, les coins choisis ici disent ce qu'on y déplace.
+struct EditeurUv {
+    sel: HashSet<Coin>,
+    ilots: bool,
+    /// Les coins soudés bougent ensemble.
+    lies: bool,
+    outil: OutilUv,
+    axes: [bool; 2],
+    /// Origine à l'écran et pixels par unité ; `None` : la tuile cadrée.
+    cadre: Option<[f32; 3]>,
+    /// Cadre et forme de la dernière image.
+    vu: [f32; 3],
+    aspect: Aspect,
+    prise: Option<PriseUv>,
+    /// Forme de chaque texture, connue à son décodage.
+    aspects: HashMap<String, Aspect>,
+    /// Texture que le modèle montre.
+    texture: Option<String>,
+}
+
+impl Default for EditeurUv {
+    fn default() -> EditeurUv {
+        EditeurUv { sel: HashSet::new(), ilots: false, lies: true, outil: OutilUv::Deplacer, axes: [true; 2], cadre: None, vu: [0.0, 0.0, 1.0], aspect: Aspect::CARRE, prise: None, aspects: HashMap::new(), texture: None }
+    }
+}
+
+impl EditeurUv {
+    fn ecran(&self, q: Uv) -> [f32; 2] {
+        let c = self.vu;
+        [c[0] + q[0] * self.aspect.l * c[2], c[1] + q[1] * self.aspect.h * c[2]]
+    }
+
+    fn vers_uv(&self, x: f32, y: f32) -> Uv {
+        let c = self.vu;
+        [(x - c[0]) / (self.aspect.l * c[2]), (y - c[1]) / (self.aspect.h * c[2])]
+    }
+}
+
+/// Un trente-deuxième de la tuile : le pas de translation de la vue UV.
+const PAS_UV: f32 = 1.0 / 32.0;
 
 /// Primitive en cours d'ajout : ses réglages et son aperçu, posé sur le curseur 3D.
 struct Ajout {
@@ -557,6 +616,9 @@ pub struct App {
     evals: modifs::Cache,
     calcul: Option<Receiver<Vec<(String, modifs::Ev)>>>,
     ajout: Option<Ajout>,
+    uv: EditeurUv,
+    /// Départ de la boîte en cours dans la vue UV.
+    boite_uv: Option<(f32, f32)>,
     /// Derniers réglages de chaque primitive, repris à l'ajout suivant.
     primitives: HashMap<Prim, Valeurs>,
     /// Images déjà passées au processeur graphique, ou illisibles (dit une seule fois).
@@ -621,6 +683,8 @@ impl App {
             evals: modifs::Cache::new(),
             calcul: None,
             ajout: None,
+            uv: EditeurUv::default(),
+            boite_uv: None,
             primitives: HashMap::new(),
             images_vues: HashSet::new(),
             sorties: Vec::new(),
@@ -838,6 +902,279 @@ impl App {
         if cx.bouton(b, id("p-ajouter"), "Ajouter", pret) {
             self.valider_ajout();
         }
+    }
+
+    /// Ouvre la vue UV de la copie de travail.
+    pub fn ouvrir_uv(&mut self) {
+        self.contenu = Contenu::Uv;
+        self.shell.end.open = true;
+    }
+
+    /// Faces de la vue UV, et leur texture : les faces choisies, toutes si aucune ne
+    /// l'est, parmi celles qui ont des UV. Une vue ne montre qu'une image à la fois :
+    /// rend aussi le nombre de faces masquées parce qu'elles en ont une autre.
+    fn faces_uv(&self) -> (Vec<usize>, Option<String>, usize) {
+        let Some(t) = &self.travail else { return (Vec::new(), None, 0) };
+        let m = &t.m;
+        let image = |f: usize| m.faces[f].s.first().and_then(|i| t.proprio.get(*i)).and_then(|k| self.projet.texture_de(&self.projet.objets[*k]));
+        let tout: Vec<usize> = (0..m.faces.len()).collect();
+        let liste = if t.sel.faces.is_empty() { &tout } else { &t.sel.faces };
+        let avec: Vec<usize> = liste.iter().copied().filter(|f| uv::complete(m, *f)).collect();
+        let tex = avec.iter().find_map(|f| image(*f)).cloned();
+        let n = avec.len();
+        let faces: Vec<usize> = avec.into_iter().filter(|f| image(*f) == tex.as_ref()).collect();
+        let masquees = n - faces.len();
+        (faces, tex, masquees)
+    }
+
+    fn panneau_uv(&mut self, cx: &mut Cx, corps: Rect) {
+        let d = cx.dp;
+        let bas = (146.0 * d).min(corps.h * 0.45);
+        let toile = Rect::new(corps.x, corps.y, corps.w, corps.h - bas);
+        let (faces, tex, masquees) = self.faces_uv();
+        self.toile_uv(cx, toile, &faces, tex.as_deref());
+        let mut b = cx.body(id("corps-uv"), Rect::new(corps.x, toile.bottom(), corps.w, bas), &self.scrolls);
+        let u = &mut self.uv;
+        if faces.is_empty() {
+            cx.paragraph(&mut b, "Aucune face à montrer : celles-ci n'ont pas d'UV. Les projections arriveront à l'étape suivante.");
+        } else {
+            let p = if faces.len() > 1 { "s" } else { "" };
+            let cache = if masquees > 0 { format!(" · {masquees} d'une autre texture masquées") } else { String::new() };
+            cx.paragraph(&mut b, &format!("{} face{p} · {} coins choisis{cache}", faces.len(), u.sel.len()));
+        }
+        match cx.bascules(&mut b, id("uv-mode"), &[("Points", !u.ilots), ("Îlots", u.ilots), ("Coins liés", u.lies), ("Cadrer", false)], 4) {
+            Some(0) | Some(1) => {
+                u.ilots = !u.ilots;
+                u.sel.clear();
+                self.version_geo = None;
+            }
+            Some(2) => u.lies = !u.lies,
+            Some(_) => u.cadre = None,
+            None => {}
+        }
+        let o = u.outil;
+        match cx.bascules(&mut b, id("uv-outil"), &[("Déplacer", o == OutilUv::Deplacer), ("Tourner", o == OutilUv::Tourner), ("Échelle", o == OutilUv::Echelle), ("U", u.axes[0]), ("V", u.axes[1])], 5) {
+            Some(0) => u.outil = OutilUv::Deplacer,
+            Some(1) => u.outil = OutilUv::Tourner,
+            Some(2) => u.outil = OutilUv::Echelle,
+            Some(k) => u.axes[k - 3] = !u.axes[k - 3],
+            None => {}
+        }
+        cx.body_end(b, &mut self.scrolls);
+    }
+
+    /// Vue UV : gestes, puis dessin.
+    fn toile_uv(&mut self, cx: &mut Cx, r: Rect, faces: &[usize], tex: Option<&str>) {
+        let Some(t) = &self.travail else { return };
+        let a = tex.and_then(|i| self.uv.aspects.get(i).copied()).unwrap_or(Aspect::CARRE);
+        // La sélection ne garde que ce qui se voit encore
+        let vus: HashSet<usize> = faces.iter().copied().collect();
+        let m = t.m.clone();
+        let avant = self.uv.sel.len();
+        self.uv.sel.retain(|c| vus.contains(&c.0) && c.1 < m.faces[c.0].uv.len());
+        if self.uv.sel.len() != avant {
+            self.version_geo = None;
+        }
+        let z = (r.w / a.l).min(r.h / a.h) * 0.9;
+        let cale = [r.cx() - a.l * z / 2.0, r.cy() - a.h * z / 2.0, z];
+        let mut c = self.uv.cadre.unwrap_or(cale);
+        let drag = cx.ui.toile(TOILE_UV, r);
+        if let Some(p) = cx.ui.take_pince(TOILE_UV) {
+            let zoom = (c[2] * p.zoom).clamp(z * 0.1, z * 200.0) / c[2];
+            c = [p.centre.0 + (c[0] - p.centre.0) * zoom + p.pan.0, p.centre.1 + (c[1] - p.centre.1) * zoom + p.pan.1, c[2] * zoom];
+            self.uv.cadre = Some(c);
+        }
+        self.uv.vu = c;
+        self.uv.aspect = a;
+        let rayon = 24.0 * cx.dp / c[2];
+        if let Some((x, y)) = cx.ui.take_tap_toile(TOILE_UV) {
+            self.toucher_uv(&m, faces, x, y, rayon);
+        }
+        drop(m);
+        match (drag, self.uv.prise.is_some()) {
+            (Some(d), false) if d.moved => self.saisir_uv(faces, d.depart, rayon),
+            (None, true) => self.lacher_uv(faces),
+            _ => {}
+        }
+        if let (Some(d), true) = (drag, self.uv.prise.is_some()) {
+            self.suivre_uv(d);
+        }
+        self.dessiner_uv(cx, r, faces, tex);
+    }
+
+    /// Le coin ou l'îlot sous le doigt, s'il y en a, avec tout ce qui bouge avec lui.
+    fn groupe_uv(&self, m: &Maillage, faces: &[usize], p: Uv, rayon: f32) -> Option<Vec<Coin>> {
+        let a = self.uv.aspect;
+        if self.uv.ilots {
+            let f = uv::coin_sous(m, faces, p, rayon, a).map(|c| c.0).or(uv::face_sous(m, faces, p))?;
+            return Some(uv::ilot_de(m, faces, f));
+        }
+        let c = uv::coin_sous(m, faces, p, rayon, a)?;
+        Some(if self.uv.lies { uv::point_de(m, faces, c) } else { vec![c] })
+    }
+
+    fn toucher_uv(&mut self, m: &Maillage, faces: &[usize], x: f32, y: f32, rayon: f32) {
+        match self.groupe_uv(m, faces, self.uv.vers_uv(x, y), rayon) {
+            Some(g) if g.iter().all(|c| self.uv.sel.contains(c)) => self.uv.sel.retain(|c| !g.contains(c)),
+            Some(g) => self.uv.sel.extend(g),
+            None => self.uv.sel.clear(),
+        }
+        self.version_geo = None;
+    }
+
+    /// Un doigt part : sur la sélection, il la transforme ; sur un point libre, il le
+    /// prend et l'emmène ; ailleurs, il trace une boîte.
+    fn saisir_uv(&mut self, faces: &[usize], depart: (f32, f32), rayon: f32) {
+        let Some(t) = &self.travail else { return };
+        let m = t.m.clone();
+        let p = self.uv.vers_uv(depart.0, depart.1);
+        let sous = self.groupe_uv(&m, faces, p, rayon);
+        let sur = sous.as_ref().is_some_and(|g| g.iter().any(|c| self.uv.sel.contains(c)));
+        let libre = self.uv.outil == OutilUv::Deplacer;
+        if !sur && libre {
+            if let Some(g) = sous {
+                self.uv.sel = g.into_iter().collect();
+                self.version_geo = None;
+            }
+        }
+        let touche = self.groupe_uv(&m, faces, p, rayon).is_some_and(|g| g.iter().any(|c| self.uv.sel.contains(c)));
+        let prend = !self.uv.sel.is_empty() && (!libre || touche);
+        if !prend {
+            self.boite_uv = Some(depart);
+            self.uv.prise = Some(PriseUv::Boite { fin: depart });
+            return;
+        }
+        let pivot = uv::centre(&m, &self.uv.sel).unwrap_or([0.5; 2]);
+        let departs = self.uv.sel.iter().map(|c| (*c, uv::uv_de(&m, *c))).collect();
+        drop(m);
+        self.memoriser();
+        self.uv.prise = Some(PriseUv::Transfo { departs, pivot, dernier: None });
+    }
+
+    fn suivre_uv(&mut self, d: crate::ui::Drag) {
+        let (a, pas) = (self.uv.aspect, self.pas);
+        let (outil, axes) = (self.uv.outil, if self.uv.axes == [false; 2] { [true; 2] } else { self.uv.axes });
+        let (de, a_) = (self.uv.vers_uv(d.depart.0, d.depart.1), self.uv.vers_uv(d.x, d.y));
+        let (plan_d, plan_a) = (self.uv.ecran(de), self.uv.ecran(a_));
+        let mut pose = None;
+        match &mut self.uv.prise {
+            Some(PriseUv::Boite { fin }) => *fin = (d.x, d.y),
+            Some(PriseUv::Transfo { departs, pivot, dernier }) => {
+                let pv = {
+                    let c = self.uv.vu;
+                    [c[0] + pivot[0] * a.l * c[2], c[1] + pivot[1] * a.h * c[2]]
+                };
+                let g = match outil {
+                    OutilUv::Deplacer => {
+                        let k = |v: f32, ok: bool| if !ok { 0.0 } else if pas.actif { uv::au_pas(v, PAS_UV) } else { v };
+                        uv::Geste::Translation([k(a_[0] - de[0], axes[0]), k(a_[1] - de[1], axes[1])])
+                    }
+                    OutilUv::Tourner => {
+                        let angle = |q: [f32; 2]| (q[1] - pv[1]).atan2(q[0] - pv[0]);
+                        let degres = (angle(plan_a) - angle(plan_d)).to_degrees();
+                        uv::Geste::Rotation { degres: if pas.actif { uv::au_pas(degres, pas.angle as f32) } else { degres }, pivot: *pivot }
+                    }
+                    OutilUv::Echelle => {
+                        let dist = |q: [f32; 2]| (q[0] - pv[0]).hypot(q[1] - pv[1]).max(1.0);
+                        let k = dist(plan_a) / dist(plan_d);
+                        let k = if pas.actif { uv::au_pas(k, pas.echelle as f32) } else { k };
+                        uv::Geste::Echelle { facteur: [if axes[0] { k } else { 1.0 }, if axes[1] { k } else { 1.0 }], pivot: *pivot }
+                    }
+                };
+                if *dernier != Some(g) {
+                    *dernier = Some(g);
+                    pose = Some(departs.iter().map(|(c, q)| (*c, uv::transformer(*q, g, a))).collect::<Vec<_>>());
+                }
+            }
+            None => {}
+        }
+        if let (Some(l), Some(t)) = (pose, &mut self.travail) {
+            t.poser_uv(&l);
+        }
+    }
+
+    fn lacher_uv(&mut self, faces: &[usize]) {
+        match self.uv.prise.take() {
+            Some(PriseUv::Transfo { .. }) => self.a_sauver = true,
+            Some(PriseUv::Boite { fin }) => {
+                // Le départ a quitté le geste : il revit dans `boite_uv`
+                if let (Some(t), Some(d)) = (&self.travail, self.boite_uv.take()) {
+                    let m = t.m.clone();
+                    let (p, q) = (self.uv.vers_uv(d.0, d.1), self.uv.vers_uv(fin.0, fin.1));
+                    let l = uv::dans_boite(&m, faces, [p[0], p[1], q[0], q[1]]);
+                    if self.uv.ilots {
+                        let fs: HashSet<usize> = l.iter().map(|c| c.0).collect();
+                        for f in fs {
+                            self.uv.sel.extend(uv::ilot_de(&m, faces, f));
+                        }
+                    } else {
+                        self.uv.sel.extend(l);
+                    }
+                    self.version_geo = None;
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn dessiner_uv(&mut self, cx: &mut Cx, r: Rect, faces: &[usize], tex: Option<&str>) {
+        let Some(t) = &self.travail else { return };
+        let (m, d, u) = (&t.m, cx.dp, &self.uv);
+        cx.clip(Some(r));
+        cx.dl.rrect(r, 0.0, coul(C::Fond));
+        let (p0, p1) = (u.ecran([0.0, 0.0]), u.ecran([1.0, 1.0]));
+        let tuile = Rect::new(p0[0], p0[1], p1[0] - p0[0], p1[1] - p0[1]);
+        cx.dl.rrect(tuile, 0.0, coul(C::Surface));
+        if let Some(i) = tex {
+            cx.dl.image(tuile, i);
+        }
+        for (a, b) in [(p0, [p1[0], p0[1]]), ([p1[0], p0[1]], p1), (p1, [p0[0], p1[1]]), ([p0[0], p1[1]], p0)] {
+            cx.dl.line(a, b, 1.5 * d, coul(C::Bordures));
+        }
+        let hors = |a: [f32; 2], b: [f32; 2]| a[0].max(b[0]) < r.x || a[0].min(b[0]) > r.right() || a[1].max(b[1]) < r.y || a[1].min(b[1]) > r.bottom();
+        for choisis in [false, true] {
+            let (e, c) = if choisis { (2.2 * d, coul(C::AreteChoisie)) } else { (1.1 * d, coul(C::Arete)) };
+            for &f in faces {
+                let n = m.faces[f].uv.len();
+                for k in 0..n {
+                    let l = (k + 1) % n;
+                    if (u.sel.contains(&(f, k)) && u.sel.contains(&(f, l))) != choisis {
+                        continue;
+                    }
+                    let (a, b) = (u.ecran(m.faces[f].uv[k]), u.ecran(m.faces[f].uv[l]));
+                    if !hors(a, b) {
+                        cx.dl.line(a, b, e, c);
+                    }
+                }
+            }
+        }
+        if !u.ilots {
+            let pts = uv::points(m, faces);
+            let tous = pts.len() < 6000;
+            for g in pts {
+                let on = g.iter().any(|c| u.sel.contains(c));
+                if tous || on {
+                    let p = u.ecran(uv::uv_de(m, g[0]));
+                    if r.contains(p[0], p[1]) {
+                        let q = if on { 4.5 * d } else { 3.0 * d };
+                        cx.dl.rrect(Rect::new(p[0] - q, p[1] - q, 2.0 * q, 2.0 * q), q, if on { coul(C::SommetChoisi) } else { coul(C::Sommet) });
+                    }
+                }
+            }
+        }
+        if u.outil != OutilUv::Deplacer {
+            if let Some(q) = uv::centre(m, &u.sel) {
+                let p = u.ecran(q);
+                cx.dl.rrect(Rect::new(p[0] - 6.0 * d, p[1] - 6.0 * d, 12.0 * d, 12.0 * d), 6.0 * d, coul(C::Curseur));
+            }
+        }
+        if let (Some(PriseUv::Boite { fin }), Some(a)) = (&u.prise, self.boite_uv) {
+            let (x, y) = ([a.0, fin.0], [a.1, fin.1]);
+            for (p, q) in [([x[0], y[0]], [x[1], y[0]]), ([x[1], y[0]], [x[1], y[1]]), ([x[1], y[1]], [x[0], y[1]]), ([x[0], y[1]], [x[0], y[0]])] {
+                cx.dl.line(p, q, 1.5 * d, coul(C::AreteChoisie));
+            }
+        }
+        cx.clip(None);
     }
 
     /// Objet que les modifieurs concernent : l'actif.
@@ -2088,6 +2425,12 @@ impl App {
     }
 
     pub fn frame(&mut self, cx: &mut Cx, screen: Rect, dt: f32) -> Scene {
+        // La vue UV vit dans le mode Géométrie, et y prend la moitié de l'écran
+        if self.contenu == Contenu::Uv && self.travail.is_none() {
+            self.contenu = Contenu::Contexte;
+            self.shell.end.open = false;
+        }
+        self.shell.large = self.contenu == Contenu::Uv;
         let l = self.shell.layout(screen, dt);
         let w = l.workspace;
         self.espace = w;
@@ -2747,6 +3090,10 @@ impl App {
                 self.panneau_ajout(cx, &mut b);
                 cx.body_end(b, &mut self.scrolls);
             }
+            Contenu::Uv => {
+                cx.tabs(id("onglets-uv"), onglets, &["UV"], 0);
+                self.panneau_uv(cx, corps);
+            }
             Contenu::Scene => {
                 cx.tabs(id("onglets-scene"), onglets, &["Scène"], 0);
                 let mut b = cx.body(id("corps-scene"), corps, &self.scrolls);
@@ -3130,6 +3477,7 @@ impl App {
             A::AjouterEcrou => self.ouvrir_ajout(Prim::Ecrou),
             A::AjouterRondelle => self.ouvrir_ajout(Prim::Rondelle),
             A::AjouterTige => self.ouvrir_ajout(Prim::Tige),
+            A::EditerUv => self.basculer(Contenu::Uv),
             A::ModifBooleen => self.ajouter_modif("booleen"),
             A::ModifRepetition => self.ajouter_modif("repetition"),
             A::ToutChoisir => {
@@ -3413,7 +3761,10 @@ impl App {
             let t = &self.projet.textures[&id];
             let nom = t.nom.clone();
             match texture::decoder(&t.octets) {
-                Ok(i) => images.push((id, i)),
+                Ok(i) => {
+                    self.uv.aspects.insert(id.clone(), Aspect::de(i.l, i.h));
+                    images.push((id, i));
+                }
                 Err(e) => self.dire(format!("Texture illisible : {nom} ({e})")),
             }
         }
@@ -3472,6 +3823,13 @@ impl App {
             self.connus.remove(c);
         }
         let mut retraits = retraits;
+        // Le modèle montre la texture de la vue UV
+        let image_uv = if self.contenu == Contenu::Uv && self.shell.end.open { self.faces_uv().1 } else { None };
+        if self.uv.texture != image_uv {
+            self.uv.texture = image_uv.clone();
+            self.version_geo = None;
+        }
+        besoin.extend(image_uv);
         let geo_vue = self.vue_geo(&mut objets, &mut ajouts, &mut retraits);
         let (images, images_retraits) = self.images_a_charger(besoin);
         Scene {
@@ -3503,9 +3861,16 @@ impl App {
         };
         let opacite = if self.rayons { OPACITE_RAYONS } else { 1.0 };
         let id3: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let image = self.uv.texture.clone();
         let modele = vue::mat4(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
         for (cle, c) in [(CLE_FACES, coul(C::Face)), (CLE_CHOISIES, coul(C::FaceChoisie))] {
-            objets.push(ObjetVue { tampon: cle, modele, normale: id3, albedo: lin_octets(c), emission: [0.0; 3], opacite, contour: false, filaire: false, texture: None, envers: Some(lin_octets(coul(C::Envers))) });
+            // Sous une texture, le choix n'est plus qu'une teinte légère
+            let albedo = match (&image, cle == CLE_CHOISIES) {
+                (None, _) => lin_octets(c),
+                (Some(_), false) => [1.0; 3],
+                (Some(_), true) => lin_octets(c).map(|x| 0.7 + 0.3 * x),
+            };
+            objets.push(ObjetVue { tampon: cle, modele, normale: id3, albedo, emission: [0.0; 3], opacite, contour: false, filaire: false, texture: image.clone(), envers: Some(lin_octets(coul(C::Envers))) });
         }
         if self.version_geo == Some(t.version) {
             return Some(GeoVue { maj: None, rayons: self.rayons });
@@ -3513,8 +3878,10 @@ impl App {
         self.version_geo = Some(t.version);
         let m = &t.m;
         let choisies: HashSet<usize> = if t.filtres[2] { t.sel.faces.iter().copied().collect() } else { HashSet::new() };
+        // Seules les faces de cette image la portent
+        let porte: Vec<bool> = m.faces.iter().map(|f| image.is_none() || f.s.first().and_then(|i| t.proprio.get(*i)).and_then(|k| self.projet.texture_de(&self.projet.objets[*k])) == image.as_ref()).collect();
         for (cle, garde) in [(CLE_FACES, false), (CLE_CHOISIES, true)] {
-            ajouts.push((cle, Tampons { faces: vue::faces_si(m, |k| choisies.contains(&k) == garde), bandes: Vec::new(), bandes_idx: Vec::new(), fil: Vec::new() }));
+            ajouts.push((cle, Tampons { faces: vue::faces_si_uv(m, |k| choisies.contains(&k) == garde, |k| porte[k]), bandes: Vec::new(), bandes_idx: Vec::new(), fil: Vec::new() }));
         }
         let mut g = GeoTampons::default();
         let f3 = |p: P3| p.map(|x| x as f32);
@@ -3525,6 +3892,17 @@ impl App {
         if t.filtres[0] {
             g.points.extend(m.sommets.iter().flat_map(|p| f3(*p)));
             g.choisis.extend(t.sel.sommets.iter().flat_map(|i| f3(m.sommets[*i])));
+        }
+        // Ce qu'on touche dans la vue UV s'allume sur le modèle
+        if self.contenu == Contenu::Uv {
+            let mut vus = HashSet::new();
+            for &(f, k) in &self.uv.sel {
+                if let Some(&i) = m.faces.get(f).and_then(|x| x.s.get(k)) {
+                    if vus.insert(i) {
+                        g.choisis.extend(f3(m.sommets[i]));
+                    }
+                }
+            }
         }
         if t.filtres[1] {
             for [i, j] in &t.sel.aretes {
@@ -4236,9 +4614,8 @@ mod tests {
     }
 
     #[test]
-    fn la_barre_rapide_vide_ou_masquee_ne_prend_pas_de_place() {
+    fn la_barre_rapide_masquee_ne_prend_pas_de_place() {
         let mut b = en_geometrie();
-        assert!(b.ui.zone(BARRE_RAPIDE).is_none());
         b.app.travail.as_mut().unwrap().tout(T::F);
         b.images(2);
         assert!(b.ui.zone(BARRE_RAPIDE).is_some());
@@ -5187,6 +5564,183 @@ mod tests {
         // Choisie, la cible s'exporte
         b.app.choix = [1].into_iter().collect();
         assert_eq!(b.app.liste_export(true).len(), 1);
+    }
+
+    /// Cube aux UV déroulées sur une bande, en Géométrie, vue UV ouverte et posée.
+    fn banc_uv() -> Banc {
+        let mut b = Banc::pret();
+        let mut p = Projet::neuf();
+        let mut m = Maillage::cube(2.0);
+        for (i, f) in m.faces.iter_mut().enumerate() {
+            let (x, y) = (i as f32 * 0.15 + 0.05, 0.3);
+            f.uv = vec![[x, y], [x + 0.1, y], [x + 0.1, y + 0.1], [x, y + 0.1]];
+        }
+        p.objets[0].maillage = Arc::new(m);
+        b.app.remplacer(p, "");
+        b.app.choisir(Some(0));
+        b.app.entrer_geometrie();
+        b.app.travail.as_mut().unwrap().aucun(None);
+        b.images(1);
+        b.app.agir(crate::actions::Action::EditerUv);
+        b.images(60);
+        b
+    }
+
+    fn sur_uv(b: &Banc, q: Uv) -> (f32, f32) {
+        let e = b.app.uv.ecran(q);
+        (e[0], e[1])
+    }
+
+    fn uv_0(b: &Banc) -> Uv {
+        b.app.travail.as_ref().unwrap().m.faces[0].uv[0]
+    }
+
+    #[test]
+    fn la_vue_uv_prend_la_moitie_de_l_ecran_et_quitte_la_geometrie_avec_elle() {
+        let mut b = banc_uv();
+        assert!(b.app.shell.large && b.app.contenu == Contenu::Uv);
+        assert!(b.ui.zone(TOILE_UV).is_some());
+        b.app.sortir_geometrie();
+        b.images(2);
+        assert!(!b.app.shell.large && !b.app.shell.end.open);
+    }
+
+    #[test]
+    fn toucher_choisit_le_point_et_le_vide_efface() {
+        let mut b = banc_uv();
+        let (x, y) = sur_uv(&b, [0.05, 0.3]);
+        b.appui(x, y);
+        assert_eq!(b.app.uv.sel.len(), 1);
+        assert!(b.app.uv.sel.contains(&(0, 0)));
+        // Toucher encore le retire, et le vide efface tout
+        b.appui(x, y);
+        assert!(b.app.uv.sel.is_empty());
+        b.appui(x, y);
+        let (x, y) = sur_uv(&b, [0.5, 0.9]);
+        b.appui(x, y);
+        assert!(b.app.uv.sel.is_empty());
+    }
+
+    #[test]
+    fn glisser_un_point_le_deplace_et_s_annule() {
+        let mut b = banc_uv();
+        let (a, z) = (sur_uv(&b, [0.05, 0.3]), sur_uv(&b, [0.25, 0.5]));
+        assert_eq!(b.glisser(a, z), 1);
+        let q = uv_0(&b);
+        assert!((q[0] - 0.25).abs() < 1e-3 && (q[1] - 0.5).abs() < 1e-3, "{q:?}");
+        // Les trois autres coins de la face n'ont pas bougé
+        assert_eq!(b.app.travail.as_ref().unwrap().m.faces[0].uv[1], [0.15, 0.3]);
+        b.app.annuler();
+        b.images(1);
+        assert_eq!(uv_0(&b), [0.05, 0.3]);
+    }
+
+    #[test]
+    fn un_ilot_se_deplace_d_un_bloc_et_le_pas_s_applique() {
+        let mut b = banc_uv();
+        b.app.uv.ilots = true;
+        b.app.pas.actif = true;
+        let (a, z) = (sur_uv(&b, [0.1, 0.35]), sur_uv(&b, [0.2, 0.4]));
+        b.glisser(a, z);
+        let f = b.app.travail.as_ref().unwrap().m.faces[0].uv.clone();
+        assert!((f[0][0] - (0.05 + 0.09375)).abs() < 1e-3, "{f:?}"); // 3/32
+        assert!((f[2][0] - f[0][0] - 0.1).abs() < 1e-4);
+        assert_eq!(b.app.travail.as_ref().unwrap().m.faces[1].uv[0], [0.2, 0.3]);
+    }
+
+    #[test]
+    fn la_boite_ajoute_et_un_axe_bloque_l_autre() {
+        let mut b = banc_uv();
+        let (a, z) = (sur_uv(&b, [0.0, 0.2]), sur_uv(&b, [0.17, 0.5]));
+        assert_eq!(b.glisser(a, z), 0);
+        assert_eq!(b.app.uv.sel.len(), 4);
+        b.app.uv.axes = [false, true];
+        let (a, z) = (sur_uv(&b, [0.05, 0.3]), sur_uv(&b, [0.5, 0.4]));
+        b.glisser(a, z);
+        let q = uv_0(&b);
+        assert!(q[0] == 0.05 && (q[1] - 0.4).abs() < 1e-3, "{q:?}");
+    }
+
+    #[test]
+    fn tourner_garde_le_centre_de_la_selection() {
+        let mut b = banc_uv();
+        b.app.uv.ilots = true;
+        let (x, y) = sur_uv(&b, [0.1, 0.35]);
+        b.appui(x, y);
+        b.app.uv.outil = OutilUv::Tourner;
+        // Du bord droit au bord bas : un quart de tour autour du centre
+        let (a, z) = (sur_uv(&b, [0.3, 0.35]), sur_uv(&b, [0.1, 0.55]));
+        assert_eq!(b.glisser(a, z), 1);
+        let f = b.app.travail.as_ref().unwrap().m.faces[0].uv.clone();
+        assert!((f[0][0] - 0.15).abs() < 1e-3 && (f[0][1] - 0.3).abs() < 1e-3, "{f:?}");
+    }
+
+    #[test]
+    fn deux_doigts_zooment_sans_rien_deplacer() {
+        let mut b = banc_uv();
+        let (z0, a) = (b.app.uv.vu[2], sur_uv(&b, [0.5, 0.5]));
+        let n = b.app.histoire.annuler.len();
+        b.ui.event(Event::Down { id: 0, x: a.0 - 50.0, y: a.1 }, 0.0);
+        b.ui.event(Event::Down { id: 1, x: a.0 + 50.0, y: a.1 }, 0.0);
+        b.images(1);
+        b.ui.event(Event::Move { id: 1, x: a.0 + 150.0, y: a.1 }, 0.1);
+        b.images(1);
+        b.ui.event(Event::Up { id: 1 }, 0.2);
+        b.ui.event(Event::Up { id: 0 }, 0.2);
+        b.images(1);
+        assert!(b.app.uv.vu[2] > z0 * 1.5);
+        assert_eq!(b.app.histoire.annuler.len(), n);
+        assert!(b.app.uv.sel.is_empty());
+    }
+
+    #[test]
+    fn les_faces_choisies_disent_ce_que_la_vue_montre() {
+        let mut b = banc_uv();
+        assert_eq!(b.app.faces_uv().0.len(), 6);
+        b.app.travail.as_mut().unwrap().sel.ajouter(crate::geometrie::El::F(2));
+        assert_eq!(b.app.faces_uv().0, vec![2]);
+    }
+
+    #[test]
+    fn les_uv_editees_restent_apres_la_geometrie() {
+        let mut b = banc_uv();
+        let (a, z) = (sur_uv(&b, [0.05, 0.3]), sur_uv(&b, [0.25, 0.5]));
+        b.glisser(a, z);
+        b.app.sortir_geometrie();
+        b.images(1);
+        let u = b.app.projet.objets[0].maillage.faces[0].uv[0];
+        assert!((u[0] - 0.25).abs() < 1e-3);
+        assert!(b.app.projet.ecrire().contains("\"uv\""));
+    }
+
+    #[test]
+    fn la_texture_passe_sur_le_modele_et_dans_la_vue() {
+        let mut b = Banc::pret();
+        b.app.ouvrir("cube-texture.glb", include_bytes!("../tests/donnees/cube-texture.glb"));
+        b.app.choisir(Some(0));
+        b.app.entrer_geometrie();
+        b.images(1);
+        b.app.ouvrir_uv();
+        let s = b.images(40);
+        let id = b.app.faces_uv().1.expect("texture");
+        assert!(s.objets.iter().any(|o| o.tampon == CLE_FACES && o.texture.as_ref() == Some(&id)));
+        assert!(b.dl.images.contains(&id));
+        assert!(b.dl.cmds.iter().any(|c| c.image.is_some()));
+        // Vue fermée : le modèle reprend sa couleur de travail
+        b.app.shell.end.open = false;
+        let s = b.images(2);
+        assert!(s.objets.iter().all(|o| o.texture.is_none()));
+    }
+
+    #[test]
+    fn sans_uv_la_vue_le_dit_sans_erreur() {
+        let mut b = Banc::pret();
+        b.app.choisir(Some(0));
+        b.app.entrer_geometrie();
+        b.images(1);
+        b.app.ouvrir_uv();
+        b.images(40);
+        assert!(b.app.faces_uv().0.is_empty());
     }
 
     #[test]

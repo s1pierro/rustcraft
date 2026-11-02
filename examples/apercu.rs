@@ -55,6 +55,8 @@ fn main() {
         Vue { nom: "sombre", w: 1920, h: 1200, dp: 1.5, debut: true, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 1, pave: false, geo: 0, fichier: false },
         Vue { nom: "texture", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "modifieurs", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "uv", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "uv-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "vis", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "vis-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "geo-faces", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 1, pave: false, geo: 1, fichier: false },
@@ -124,7 +126,7 @@ fn main() {
             app.ouvrir(nom, c);
         }
         let ms_ouvrir = t0.elapsed().as_secs_f64() * 1e3;
-        if s.nom == "texture" {
+        if s.nom == "texture" || s.nom.starts_with("uv") {
             // Quadrants rouge, vert, bleu, et un quart transparent : ni retournée ni écrasée
             app.ouvrir("cube-texture.glb", include_bytes!("../tests/donnees/cube-texture.glb"));
         }
@@ -147,7 +149,11 @@ fn main() {
         if s.nom.starts_with("vis") {
             app.ouvrir_ajout(rustcraft::primitives::Prim::Vis);
         }
-        if s.nom == "modifieurs" || s.nom.starts_with("vis") {
+        if s.nom.starts_with("uv") {
+            app.entrer_geometrie();
+            app.ouvrir_uv();
+        }
+        if s.nom == "modifieurs" || s.nom.starts_with("vis") || s.nom.starts_with("uv") {
             let t0 = std::time::Instant::now();
             let sc = etape(&mut app, &mut ui, &mut text, &mut dl);
             render.draw(w, h, &sc, &dl, &mut text);

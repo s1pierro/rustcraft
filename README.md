@@ -7,7 +7,7 @@ ni WebView, dans un APK très léger.
 
 ## État
 
-Version 0.12.2 : **édition en modes Scène et Géométrie, modifieurs et visserie**.
+Version 0.13 : **édition en modes Scène et Géométrie, modifieurs, visserie et UV**.
 
 - Projets `.gda` des formats 1 à 9, fichiers OBJ, STL, glTF et GLB
 - Rendus Solide, En jeu et Rayons X, éclairage de GDA
@@ -38,13 +38,16 @@ Version 0.12.2 : **édition en modes Scène et Géométrie, modifieurs et visser
   à choisir dans Réglages › Barre rapide
 - Réglages › Couleurs : les couleurs de l'interface et de la vue 3D, comme dans GDA
 - Pastille Scène : rendu, vue et ajouts à la scène
+- Vue UV du mode Géométrie, à côté du modèle : points et îlots, coins liés ou séparés,
+  sélection au toucher et en boîte, déplacement, rotation, échelle, axes U et V, pas et
+  annulation, zoom à deux doigts ; le modèle montre la texture et suit chaque geste
 - Curseur 3D : vers l'origine, vers la sélection, sélection vers le curseur
 - Panneau Fichier à trois onglets : Projet (nom, enregistrement `.gda`, ouverture,
   nouvelle scène), Importer par le sélecteur d'Android, Exporter en OBJ, STL ou GLB la
   scène complète ou les seuls objets choisis, et `.mtl`, dans Téléchargements
   (Android 10 ou plus) ; sauvegarde automatique d'un lancement à l'autre
 
-Pas encore disponibles : édition des coordonnées UV, déplacement entre sets, curseur 3D à la main,
+Pas encore disponibles : projections et dépliage UV, déplacement entre sets, curseur 3D à la main,
 armatures (conservées dans le projet, ni affichées ni appliquées à l'export). En mode
 Géométrie, les objets sont édités sans leurs modifieurs.
 
@@ -62,6 +65,7 @@ Depuis le panneau Fichier, ou depuis un gestionnaire de fichiers : **Ouvrir avec
 - `src/geometrie.rs` : sélection et opérations du mode Géométrie, sans interface
 - `src/booleens.rs`, `modifs.rs` : opérations booléennes et évaluation des modifieurs
 - `src/primitives.rs`, `visserie.rs` : réglages des primitives, pièces de visserie
+- `src/uv.rs` : points, îlots et transformations des coordonnées de texture, sans interface
 - `src/vue.rs`, `editeur.rs` : du modèle à l'écran, et l'interface de l'éditeur
 - `src/ui.rs`, `shell.rs`, `widgets.rs`, `draw.rs`, `text.rs` : le socle d'interface,
   venu de [Rustine](https://github.com/s1pierro/Rustine)
