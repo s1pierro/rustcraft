@@ -1,0 +1,22 @@
+[package]
+name = "rustcraft"
+version = "0.12.2"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+
+# fontdue dessine le texte à partir des polices du système ; png et jpeg-decoder lisent
+# les textures ; boolmesh calcule les booléens. OpenGL ES est chargé à l'exécution via dlopen : les libEGL de Termux
+# (Mesa) n'existent pas sur Android, il ne faut surtout pas lier dessus.
+[dependencies]
+fontdue = "0.9"
+jpeg-decoder = { version = "0.3", default-features = false }
+png = "0.17"
+boolmesh = "0.2"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

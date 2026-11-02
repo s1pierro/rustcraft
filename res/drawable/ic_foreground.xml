@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cube vu de trois quarts, dans la zone sûre centrale de 66×66. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:pathData="M54,29 L77,42 L54,55 L31,42 Z" />
+    <path android:fillColor="#C9C6F7" android:pathData="M31,46 L52,58 L52,82 L31,70 Z" />
+    <path android:fillColor="#8F88EF" android:pathData="M77,46 L56,58 L56,82 L77,70 Z" />
+</vector>
