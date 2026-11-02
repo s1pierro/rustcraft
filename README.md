@@ -5,6 +5,11 @@ ni WebView, dans un APK très léger.
 
 ![Rustcraft : un boulon ouvert depuis un projet GDA, objet choisi et liste des objets](docs/apercu.png)
 
+## Télécharger
+
+[Dernière version pour Android](https://github.com/s1pierro/rustcraft/releases/latest) :
+ouvrez la page, puis touchez le fichier `.apk`.
+
 ## État
 
 Version 0.17 : **édition en modes Scène et Géométrie, modifieurs, visserie, UV et matériaux**.
