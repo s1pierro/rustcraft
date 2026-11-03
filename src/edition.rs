@@ -315,25 +315,31 @@ pub struct Poignee {
     /// Longueur d'un axe, dans le monde.
     pub taille: f64,
     pub axes: [bool; 3],
+    /// Orientation des axes : ceux du monde, ou ceux d'un os posé.
+    pub repere: Q,
 }
 
 impl Poignee {
     /// `dp` : taille d'un dp en pixels.
     pub fn new(mode: Mode, centre: P3, pivot: P3, axes: [bool; 3], vue: &Vue, dp: f64) -> Poignee {
         let o = if mode == Mode::Translation { centre } else { pivot };
-        Poignee { mode, o, taille: vue.pixel(o) * POIGNEE * dp, axes }
+        Poignee { mode, o, taille: vue.pixel(o) * POIGNEE * dp, axes, repere: [0.0, 0.0, 0.0, 1.0] }
+    }
+
+    /// Axe `k` de la poignée, dans le monde.
+    pub fn axe(&self, k: usize) -> P3 {
+        qappliquer(self.repere, axe(k))
     }
 
     pub fn bout(&self, k: usize) -> P3 {
         let l = self.taille * if self.mode == Mode::Echelle { BOUT_ECHELLE } else { BOUT_FLECHE };
-        let mut p = self.o;
-        p[k] += l;
-        p
+        let u = self.axe(k);
+        [0, 1, 2].map(|i| self.o[i] + u[i] * l)
     }
 
     /// Anneau d'un axe : perpendiculaire à l'axe, s'il est coché.
     pub fn anneau(&self, k: usize, n: usize) -> Vec<P3> {
-        let (u, v) = (axe((k + 1) % 3), axe((k + 2) % 3));
+        let (u, v) = (self.axe((k + 1) % 3), self.axe((k + 2) % 3));
         cercle(self.o, u, v, self.taille, n)
     }
 
@@ -493,6 +499,23 @@ impl Geste {
             }
         }
         g
+    }
+
+    /// Rotation autour des axes d'un repère tourné de `q`, ceux d'un os posé, au lieu
+    /// de ceux du monde.
+    pub fn orienter(&mut self, q: Q) {
+        if self.mode != Mode::Rotation {
+            return;
+        }
+        let v = unitaire(sous(self.vue.oeil, self.pivot));
+        let ax = |k: usize| qappliquer(q, axe(k));
+        let k = match self.prise {
+            Prise::Axe(k) => Some(k),
+            _ if self.prise == Prise::V || self.axes == [true; 3] => None,
+            _ => (0..3).filter(|k| self.axes[*k]).max_by(|a, b| scal(ax(*a), v).abs().total_cmp(&scal(ax(*b), v).abs())),
+        };
+        self.axe = k.map_or(v, ax);
+        self.signe = if scal(self.axe, v) < 0.0 { -1.0 } else { 1.0 };
     }
 
     fn deplacer(&self, x: f64, y: f64, pas: &Pas, pas_t: f64) -> P3 {

@@ -6,7 +6,7 @@
 use crate::theme::{self, coul, C};
 use crate::icones::{self, Icone};
 use crate::draw::{Color, Rect};
-use crate::armature::{Armature, Bout, EditionOs, Os, Pose, Segments, Touche};
+use crate::armature::{Armature, Bout, Ecart, EditionOs, Os, Pose, Segments, Touche};
 use crate::actions::{self, Action as A, Choix, Contexte, Groupe, Menu, CATALOGUE, GROUPES};
 use crate::edition::{self as ed, Etape, Geste, Historique, Mode, Pas, Pivot, Poignee, Prise, Transfo, Vue, PIVOTS};
 use crate::geometrie::{self as geo, Bilan, El, RegleRevolution, Travail, T};
@@ -737,6 +737,10 @@ pub struct App {
     pub voir_poids: bool,
     /// En mode Scène, l'os actif choisi dans le panneau Os : l'armature, puis l'os.
     os_scene: Option<(String, String)>,
+    /// Curseurs d'angle de l'os actif : tenus, l'os et ses angles, figés pendant le
+    /// glissé pour que les autres ne sautent pas ; l'annulation est déjà mémorisée.
+    angles_tenus: Option<(String, [f64; 3])>,
+    angle_saisie: bool,
     /// Objets liés emportés par le geste en cours.
     suivis: Vec<ed::Suivi>,
     pub liaison: Option<PageLiaison>,
@@ -817,6 +821,8 @@ impl App {
             vues_poids: HashMap::new(),
             voir_poids: false,
             os_scene: None,
+            angles_tenus: None,
+            angle_saisie: false,
             suivis: Vec::new(),
             liaison: None,
             parents_ouverts: false,
@@ -2875,7 +2881,23 @@ impl App {
             return None;
         }
         let pivot = self.pivot_courant(&pts);
-        Some(Poignee::new(self.mode, ed::centre(&pts), pivot, self.axes, vue, dp as f64))
+        let mut p = Poignee::new(self.mode, ed::centre(&pts), pivot, self.axes, vue, dp as f64);
+        if let Some(q) = self.repere_pose() {
+            p.repere = q;
+        }
+        Some(p)
+    }
+
+    /// En mode Pose, le repère de l'os actif posé, dans le monde : les poignées et les
+    /// curseurs d'angle tournent les os autour de ses axes.
+    fn repere_pose(&self) -> Option<ed::Q> {
+        let (e, o, a) = self.armature_os()?;
+        if !e.pose {
+            return None;
+        }
+        let id = e.actif.clone().filter(|i| a.trouver(i).is_some()).or_else(|| e.os_choisis(a).into_iter().next())?;
+        let (_, q) = *a.matrices_pose().get(&id)?;
+        Some(ed::qnorm(ed::qmul(o.rotation, q)))
     }
 
     fn pas_translation(&self) -> f64 {
@@ -2898,6 +2920,10 @@ impl App {
         let boite = self.selection == Selection::Boite;
         let poignee = self.poignee(&vue, cx.dp);
         let mut prise = poignee.and_then(|p| p.sous(px, py, &vue, dp));
+        // En pose, les anneaux de l'os croisent son corps : l'os touché l'emporte
+        if poignee.is_some() && prise != Some(Prise::O) && self.os.as_ref().is_some_and(|e| e.pose) && self.sur_os(px, py, &vue, self.rayon(cx.dp)) {
+            prise = Some(Prise::O);
+        }
         if prise.is_none() && !boite && poignee.is_some() {
             let dessus = match &self.travail {
                 Some(t) => t.sur_selection(px, py, &vue, self.rayon(cx.dp), self.rayons),
@@ -2929,6 +2955,9 @@ impl App {
         };
         self.suivis = ed::suivis(&self.projet.objets, &indices);
         let mut g = Geste::new(self.mode, prise, px, py, vue, self.axes, indices, departs, ed::centre(&pts), pivot);
+        if let Some(q) = self.repere_pose() {
+            g.orienter(q);
+        }
         if let Some(t) = &self.travail {
             g.indices = t.impliques();
             g.sommets = pts;
@@ -4718,7 +4747,7 @@ impl App {
                 cx.paragraph(&mut b, "Un double appui sur un objet l'édite, avec les autres objets choisis. Les icônes de sommet, d'arête et de face, en haut, disent ce qui se touche : un appui bref garde ce type seul, un appui long l'ajoute ou le retire.");
                 cx.paragraph(&mut b, "Glisser depuis la sélection ou la poignée la transforme. Contexte › Géométrie regroupe les opérations. Le bouton de sélection, en haut, passe de Toucher à Boîte, qui trace un cadre, puis à Chemin, qui relie deux éléments.");
                 cx.section(&mut b, "ARMATURES");
-                cx.paragraph(&mut b, "La géométrie d'une armature, ce sont ses os : la pilule Géométrie, l'action Éditer la géométrie ou un double appui sur une armature ouvrent ce mode sur elle. Quand une armature est active, la pilule Pose apparaît : les os y tournent autour de leur tête, et le panneau Os ne garde que ce qui sert à la pose ; en mode Scène, il montre l'armature active, ses objets liés, ses poids, et la remet au repos. Les autres objets sont estompés et inertes. Un appui sur un bout, tête ou queue, le prend avec ce qui lui est soudé ; un appui sur le corps d'un os prend ses deux bouts ; un appui long les prend seuls. Glisser depuis la sélection ou la poignée déplace les bouts, et les enfants restent en place. Le panneau Os, sous sa pastille, regroupe l'os actif, les opérations et l'arbre des os ; Contexte › Armature donne la position des bouts choisis.");
+                cx.paragraph(&mut b, "La géométrie d'une armature, ce sont ses os : la pilule Géométrie, l'action Éditer la géométrie ou un double appui sur une armature ouvrent ce mode sur elle. Quand une armature est active, la pilule Pose apparaît : les os y tournent autour de leur tête, selon les axes de l'os actif posé, à la poignée comme aux trois curseurs de Os actif, et le panneau Os ne garde que ce qui sert à la pose ; en mode Scène, il montre l'armature active, ses objets liés, ses poids, et la remet au repos. Les autres objets sont estompés et inertes. Un appui sur un bout, tête ou queue, le prend avec ce qui lui est soudé ; un appui sur le corps d'un os prend ses deux bouts ; un appui long les prend seuls. Glisser depuis la sélection ou la poignée déplace les bouts, et les enfants restent en place. Le panneau Os, sous sa pastille, regroupe l'os actif, les opérations et l'arbre des os ; Contexte › Armature donne la position des bouts choisis.");
                 cx.section(&mut b, "DERNIÈRE OPÉRATION");
                 cx.paragraph(&mut b, "Contexte › Dernière opération récapitule la dernière transformation au doigt ou la dernière opération réglable. Changer une valeur la refait depuis l'état d'avant, sans ajouter d'étape d'annulation. Elle disparaît à la modification suivante ou à l'annulation.");
                 cx.section(&mut b, "BARRE RAPIDE");
@@ -5304,6 +5333,8 @@ impl App {
         if let Some(x) = actif {
             if e.pose {
                 cx.paragraph(b, &x.nom);
+                let r = a.pose.get(&x.id).map_or([0.0, 0.0, 0.0, 1.0], |p| p.r);
+                self.angles_os(cx, b, &x.id, r);
             } else if cx.champ(b, id("os-nom"), "Nom", coul(C::Texte), &x.nom) {
                 self.saisir(Champ::OsNom);
             }
@@ -5340,6 +5371,54 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Trois curseurs : la rotation de l'os actif depuis son repos, en degrés, autour
+    /// des axes X, Y puis Z de l'os.
+    fn angles_os(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, os: &str, r: ed::Q) {
+        let base = match &self.angles_tenus {
+            Some((i, v)) if i == os => *v,
+            _ => angles_os(r),
+        };
+        let (mut nouveau, mut tenu) = (base, false);
+        for k in 0..3 {
+            let z = sub_id(id("os-angle"), k);
+            let mut v = base[k] as f32;
+            cx.slider(b, z, ["Rotation X", "Rotation Y", "Rotation Z"][k], &format!("{:.0}°", base[k]), &mut v, -180.0, 180.0);
+            tenu |= cx.ui.pressed(z);
+            if v != base[k] as f32 {
+                nouveau[k] = (v as f64).round();
+            }
+        }
+        if nouveau != base {
+            self.regler_angles(os, nouveau);
+        }
+        if !tenu {
+            self.angles_tenus = None;
+            self.angle_saisie = false;
+        }
+    }
+
+    /// Donne à l'os `id` la rotation de ces angles, depuis son repos.
+    pub fn regler_angles(&mut self, id: &str, angles: [f64; 3]) {
+        if !self.angle_saisie {
+            self.memoriser();
+            self.angle_saisie = true;
+        }
+        self.angles_tenus = Some((id.to_string(), angles));
+        let Some(e) = &mut self.os else { return };
+        let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
+        let Some(a) = &mut o.armature else { return };
+        let r = depuis_angles_os(angles);
+        let t = a.pose.get(id).map_or([0.0; 3], |p| p.t);
+        if angles == [0.0; 3] && t == [0.0; 3] {
+            a.pose.remove(id);
+        } else {
+            a.pose.insert(id.to_string(), Ecart { r, t });
+        }
+        o.maillage = Arc::new(a.enveloppe_pose());
+        e.version += 1;
+        self.a_sauver = true;
     }
 
     /// Panneau Os en mode Scène : l'armature active, sa pose, ses poids et ses os.
@@ -5831,6 +5910,26 @@ fn segments_os(e: &EditionOs, a: &Armature) -> Segments {
 }
 
 /// Tourne les os choisis depuis `depart`, chacun autour de sa tête.
+/// Angles d'un os posé depuis son repos, en degrés : il se plie autour de son axe X,
+/// puis de son axe Z, et vrille enfin autour de son axe Y, le long de l'os ; la
+/// vrille ne change donc pas sa direction.
+pub fn depuis_angles_os(d: [f64; 3]) -> ed::Q {
+    let r = d.map(f64::to_radians);
+    let q = ed::qmul(ed::qaxe([1.0, 0.0, 0.0], r[0]), ed::qmul(ed::qaxe([0.0, 0.0, 1.0], r[2]), ed::qaxe([0.0, 1.0, 0.0], r[1])));
+    ed::qnorm(q)
+}
+
+/// L'inverse de `depuis_angles_os`.
+pub fn angles_os(q: ed::Q) -> [f64; 3] {
+    // m[i][j] : composante i de l'image de l'axe j
+    let c = [0, 1, 2].map(|j| ed::qappliquer(ed::qnorm(q), [0, 1, 2].map(|i| if i == j { 1.0 } else { 0.0 })));
+    let m = |i: usize, j: usize| c[j][i];
+    let s = (-m(0, 1)).clamp(-1.0, 1.0);
+    let z = s.asin();
+    let (x, y) = if s.abs() < 0.9999999 { (m(2, 1).atan2(m(1, 1)), m(0, 2).atan2(m(0, 0))) } else { ((-m(1, 2)).atan2(m(2, 2)), 0.0) };
+    [x, y, z].map(|v| v.to_degrees() + 0.0)
+}
+
 fn poser_os(o: &mut Objet, e: &EditionOs, depart: &Pose, v: Transfo) {
     let Transfo::Rotation { q, .. } = v else { return };
     let (r, ri) = (o.rotation, ed::qinv(ed::qnorm(o.rotation)));
@@ -9161,6 +9260,71 @@ mod tests {
     fn tourner_bras(b: &mut Banc, q: ed::Q) {
         b.app.memoriser();
         b.app.poser_selection(Transfo::Rotation { q, c: [0.0; 3] });
+    }
+
+    #[test]
+    fn les_angles_d_un_os_vont_et_reviennent() {
+        for d in [[0.0, 0.0, 0.0], [30.0, -45.0, 60.0], [-170.0, 120.0, 10.0], [90.0, 0.0, -89.0]] {
+            let a = angles_os(depuis_angles_os(d));
+            assert!(a.iter().zip(d).all(|(x, y)| (x - y).abs() < 1e-6), "{d:?} → {a:?}");
+        }
+        // La vrille garde la direction de l'os
+        let dir = |d| ed::qappliquer(depuis_angles_os(d), [0.0, 1.0, 0.0]);
+        let (u, v) = (dir([20.0, 0.0, 50.0]), dir([20.0, 80.0, 50.0]));
+        assert!((0..3).all(|k| (u[k] - v[k]).abs() < 1e-9));
+    }
+
+    #[test]
+    fn en_pose_les_curseurs_et_la_poignee_suivent_le_repere_de_l_os() {
+        let (mut b, bras) = banc_pose();
+        b.app.os.as_mut().unwrap().actif = Some(bras.clone());
+        let segment = |b: &Banc| b.app.projet.objets[1].armature.as_ref().unwrap().segments_pose()[&bras];
+        let dir = |s: crate::armature::Segment| {
+            let d = [0, 1, 2].map(|k| s.queue[k] - s.tete[k]);
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            d.map(|v| v / l)
+        };
+        let proche = |u: P3, v: P3| (0..3).all(|k| (u[k] - v[k]).abs() < 1e-6);
+        let avant = segment(&b);
+        // Les curseurs : angles depuis le repos, autour des axes de l'os
+        b.app.contenu = Contenu::Os;
+        b.app.shell.end.open = true;
+        b.images(2);
+        assert!((0..3).all(|k| b.ui.zone(sub_id(id("os-angle"), k)).is_some()));
+        b.app.regler_angles(&bras, [0.0, 0.0, 60.0]);
+        b.app.angle_saisie = false;
+        let e = b.app.projet.objets[1].armature.as_ref().unwrap().pose[&bras];
+        assert!(angles_os(e.r).iter().zip([0.0, 0.0, 60.0]).all(|(a, b)| (a - b).abs() < 1e-6));
+        let apres = segment(&b);
+        assert!(proche(apres.tete, avant.tete) && !proche(dir(apres), dir(avant)), "l'os tourne autour de sa tête");
+        // Autour de son propre axe Y, l'os ne fait que vriller
+        b.app.regler_angles(&bras, [0.0, 45.0, 60.0]);
+        b.app.angle_saisie = false;
+        assert!(proche(dir(segment(&b)), dir(apres)));
+        // La poignée prend le repère de l'os posé : son axe Y suit l'os
+        let w = b.app.espace;
+        let vue = b.app.vue_ecran(w);
+        let p = b.app.poignee(&vue, 1.0).unwrap();
+        let o = &b.app.projet.objets[1];
+        let monde = |v: P3| ed::qappliquer(ed::qnorm(o.rotation), v);
+        assert!(proche(p.axe(1), monde(dir(segment(&b)))));
+        let mut g = Geste::new(Mode::Rotation, Prise::Axe(1), 0.0, 0.0, vue, [true; 3], Vec::new(), Vec::new(), p.o, p.o);
+        g.orienter(p.repere);
+        assert!(proche(g.rotation().0, p.axe(1)));
+        // Le geste autour de cet axe vrille l'os sans le déplacer
+        let d0 = dir(segment(&b));
+        b.app.memoriser();
+        b.app.poser_selection(Transfo::Rotation { q: ed::qaxe(p.axe(1), 0.7), c: p.o });
+        assert!(proche(dir(segment(&b)), d0));
+        // Au repos, les axes du monde
+        b.app.basculer_pose();
+        assert_eq!(b.app.poignee(&vue, 1.0).unwrap().repere, [0.0, 0.0, 0.0, 1.0]);
+        // L'annulation reprend les angles
+        b.app.basculer_pose();
+        b.app.annuler();
+        b.app.annuler();
+        b.app.annuler();
+        assert!(proche(dir(segment(&b)), dir(avant)));
     }
 
     #[test]
