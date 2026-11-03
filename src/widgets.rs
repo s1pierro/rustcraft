@@ -304,6 +304,109 @@ impl Cx<'_> {
         clicked
     }
 
+    /// Ligne d'un arbre : décalée selon son `niveau`, un chevron en pastille s'il y a
+    /// quelque chose à plier (`plie` : `Some(vrai)` replié), le nom et un lien à droite.
+    /// `selected` surligne la ligne, `choisi` colore seulement son nom ; `long` : la
+    /// ligne accepte l'appui long. Rend l'appui sur la ligne, sur le chevron, sur le
+    /// lien, et l'appui long sur la ligne.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ligne_arbre(&mut self, b: &mut Body, cle: Id, chevron: Id, label: &str, niveau: usize, plie: Option<bool>, selected: bool, choisi: bool, lien: Option<(Id, &str)>, long: bool) -> (bool, bool, bool, bool) {
+        let d = self.dp;
+        let r = Rect::new(b.rect.x, b.y, b.rect.w, 44.0 * d);
+        let x0 = b.x + niveau as f32 * 16.0 * d;
+        let z_chevron = Rect::new(x0 - 6.0 * d, r.y, 36.0 * d, r.h);
+        let droite = r.right();
+        let z_lien = lien.map(|(_, t)| {
+            let large = self.text.measure(t, (15.0 * d).round()) + 2.0 * (b.rect.right() - (b.x + b.w)).max(12.0 * d);
+            Rect::new(droite - large, r.y, large, r.h)
+        });
+        let debut = if plie.is_some() { z_chevron.right() } else { r.x };
+        let z_nom = Rect::new(debut, r.y, z_lien.map_or(droite, |z| z.x) - debut, r.h);
+        let ligne = self.ui.click(cle, z_nom, Some(b.id));
+        let chev = plie.is_some() && self.ui.click(chevron, z_chevron, Some(b.id));
+        let tenu = long && self.ui.long_press(cle);
+        let appui = match (lien, z_lien) {
+            (Some((lid, _)), Some(z)) => self.ui.click(lid, z, Some(b.id)),
+            _ => false,
+        };
+        if self.ui.pressed(cle) || selected {
+            self.dl.rrect(r.inset(2.0 * d), 10.0 * d, coul(C::Fond));
+        }
+        let (cx_, cy) = (x0 + 12.0 * d, r.cy());
+        if let Some(p) = plie {
+            let s = 24.0 * d;
+            let fond = if self.ui.pressed(chevron) { coul(C::Bordures) } else if selected { coul(C::Surface) } else { coul(C::Fond) };
+            self.dl.rrect(Rect::new(cx_ - s / 2.0, cy - s / 2.0, s, s), s / 2.0, fond);
+            let (e, c) = (4.0 * d, coul(C::Texte));
+            if p {
+                self.dl.line([cx_ - e / 2.0, cy - e], [cx_ + e / 2.0, cy], 2.0 * d, c);
+                self.dl.line([cx_ + e / 2.0, cy], [cx_ - e / 2.0, cy + e], 2.0 * d, c);
+            } else {
+                self.dl.line([cx_ - e, cy - e / 2.0], [cx_, cy + e / 2.0], 2.0 * d, c);
+                self.dl.line([cx_, cy + e / 2.0], [cx_ + e, cy - e / 2.0], 2.0 * d, c);
+            }
+        }
+        self.label(x0 + 30.0 * d, cy, label, 16.0, if selected || choisi { coul(C::Accent) } else { coul(C::Texte) });
+        if let Some((lid, t)) = lien {
+            let c = coul(C::Accent);
+            let c = if self.ui.pressed(lid) { [c[0], c[1], c[2], 150] } else { c };
+            self.text_right(b.x + b.w, cy, t, 15.0, c);
+        }
+        b.y += r.h;
+        (ligne, chev, appui, tenu)
+    }
+
+    /// Ligne de liste avec un lien à droite, dans son surlignage : rend l'appui sur la
+    /// ligne et l'appui sur le lien.
+    pub fn row_lien(&mut self, b: &mut Body, id: Id, label: &str, selected: bool, lien: Option<(Id, &str)>) -> (bool, bool) {
+        let Some((lid, texte)) = lien else { return (self.row(b, id, label, None, selected), false) };
+        let d = self.dp;
+        let r = Rect::new(b.rect.x, b.y, b.rect.w, 48.0 * d);
+        let large = self.text.measure(texte, (15.0 * d).round()) + 2.0 * (b.rect.right() - (b.x + b.w)).max(12.0 * d);
+        let z_lien = Rect::new(r.right() - large, r.y, large, r.h);
+        let z_nom = Rect::new(r.x, r.y, z_lien.x - r.x, r.h);
+        let (ligne, appui) = (self.ui.click(id, z_nom, Some(b.id)), self.ui.click(lid, z_lien, Some(b.id)));
+        if self.ui.pressed(id) || selected {
+            self.dl.rrect(r.inset(2.0 * d), 10.0 * d, coul(C::Fond));
+        }
+        self.label(b.x, r.cy(), label, 16.0, if selected { coul(C::Accent) } else { coul(C::Texte) });
+        let c = coul(C::Accent);
+        let c = if self.ui.pressed(lid) { [c[0], c[1], c[2], 150] } else { c };
+        self.text_right(b.x + b.w, r.cy(), texte, 15.0, c);
+        b.y += r.h;
+        (ligne, appui)
+    }
+
+    /// Légende discrète à gauche, et un lien à droite sur la même ligne s'il y en a un.
+    /// Renvoie vrai à l'appui sur le lien.
+    pub fn legende_lien(&mut self, b: &mut Body, texte: &str, lien: Option<(Id, &str)>) -> bool {
+        let d = self.dp;
+        let r = Rect::new(b.rect.x, b.y, b.rect.w, 40.0 * d);
+        self.label(b.x, r.cy(), texte, 15.0, coul(C::Secondaire));
+        let mut appui = false;
+        if let Some((lid, t)) = lien {
+            let large = self.text.measure(t, (15.0 * d).round()) + 2.0 * (r.right() - (b.x + b.w)).max(12.0 * d);
+            appui = self.ui.click(lid, Rect::new(r.right() - large, r.y, large, r.h), Some(b.id));
+            let c = coul(C::Accent);
+            let c = if self.ui.pressed(lid) { [c[0], c[1], c[2], 150] } else { c };
+            self.text_right(b.x + b.w, r.cy(), t, 15.0, c);
+        }
+        b.y += r.h;
+        appui
+    }
+
+    /// Lien en fin de liste, aligné à droite : un texte de la couleur d'accent, sans
+    /// fond. Renvoie vrai à l'appui.
+    pub fn lien(&mut self, b: &mut Body, id: Id, label: &str) -> bool {
+        let r = Rect::new(b.rect.x, b.y, b.rect.w, 40.0 * self.dp);
+        let clicked = self.ui.click(id, r, Some(b.id));
+        let c = coul(C::Accent);
+        let c = if self.ui.pressed(id) { [c[0], c[1], c[2], 150] } else { c };
+        self.text_right(b.x + b.w, r.cy(), label, 15.0, c);
+        b.y += r.h;
+        clicked
+    }
+
     /// En-tête d'un set : son chevron et son nom, qui le plient, sa visibilité et son
     /// menu. Rend l'appui sur chacun.
     pub fn tete_set(&mut self, b: &mut Body, cle: Id, nom: &str, n: usize, replie: bool, visible: bool) -> (bool, bool, bool) {
@@ -363,22 +466,68 @@ impl Cx<'_> {
     }
 
     pub fn slider(&mut self, b: &mut Body, id: Id, label: &str, shown: &str, value: &mut f32, lo: f32, hi: f32) {
+        self.slider_borne(b, id, label, shown, value, lo, hi, None, true);
+    }
+
+    /// Curseur dont `plage` marque la partie permise sur la piste ; grisé et immobile
+    /// quand il n'est pas `libre`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider_borne(&mut self, b: &mut Body, id: Id, label: &str, shown: &str, value: &mut f32, lo: f32, hi: f32, plage: Option<(f32, f32)>, libre: bool) {
         let r = Rect::new(b.x, b.y, b.w, 64.0 * self.dp);
-        self.label(b.x, r.y + 16.0 * self.dp, label, 16.0, coul(C::Texte));
+        self.label(b.x, r.y + 16.0 * self.dp, label, 16.0, if libre { coul(C::Texte) } else { coul(C::Secondaire) });
         self.text_right(r.right(), r.y + 16.0 * self.dp, shown, 14.0, coul(C::Secondaire));
         let track_y = r.y + 44.0 * self.dp;
         let knob = 11.0 * self.dp;
         let (x0, x1) = (r.x + knob, r.right() - knob);
-        if let Some(d) = self.ui.drag(id, r) {
+        if let Some(d) = self.ui.drag(id, r).filter(|_| libre) {
             *value = lo + ((d.x - x0) / (x1 - x0)).clamp(0.0, 1.0) * (hi - lo);
         }
         let t = 4.0 * self.dp;
-        let at = x0 + (*value - lo) / (hi - lo) * (x1 - x0);
+        let ax = |v: f32| x0 + (v.clamp(lo, hi) - lo) / (hi - lo) * (x1 - x0);
+        let at = ax(*value);
+        let c = if libre { coul(C::Accent) } else { coul(C::Secondaire) };
         self.dl.rrect(Rect::new(x0, track_y - t / 2.0, x1 - x0, t), t / 2.0, coul(C::Bordures));
-        self.dl.rrect(Rect::new(x0, track_y - t / 2.0, at - x0, t), t / 2.0, coul(C::Accent));
-        let grow = if self.ui.pressed(id) { 2.0 * self.dp } else { 0.0 };
-        self.dl.rrect(Rect::new(at - knob - grow, track_y - knob - grow, 2.0 * (knob + grow), 2.0 * (knob + grow)), knob + grow, coul(C::Accent));
+        if let Some((a, z)) = plage {
+            // La plage permise, plus épaisse et pâle, avec l'écart au zéro par-dessus
+            let (a, z, e) = (ax(a), ax(z), 3.0 * t);
+            self.dl.rrect(Rect::new(a, track_y - e / 2.0, (z - a).max(e), e), e / 2.0, [c[0], c[1], c[2], 60]);
+            let o = ax(0.0);
+            self.dl.rrect(Rect::new(o.min(at), track_y - t / 2.0, (at - o).abs(), t), t / 2.0, c);
+        } else {
+            self.dl.rrect(Rect::new(x0, track_y - t / 2.0, at - x0, t), t / 2.0, c);
+        }
+        let grow = if self.ui.pressed(id) && libre { 2.0 * self.dp } else { 0.0 };
+        self.dl.rrect(Rect::new(at - knob - grow, track_y - knob - grow, 2.0 * (knob + grow), 2.0 * (knob + grow)), knob + grow, c);
         b.y += r.h;
+    }
+
+    /// Ligne d'une limite : son nom dans la couleur de l'axe, ses bornes en deux cadres
+    /// quand il y en a, et son état dans une pastille qui le change. Rend l'appui sur
+    /// l'état, sur le minimum et sur le maximum.
+    pub fn ligne_limite(&mut self, b: &mut Body, cle: Id, label: &str, couleur: Color, etat: &str, bornes: Option<(&str, &str)>) -> (bool, bool, bool) {
+        let d = self.dp;
+        let r = Rect::new(b.x, b.y, b.w, 48.0 * d);
+        self.label(b.x, r.cy(), label, 16.0, couleur);
+        let (ie, imin, imax) = (sub_id(cle, 0), sub_id(cle, 1), sub_id(cle, 2));
+        let we = 80.0 * d;
+        let z = Rect::new(r.right() - we, r.y + 8.0 * d, we, 32.0 * d);
+        let e = self.ui.click(ie, z, Some(b.id));
+        let libre = etat == "Libre";
+        self.dl.rrect(z, z.h / 2.0, if self.ui.pressed(ie) { coul(C::Bordures) } else if libre { coul(C::Fond) } else { couleur });
+        self.centered(z, etat, 14.0, if libre { coul(C::Texte) } else { BLANC });
+        let (mut mn, mut mx) = (false, false);
+        if let Some((a, c)) = bornes {
+            let wc = 60.0 * d;
+            for (k, (i, v)) in [(imin, a), (imax, c)].into_iter().enumerate() {
+                let f = Rect::new(z.x - (2 - k) as f32 * (wc + 6.0 * d), r.y + 6.0 * d, wc, 36.0 * d);
+                let t = self.ui.click(i, f, Some(b.id));
+                self.dl.rrect(f, 10.0 * d, if self.ui.pressed(i) { coul(C::Bordures) } else { coul(C::Fond) });
+                self.centered(f, v, 14.0, coul(C::Texte));
+                if k == 0 { mn = t } else { mx = t }
+            }
+        }
+        b.y += r.h;
+        (e, mn, mx)
     }
 
     /// Ligne d'une couleur : son nom, son retour au défaut si elle est choisie, son

@@ -60,6 +60,8 @@ fn main() {
         Vue { nom: "liaison", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "liaison-fiche", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "pose-limites", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "pose-limites-geo", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-scene", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "devant", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "peau", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
@@ -200,7 +202,22 @@ fn main() {
             app.projet.objets[k].armature.as_mut().unwrap().tourner(&[os("avant-bras.G")], q);
             app.redessiner_armatures();
             app.choisir(Some(k));
-            if s.nom == "pose" {
+            if s.nom.starts_with("pose-limites") {
+                use rustcraft::armature::Limite;
+                let x = app.projet.objets[k].armature.as_mut().unwrap();
+                let i = x.os.iter().position(|b| b.nom == "avant-bras.G").unwrap();
+                x.os[i].regler_limites([Limite::Bornee(-20.0, 30.0), Limite::Bloquee, Limite::Bornee(0.0, 140.0)]);
+                app.limites_ouvertes = true;
+                app.os_plies.insert(format!("a:{}", app.projet.objets[k].id));
+            }
+            if s.nom == "pose-limites-geo" {
+                app.entrer_armature();
+                let e = app.os.as_mut().unwrap();
+                e.actif = Some(os("avant-bras.G"));
+                e.selectionner(&a, &[os("avant-bras.G")], false);
+                app.contenu = Contenu::Os;
+            }
+            if s.nom == "pose" || s.nom == "pose-limites" {
                 app.entrer_armature();
                 app.basculer_pose();
                 let e = app.os.as_mut().unwrap();
@@ -349,7 +366,7 @@ fn main() {
                 _ => app.ouvrir_uv(),
             }
         }
-        if s.nom.starts_with("armature") || s.nom == "pose" || s.nom.starts_with("sets") || s.nom == "modifieurs" || s.nom.starts_with("vis") || s.nom.starts_with("uv") || s.nom.starts_with("materiaux") {
+        if s.nom.starts_with("armature") || s.nom == "pose" || s.nom.starts_with("pose-limites") || s.nom.starts_with("sets") || s.nom == "modifieurs" || s.nom.starts_with("vis") || s.nom.starts_with("uv") || s.nom.starts_with("materiaux") {
             let t0 = std::time::Instant::now();
             let sc = etape(&mut app, &mut ui, &mut text, &mut dl);
             render.draw(w, h, &sc, &dl, &mut text);

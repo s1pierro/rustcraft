@@ -1,10 +1,10 @@
 //! Armature : squelette d'os hiérarchisés, comme dans `moteur/armature.js` de GDA.
 //! Un os est un repère placé dans celui de son parent, sans échelle ; il part de son
 //! origine et s'étend le long de +Y. L'édition le décrit par deux bouts, sa tête et sa
-//! queue. La pose donne à chaque os un écart à son repos. Poses nommées, ancre, contraintes
-//! et couleurs ne sont pas interprétées ici : elles restent telles quelles dans le fichier.
+//! queue. La pose donne à chaque os un écart à son repos. Les limites de rotation sont lues
+//! dans `contraintes` ; ancre, limites de translation et couleurs restent telles quelles.
 
-use crate::edition::{qappliquer, qinv, qmul, qnorm};
+use crate::edition::{qappliquer, qaxe, qinv, qmul, qnorm};
 use crate::json::J;
 use crate::maillage::{defaut, Face, Maillage, P3};
 use std::collections::{HashMap, HashSet};
@@ -26,6 +26,109 @@ pub struct Os {
     pub longueur: f64,
     /// Couleur et contraintes, gardées telles quelles.
     pub extra: Vec<(String, J)>,
+}
+
+/// Limite d'un axe de rotation, en degrés d'écart au repos, comme dans GDA.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Limite {
+    Libre,
+    Bornee(f64, f64),
+    /// L'axe garde sa valeur du moment.
+    Bloquee,
+}
+
+impl Limite {
+    fn lire(j: &J) -> Limite {
+        match j.get("etat").and_then(J::txt) {
+            Some("bloque") => Limite::Bloquee,
+            Some("limite") => {
+                let n = |k: &str| j.get(k).and_then(J::num);
+                match (n("min"), n("max")) {
+                    (Some(a), Some(b)) => Limite::Bornee(a.min(b), a.max(b)),
+                    _ => Limite::Libre,
+                }
+            }
+            _ => Limite::Libre,
+        }
+    }
+
+    fn donnees(self) -> J {
+        let etat = |e: &str| ("etat".to_string(), J::Txt(e.into()));
+        match self {
+            Limite::Libre => J::Objet(vec![etat("libre")]),
+            Limite::Bloquee => J::Objet(vec![etat("bloque")]),
+            Limite::Bornee(a, b) => J::Objet(vec![etat("limite"), ("min".into(), J::Num(a)), ("max".into(), J::Num(b))]),
+        }
+    }
+
+    /// `v` ramené dans la limite ; un axe bloqué reprend `depart`.
+    pub fn borner(self, v: f64, depart: f64) -> f64 {
+        match self {
+            Limite::Libre => v,
+            Limite::Bornee(a, b) => v.clamp(a, b),
+            Limite::Bloquee => depart,
+        }
+    }
+}
+
+impl Os {
+    /// Limites de rotation autour des axes X, Y et Z de l'os, lues dans `contraintes.r`.
+    pub fn limites(&self) -> [Limite; 3] {
+        let r = self.extra.iter().find(|(k, _)| k == "contraintes").and_then(|(_, c)| c.get("r")).and_then(J::liste);
+        let mut l = [Limite::Libre; 3];
+        for (k, j) in r.unwrap_or(&[]).iter().take(3).enumerate() {
+            l[k] = Limite::lire(j);
+        }
+        l
+    }
+
+    /// Écrit les limites de rotation ; celles de translation restent comme elles étaient.
+    /// Sans limite ni translation gardée, `contraintes` disparaît.
+    pub fn regler_limites(&mut self, l: [Limite; 3]) {
+        let ancien = self.extra.iter().position(|(k, _)| k == "contraintes");
+        let mut champs = match ancien.map(|i| self.extra.remove(i).1) {
+            Some(J::Objet(c)) => c,
+            _ => Vec::new(),
+        };
+        champs.retain(|(k, _)| k != "r");
+        if l != [Limite::Libre; 3] {
+            champs.insert(0, ("r".into(), J::Liste(l.iter().map(|x| x.donnees()).collect())));
+        }
+        if !champs.is_empty() {
+            self.extra.insert(ancien.unwrap_or(self.extra.len()), ("contraintes".into(), J::Objet(champs)));
+        }
+    }
+
+    /// `r` ramené dans les limites, `depart` donnant la valeur des axes bloqués.
+    /// Inchangé sans limite ou s'il y est déjà.
+    pub fn borner(&self, r: Q, depart: Q) -> Q {
+        let l = self.limites();
+        if l == [Limite::Libre; 3] {
+            return r;
+        }
+        let (a, d) = (angles_os(r), angles_os(depart));
+        let b = [0, 1, 2].map(|k| l[k].borner(a[k], d[k]));
+        if (0..3).all(|k| (a[k] - b[k]).abs() < 1e-9) { r } else { depuis_angles_os(b) }
+    }
+}
+
+/// Rotation d'un os depuis ses angles en degrés : il se plie autour de son axe X, puis
+/// de son axe Z, et vrille enfin autour de son axe Y, le long de l'os ; la vrille ne
+/// change donc pas sa direction. Les limites de `contraintes` suivent ces angles.
+pub fn depuis_angles_os(d: [f64; 3]) -> Q {
+    let r = d.map(f64::to_radians);
+    qnorm(qmul(qaxe([1.0, 0.0, 0.0], r[0]), qmul(qaxe([0.0, 0.0, 1.0], r[2]), qaxe([0.0, 1.0, 0.0], r[1]))))
+}
+
+/// L'inverse de `depuis_angles_os`.
+pub fn angles_os(q: Q) -> [f64; 3] {
+    // m(i, j) : composante i de l'image de l'axe j
+    let c = [0, 1, 2].map(|j| qappliquer(qnorm(q), [0, 1, 2].map(|i| if i == j { 1.0 } else { 0.0 })));
+    let m = |i: usize, j: usize| c[j][i];
+    let s = (-m(0, 1)).clamp(-1.0, 1.0);
+    let z = s.asin();
+    let (x, y) = if s.abs() < 0.9999999 { (m(2, 1).atan2(m(1, 1)), m(0, 2).atan2(m(0, 0))) } else { ((-m(1, 2)).atan2(m(2, 2)), 0.0) };
+    [x, y, z].map(|v| v.to_degrees() + 0.0)
 }
 
 /// Écart d'un os à son repos, dans le repère de son parent, comme dans GDA.
@@ -98,6 +201,17 @@ fn moins(a: P3, b: P3) -> P3 {
 }
 
 /// Quaternion lu : une rotation déjà unitaire n'est pas recalculée, le fichier reste exact.
+/// Écarts d'une pose lus d'un objet `{id: {r, t}}`, pour les os retenus.
+fn lire_ecarts(j: &J, garder: impl Fn(&String) -> bool) -> Pose {
+    let mut pose = Pose::new();
+    if let J::Objet(l) = j {
+        for (id, e) in l.iter().filter(|x| garder(&x.0)) {
+            pose.insert(id.clone(), Ecart { r: unitaire(e.get("r")), t: e.get("t").and_then(J::nombres::<3>).unwrap_or([0.0; 3]) });
+        }
+    }
+    pose
+}
+
 fn unitaire(j: Option<&J>) -> Q {
     j.and_then(J::nombres::<4>).filter(|q| q.iter().map(|x| x * x).sum::<f64>() > 0.0).map_or([0.0, 0.0, 0.0, 1.0], |q| {
         if (q.iter().map(|x| x * x).sum::<f64>() - 1.0).abs() < 1e-12 { q } else { qnorm(q) }
@@ -255,6 +369,23 @@ impl Armature {
             r.insert(b.id.clone(), m);
         }
         r
+    }
+
+    /// Ramène la pose dans les limites des os ; un axe bloqué reprend sa valeur de `depart`.
+    pub fn borner(&mut self, depart: &Pose) {
+        const ID: Q = [0.0, 0.0, 0.0, 1.0];
+        for b in &self.os {
+            let e = self.pose.get(&b.id).copied().unwrap_or(Ecart { r: ID, t: [0.0; 3] });
+            let r = b.borner(e.r, depart.get(&b.id).map_or(ID, |d| d.r));
+            if r == e.r {
+                continue;
+            }
+            if angles_os(r).iter().all(|a| a.abs() < 1e-9) && e.t == [0.0; 3] {
+                self.pose.remove(&b.id);
+            } else {
+                self.pose.insert(b.id.clone(), Ecart { r, t: e.t });
+            }
+        }
     }
 
     /// Tourne des os autour de leur tête, de `q` dans le repère de l'armature. Aucun
@@ -415,6 +546,38 @@ impl Armature {
 
     /// Données vérifiées, comme dans GDA : parent inconnu ou boucle → os racine ; aucune
     /// donnée valable → un os seul.
+    /// Poses nommées (`poses` du fichier, comme dans GDA) : leur nom et leurs écarts,
+    /// pour les os qui existent encore.
+    pub fn poses_nommees(&self) -> Vec<(String, Pose)> {
+        let Some((_, J::Liste(l))) = self.reste.iter().find(|x| x.0 == "poses") else { return Vec::new() };
+        l.iter()
+            .map(|p| {
+                let nom = p.get("nom").and_then(|n| n.txt()).unwrap_or("pose").to_string();
+                let ecarts = p.get("os").map(|o| lire_ecarts(o, |i| self.trouver(i).is_some())).unwrap_or_default();
+                (nom, ecarts)
+            })
+            .collect()
+    }
+
+    /// Remplace les poses nommées.
+    pub fn regler_poses(&mut self, l: &[(String, Pose)]) {
+        let nums = |v: &[f64]| J::Liste(v.iter().map(|x| J::Num(*x)).collect());
+        let liste = l
+            .iter()
+            .map(|(nom, p)| {
+                let os = self.os.iter().filter_map(|b| {
+                    let e = p.get(&b.id)?;
+                    Some((b.id.clone(), J::Objet(vec![("r".into(), nums(&e.r)), ("t".into(), nums(&e.t))])))
+                });
+                J::Objet(vec![("nom".into(), J::Txt(nom.clone())), ("os".into(), J::Objet(os.collect()))])
+            })
+            .collect();
+        match self.reste.iter_mut().find(|x| x.0 == "poses") {
+            Some(x) => x.1 = J::Liste(liste),
+            None => self.reste.push(("poses".into(), J::Liste(liste))),
+        }
+    }
+
     /// Montrée au premier plan, à travers les autres objets, en mode Scène.
     pub fn devant(&self) -> bool {
         self.reste.iter().any(|(k, v)| k == "devant" && *v == J::Bool(true))
@@ -460,10 +623,8 @@ impl Armature {
             _ => Vec::new(),
         };
         let mut pose = Pose::new();
-        if let Some(J::Objet(l)) = d.get("pose") {
-            for (id, e) in l.iter().filter(|x| ids.contains(&x.0)) {
-                pose.insert(id.clone(), Ecart { r: unitaire(e.get("r")), t: e.get("t").and_then(J::nombres::<3>).unwrap_or([0.0; 3]) });
-            }
+        if let Some(p) = d.get("pose") {
+            pose = lire_ecarts(p, |i| ids.contains(i));
         }
         let mut a = Armature { os, pose, reste };
         let atteints: HashSet<String> = a.ordre().iter().map(|b| b.id.clone()).collect();
@@ -622,6 +783,42 @@ mod tests {
 
     fn pres(a: P3, b: P3) -> bool {
         (0..3).all(|k| (a[k] - b[k]).abs() < 1e-9)
+    }
+
+    #[test]
+    fn les_limites_se_lisent_s_ecrivent_et_gardent_la_translation() {
+        let d = crate::json::lire(r##"{"os":[{"id":"a","nom":"a","position":[0,0,0],"rotation":[0,0,0,1],"longueur":1,
+            "contraintes":{"r":[{"etat":"limite","min":-30,"max":60},{"etat":"bloque"},{"etat":"libre"}],"t":[{"etat":"libre"},{"etat":"bloque"},{"etat":"bloque"}]},"couleur":"#ff0000"}]}"##).unwrap();
+        let mut a = Armature::depuis_donnees(&d);
+        assert_eq!(a.os[0].limites(), [Limite::Bornee(-30.0, 60.0), Limite::Bloquee, Limite::Libre]);
+        a.os[0].regler_limites([Limite::Libre, Limite::Libre, Limite::Bornee(10.0, 20.0)]);
+        let b = Armature::depuis_donnees(&a.vers_donnees());
+        assert_eq!(b.os[0].limites(), [Limite::Libre, Limite::Libre, Limite::Bornee(10.0, 20.0)]);
+        let c = b.os[0].extra.iter().find(|(k, _)| k == "contraintes").unwrap().1.clone();
+        assert_eq!(c.get("t").and_then(J::liste).map(|l| l.len()), Some(3));
+        assert!(b.os[0].extra.iter().any(|(k, _)| k == "couleur"));
+        // Sans limite ni translation, plus de contraintes
+        let mut o = a.os[0].clone();
+        o.extra.retain(|(k, _)| k != "contraintes");
+        o.regler_limites([Limite::Bloquee, Limite::Libre, Limite::Libre]);
+        o.regler_limites([Limite::Libre; 3]);
+        assert!(!o.extra.iter().any(|(k, _)| k == "contraintes"));
+    }
+
+    #[test]
+    fn la_pose_bute_sur_les_limites_et_les_axes_bloques_restent() {
+        let mut a = Armature { os: Vec::new(), pose: Pose::new(), reste: Vec::new() };
+        let i = a.ajouter("a", None, [0.0; 3], [0.0, 0.0, 0.0, 1.0], 1.0);
+        a.os[0].regler_limites([Limite::Bornee(-10.0, 10.0), Limite::Bloquee, Limite::Libre]);
+        let depart = Pose::from([(i.clone(), Ecart { r: depuis_angles_os([0.0, 15.0, 0.0]), t: [0.0; 3] })]);
+        a.pose.insert(i.clone(), Ecart { r: depuis_angles_os([40.0, 70.0, 25.0]), t: [0.0; 3] });
+        a.borner(&depart);
+        let v = angles_os(a.pose[&i].r);
+        assert!(v.iter().zip([10.0, 15.0, 25.0]).all(|(x, y)| (x - y).abs() < 1e-6), "{v:?}");
+        // Déjà dans les limites : rien ne bouge
+        let r = a.pose[&i].r;
+        a.borner(&depart);
+        assert_eq!(a.pose[&i].r, r);
     }
 
     #[test]
