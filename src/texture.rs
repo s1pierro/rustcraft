@@ -24,6 +24,28 @@ pub struct Image {
 
 /// Identifiant du damier : n'est le contenu d'aucune image du projet.
 pub const DAMIER: &str = "damier";
+/// Identifiant du dégradé des poids d'os.
+pub const RAMPE: &str = "rampe";
+
+/// Dégradé des poids, de gauche à droite : bleu, cyan, vert, jaune, rouge.
+pub fn rampe() -> Image {
+    const L: u32 = 256;
+    const HAUT: u32 = 4;
+    const PALIERS: [[f32; 3]; 5] = [[30.0, 60.0, 220.0], [30.0, 210.0, 220.0], [50.0, 200.0, 70.0], [240.0, 220.0, 40.0], [225.0, 40.0, 40.0]];
+    let mut rgba = Vec::with_capacity((L * HAUT * 4) as usize);
+    for _ in 0..HAUT {
+        for x in 0..L {
+            let t = x as f32 / (L - 1) as f32 * 4.0;
+            let k = (t as usize).min(3);
+            let f = t - k as f32;
+            for c in 0..3 {
+                rgba.push((PALIERS[k][c] + (PALIERS[k + 1][c] - PALIERS[k][c]) * f) as u8);
+            }
+            rgba.push(255);
+        }
+    }
+    Image { l: L, h: HAUT, rgba }
+}
 
 /// Damier de huit cases par côté : il montre l'étirement d'une projection sans texture.
 pub fn damier() -> Image {

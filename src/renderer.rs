@@ -657,6 +657,21 @@ impl Renderer {
         }
     }
 
+    /// Silhouettes des objets retenus.
+    unsafe fn dessiner_contours(&self, s: &Scene, garder: impl Fn(&ObjetVue) -> bool) {
+        let gl = &self.gl;
+        let l = &self.lc;
+        (gl.glUseProgram)(self.contour);
+        for o in s.objets.iter().filter(|o| garder(o)) {
+            if let Some(g) = self.gpu.get(&o.tampon) {
+                (gl.glUniformMatrix4fv)(l.modele, 1, 0, o.modele.as_ptr());
+                (gl.glUniformMatrix3fv)(l.nm, 1, 0, o.normale.as_ptr());
+                (gl.glBindVertexArray)(g.vao_b);
+                (gl.glDrawElements)(TRIANGLES, g.nb_b, UINT, std::ptr::null());
+            }
+        }
+    }
+
     unsafe fn dessiner_3d(&self, s: &Scene, vw: i32, vh: i32) {
         let gl = &self.gl;
         // Fond
@@ -690,7 +705,7 @@ impl Renderer {
         (gl.glUseProgram)(self.objet);
         (gl.glUniformMatrix4fv)(self.lo.vp, 1, 0, s.vue_proj.as_ptr());
         (gl.glUniform3f)(self.lo.lumiere, s.lumiere[0], s.lumiere[1], s.lumiere[2]);
-        for o in s.objets.iter().filter(|o| o.opacite >= 1.0 && !o.filaire) {
+        for o in s.objets.iter().filter(|o| o.opacite >= 1.0 && !o.filaire && !o.devant) {
             if let Some(g) = self.gpu.get(&o.tampon) {
                 self.dessiner_objet(g, o);
             }
@@ -719,14 +734,7 @@ impl Renderer {
         (gl.glUniform2f)(l.res, vw as f32, vh as f32);
         (gl.glUniform1f)(l.largeur, s.largeur_contour);
         (gl.glUniform3f)(l.couleur, s.contour[0], s.contour[1], s.contour[2]);
-        for o in s.objets.iter().filter(|o| o.contour) {
-            if let Some(g) = self.gpu.get(&o.tampon) {
-                (gl.glUniformMatrix4fv)(l.modele, 1, 0, o.modele.as_ptr());
-                (gl.glUniformMatrix3fv)(l.nm, 1, 0, o.normale.as_ptr());
-                (gl.glBindVertexArray)(g.vao_b);
-                (gl.glDrawElements)(TRIANGLES, g.nb_b, UINT, std::ptr::null());
-            }
-        }
+        self.dessiner_contours(s, |o| o.contour && !o.devant);
 
         // Transparences : grille, puis objets translucides, sans écrire la profondeur
         (gl.glEnable)(BLEND);
@@ -740,12 +748,30 @@ impl Renderer {
         (gl.glDrawArrays)(LIGNES, 0, NB_GRILLE);
         (gl.glEnable)(CULL_FACE);
         (gl.glUseProgram)(self.objet);
-        for o in s.objets.iter().filter(|o| o.opacite < 1.0 && !o.filaire) {
+        for o in s.objets.iter().filter(|o| o.opacite < 1.0 && !o.filaire && !o.devant) {
             if let Some(g) = self.gpu.get(&o.tampon) {
                 self.dessiner_objet(g, o);
             }
         }
         (gl.glDisable)(CULL_FACE);
+        // Armatures au premier plan : la profondeur repart de zéro, elles se cachent
+        // seulement entre elles
+        if s.objets.iter().any(|o| o.devant) {
+            (gl.glDepthMask)(1);
+            (gl.glClear)(DEPTH_BIT);
+            (gl.glEnable)(CULL_FACE);
+            (gl.glEnable)(POLYGON_OFFSET);
+            (gl.glUseProgram)(self.objet);
+            for o in s.objets.iter().filter(|o| o.devant) {
+                if let Some(g) = self.gpu.get(&o.tampon) {
+                    self.dessiner_objet(g, o);
+                }
+            }
+            (gl.glDisable)(POLYGON_OFFSET);
+            (gl.glDisable)(CULL_FACE);
+            self.dessiner_contours(s, |o| o.contour && o.devant);
+            (gl.glDepthMask)(0);
+        }
         if let Some(g) = &s.geo {
             self.dessiner_geo(s, g, vw, vh);
         }

@@ -17,6 +17,7 @@ pub enum Icon {
     Help,
     Dossier,
     Contexte,
+    Os,
     Cle,
     Globe,
     Gauche,
@@ -97,6 +98,7 @@ impl Cx<'_> {
                 }
             }
             Icon::Cle => self.icone(r, &crate::icones::MODIFS, color),
+            Icon::Os => self.icone(r, &crate::icones::OS, color),
             Icon::Globe => self.icone(r, &crate::icones::GLOBE, color),
             Icon::Contexte => {
                 // Un cube vu en coin : ce que l'on a sous la main
@@ -300,6 +302,49 @@ impl Cx<'_> {
         self.label(x, r.cy(), label, 16.0, if selected { coul(C::Accent) } else { coul(C::Texte) });
         b.y += r.h;
         clicked
+    }
+
+    /// En-tête d'un set : son chevron et son nom, qui le plient, sa visibilité et son
+    /// menu. Rend l'appui sur chacun.
+    pub fn tete_set(&mut self, b: &mut Body, cle: Id, nom: &str, n: usize, replie: bool, visible: bool) -> (bool, bool, bool) {
+        let d = self.dp;
+        let r = Rect::new(b.rect.x, b.y, b.rect.w, 48.0 * d);
+        let (w, h, m) = (46.0 * d, 26.0 * d, 44.0 * d);
+        let z_menu = Rect::new(r.right() - m, r.y, m, r.h);
+        let track = Rect::new(z_menu.x - w, r.cy() - h / 2.0, w, h);
+        let z_oeil = Rect::new(track.x - 6.0 * d, r.y, w + 6.0 * d, r.h);
+        let z_nom = Rect::new(r.x, r.y, z_oeil.x - r.x, r.h);
+        let (plier, oeil, menu) = (self.ui.click(sub_id(cle, 0), z_nom, Some(b.id)), self.ui.click(sub_id(cle, 1), z_oeil, Some(b.id)), self.ui.click(sub_id(cle, 2), z_menu, Some(b.id)));
+        if self.ui.pressed(sub_id(cle, 0)) {
+            self.dl.rrect(z_nom.inset(2.0 * d), 10.0 * d, coul(C::Fond));
+        }
+        let c = if visible { coul(C::Texte) } else { coul(C::Secondaire) };
+        let (x, y, e) = (b.x + 6.0 * d, r.cy(), 5.0 * d);
+        if replie {
+            self.dl.line([x - e / 2.0, y - e], [x + e / 2.0, y], 2.0 * d, c);
+            self.dl.line([x + e / 2.0, y], [x - e / 2.0, y + e], 2.0 * d, c);
+        } else {
+            self.dl.line([x - e, y - e / 2.0], [x, y + e / 2.0], 2.0 * d, c);
+            self.dl.line([x, y + e / 2.0], [x + e, y - e / 2.0], 2.0 * d, c);
+        }
+        let x = b.x + 22.0 * d;
+        // Le nombre d'objets reste lisible : c'est le nom qui se coupe
+        let place = ((z_nom.right() - x) / (9.0 * d)) as usize;
+        let suffixe = format!("  {n}");
+        let garde = place.saturating_sub(suffixe.chars().count() + 1).max(4);
+        let court: String = if nom.chars().count() > garde { nom.chars().take(garde).chain(['…']).collect() } else { nom.to_string() };
+        self.label(x, r.cy(), &(court + &suffixe), 16.0, c);
+        self.dl.rrect(track, h / 2.0, if visible { coul(C::Accent) } else { coul(C::Bordures) });
+        let k = h - 6.0 * d;
+        let kx = if visible { track.right() - k - 3.0 * d } else { track.x + 3.0 * d };
+        self.dl.rrect(Rect::new(kx, track.y + 3.0 * d, k, k), k / 2.0, BLANC);
+        let s = 4.0 * d;
+        for i in 0..3 {
+            let px = z_menu.cx() + (i as f32 - 1.0) * 8.0 * d;
+            self.dl.rrect(Rect::new(px - s / 2.0, r.cy() - s / 2.0, s, s), s / 2.0, coul(C::Texte));
+        }
+        b.y += r.h;
+        (plier, oeil, menu)
     }
 
     pub fn toggle(&mut self, b: &mut Body, id: Id, label: &str, value: &mut bool) {

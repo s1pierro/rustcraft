@@ -272,7 +272,7 @@ fn poses_comme_gda() {
             o.position = t3(a.get("p").unwrap());
             o.rotation = a.get("q").unwrap().nombres::<4>().unwrap();
             o.echelle = t3(a.get("e").unwrap());
-            o.armature = (a.get("a").unwrap().bool() == Some(true)).then(|| J::Objet(vec![]));
+            o.armature = (a.get("a").unwrap().bool() == Some(true)).then(rustcraft::armature::Armature::nouvelle);
             o
         }).collect();
         let pts: Vec<P3> = objets.iter().map(|o| o.position).collect();

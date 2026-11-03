@@ -79,6 +79,20 @@ pub enum Action {
     EffacerCoutures,
     CouturesDepuisUv,
     Deplier,
+    DeplacerSet,
+    AjouterArmature,
+    AjouterHumanoide,
+    LierArmature,
+    Delier,
+    ReposOs,
+    AjouterOs,
+    ExtruderOs,
+    SupprimerOs,
+    ParenterOs,
+    DetacherOs,
+    TousOs,
+    AucunOs,
+    DescendantsOs,
 }
 
 /// Panneau où figure l'opération.
@@ -98,6 +112,8 @@ pub enum Menu {
     Geometrie,
     /// Panneau Modifieurs.
     Modifieurs,
+    /// Onglet Os, en mode Armature.
+    Os,
 }
 
 impl Menu {
@@ -111,6 +127,7 @@ impl Menu {
             Menu::Objet => "Objet",
             Menu::Geometrie => "Géométrie",
             Menu::Modifieurs => "Modifieurs",
+            Menu::Os => "Os",
         }
     }
 }
@@ -126,11 +143,12 @@ pub enum Groupe {
     Aretes,
     Sommets,
     Geo,
+    Os,
     Vue,
 }
 
 /// Groupes dans l'ordre de l'onglet Réglages › Barre rapide.
-pub const GROUPES: [(Groupe, &str); 9] = [
+pub const GROUPES: [(Groupe, &str); 10] = [
     (Groupe::Ajout, "Scène, aucun objet choisi"),
     (Groupe::Objet, "Objets choisis"),
     (Groupe::Scene, "Scène, toujours"),
@@ -139,6 +157,7 @@ pub const GROUPES: [(Groupe, &str); 9] = [
     (Groupe::Aretes, "Arêtes sélectionnées"),
     (Groupe::Sommets, "Sommets sélectionnés"),
     (Groupe::Geo, "Géométrie, toujours"),
+    (Groupe::Os, "Armature"),
     (Groupe::Vue, "Vue et curseur 3D (tous les modes)"),
 ];
 
@@ -203,6 +222,38 @@ pub struct Contexte {
     pub actif: bool,
     /// Groupe du type de l'élément actif.
     pub type_actif: Option<Groupe>,
+    /// Un objet choisi peut se lier : il a une géométrie, et le projet une armature.
+    pub liables: bool,
+    /// Un objet choisi est lié.
+    pub lies: bool,
+    /// L'armature ouverte est en pose ; elle a des os écartés de leur repos.
+    pub pose: bool,
+    pub posee: bool,
+    /// En mode Armature, et une armature y est ouverte.
+    pub os: bool,
+    pub os_ouvert: bool,
+    /// Bouts d'os sélectionnés.
+    pub bouts: usize,
+    /// Os aux deux bouts sélectionnés, et os à la queue sélectionnée.
+    pub os_choisis: usize,
+    pub queues: usize,
+    /// Il y a un os actif, et il a des enfants.
+    pub os_actif: bool,
+    pub os_enfants: bool,
+    /// Un os choisi autre que l'actif ; un os choisi qui a un parent.
+    pub rattachables: bool,
+    pub attaches: bool,
+}
+
+/// Le mode où une opération des os s'applique : `Some(false)` au repos seulement
+/// (mode Géométrie), `Some(true)` en pose seulement (mode Pose), `None` dans les deux.
+pub fn du_mode_pose(a: Action) -> Option<bool> {
+    use Action::*;
+    match a {
+        AjouterOs | ExtruderOs | SupprimerOs | ParenterOs | DetacherOs | SelectionCurseur => Some(false),
+        ReposOs => Some(true),
+        _ => None,
+    }
 }
 
 impl Contexte {
@@ -210,6 +261,24 @@ impl Contexte {
     pub fn possible(&self, a: Action) -> bool {
         use Action::*;
         let (n, na, nf) = (self.sommets, self.aretes, self.faces);
+        if self.os {
+            if du_mode_pose(a).is_some_and(|p| p != self.pose) {
+                return false;
+            }
+            return match a {
+                Ouvrir | Enregistrer | Importer | ExporterObj | ExporterStl | ExporterGlb | ExporterMtl | NouvelleScene | Recadrer | CurseurOrigine | AjouterArmature | AjouterHumanoide => true,
+                AjouterOs | TousOs => self.os_ouvert,
+                ExporterSelectionObj | ExporterSelectionStl | ExporterSelectionGlb => self.choisis > 0,
+                CurseurSelection | SelectionCurseur | AucunOs => self.bouts > 0,
+                ExtruderOs => self.queues > 0,
+                SupprimerOs => self.os_choisis > 0,
+                ParenterOs => self.os_actif && self.rattachables,
+                DetacherOs => self.attaches,
+                DescendantsOs => self.os_enfants,
+                ReposOs => self.posee,
+                _ => false,
+            };
+        }
         match a {
             Ouvrir | Enregistrer | Importer | ExporterObj | ExporterStl | ExporterGlb | ExporterMtl | NouvelleScene | Recadrer | CurseurOrigine => true,
             ExporterSelectionObj | ExporterSelectionStl | ExporterSelectionGlb => self.choisis > 0,
@@ -220,12 +289,15 @@ impl Contexte {
                     self.choisis > 0
                 }
             }
-            AjouterCube | AjouterSphere | AjouterCylindre | AjouterCone | AjouterIcosphere | AjouterVis | AjouterEcrou | AjouterRondelle | AjouterTige => !self.geo,
+            AjouterCube | AjouterSphere | AjouterCylindre | AjouterCone | AjouterIcosphere | AjouterVis | AjouterEcrou | AjouterRondelle | AjouterTige | AjouterArmature | AjouterHumanoide => !self.geo,
             ModifBooleen | ModifRepetition => !self.geo && self.choisis > 0,
             ToutChoisir => !self.geo && self.affiches > 0,
-            RienChoisir | Dupliquer | Supprimer => !self.geo && self.choisis > 0,
+            RienChoisir | Dupliquer | Supprimer | DeplacerSet => !self.geo && self.choisis > 0,
             AppliquerEchelle => !self.geo && self.echelle,
-            EditerGeometrie => !self.geo && self.editable,
+            LierArmature => !self.geo && self.liables,
+            Delier => !self.geo && self.lies,
+            EditerGeometrie => !self.geo && !self.os && self.editable,
+            AjouterOs | ExtruderOs | SupprimerOs | ParenterOs | DetacherOs | TousOs | AucunOs | DescendantsOs | ReposOs => false,
             CreerFace => self.geo && n >= 3,
             CreerArete => self.geo && n == 2,
             Fusionner | SommetsAretes => self.geo && n >= 2,
@@ -265,7 +337,9 @@ pub fn du_menu(m: Menu) -> impl Iterator<Item = &'static Op> {
 /// Contenu de la barre rapide (`_acces` de GDA) : les opérations retenues qui s'appliquent
 /// à la sélection, par groupe. En Géométrie, le type de l'élément actif passe devant.
 pub fn barre(c: &Contexte, choix: &Choix) -> Vec<(Groupe, Vec<&'static Op>)> {
-    let ordre: Vec<Groupe> = if c.geo {
+    let ordre: Vec<Groupe> = if c.os {
+        if c.os_ouvert { vec![Groupe::Os, Groupe::Vue] } else { vec![Groupe::Ajout, Groupe::Vue] }
+    } else if c.geo {
         let mut o = vec![Groupe::ElementActif];
         o.extend(c.type_actif);
         o.extend([Groupe::Faces, Groupe::Aretes, Groupe::Sommets, Groupe::Geo, Groupe::Vue]);
@@ -277,7 +351,11 @@ pub fn barre(c: &Contexte, choix: &Choix) -> Vec<(Groupe, Vec<&'static Op>)> {
         vec![if c.choisis > 0 { Groupe::Objet } else { Groupe::Ajout }, Groupe::Scene, Groupe::Vue]
     };
     // Les opérations du curseur valent pour les objets comme pour la géométrie
-    let groupe = |g: Groupe| if c.geo && g == Groupe::Objet { Groupe::Geo } else { g };
+    let groupe = |g: Groupe| match g {
+        Groupe::Objet if c.os => Groupe::Os,
+        Groupe::Objet if c.geo => Groupe::Geo,
+        g => g,
+    };
     ordre
         .into_iter()
         .map(|g| (g, CATALOGUE.iter().filter(|o| o.barre.is_some_and(|b| groupe(b.groupe) == g && b.retenue(choix)) && c.possible(o.action)).collect::<Vec<_>>()))
@@ -523,7 +601,7 @@ pub const CATALOGUE: &[Op] = &[
         menu: Menu::Objet,
         rubrique: "Actions",
         libelle: "Éditer la géométrie",
-        aide: "passer en mode Géométrie sur les objets choisis (l’actif compris) ; aussi : double appui sur un objet",
+        aide: "passer en mode Géométrie sur les objets choisis (l’actif compris) ; sur une armature, ce sont ses os qui s’éditent, au repos ou en pose ; aussi : double appui sur un objet",
         barre: Some(Barre { groupe: Groupe::Objet, glyphe: "✎", court: "Géométrie", defaut: true }),
     },
     Op {
@@ -862,6 +940,118 @@ pub const CATALOGUE: &[Op] = &[
         aide: "mettre à plat les faces choisies, ou toutes, coupées à leurs coutures, avec le moins de déformation possible, puis les ranger dans l’image",
         barre: Some(Barre { groupe: Groupe::Geo, glyphe: "▦", court: "Déplier", defaut: false }),
     },
+    Op {
+        action: Action::DeplacerSet,
+        menu: Menu::Objet,
+        rubrique: "Actions",
+        libelle: "Déplacer vers un set",
+        aide: "ranger les objets sélectionnés dans un autre set, ou un nouveau ; un appui long sur un objet de la liste fait de même",
+        barre: Some(Barre { groupe: Groupe::Objet, glyphe: "▦", court: "Set", defaut: false }),
+    },
+    Op {
+        action: Action::AjouterArmature,
+        menu: Menu::Scene,
+        rubrique: "Armatures",
+        libelle: "Armature",
+        aide: "ajouter sur le curseur 3D une armature d’un os, squelette destiné à animer des maillages ; c’est un objet de la scène, sans géométrie, matériau ni modifieurs, et son échelle reste uniforme ; si une armature est ouverte en mode Géométrie, la nouvelle s’y ouvre aussitôt",
+        barre: Some(Barre { groupe: Groupe::Ajout, glyphe: "🦴", court: "Armature", defaut: true }),
+    },
+    Op {
+        action: Action::AjouterHumanoide,
+        menu: Menu::Scene,
+        rubrique: "Armatures",
+        libelle: "Armature humanoïde",
+        aide: "ajouter sur le curseur 3D un squelette humanoïde de 1,75 m en T, de 19 os, origine sous les pieds, regard vers +Z",
+        barre: Some(Barre { groupe: Groupe::Ajout, glyphe: "🦴", court: "Humanoïde", defaut: false }),
+    },
+    Op {
+        action: Action::LierArmature,
+        menu: Menu::Objet,
+        rubrique: "Armature",
+        libelle: "Lier à une armature",
+        aide: "lier les objets choisis à une armature, à tous ses os, à un groupe d’os ou à un seul ; l’armature emporte alors ses objets ; refaire l’opération change la liaison",
+        barre: Some(Barre { groupe: Groupe::Objet, glyphe: "⚭", court: "Lier", defaut: false }),
+    },
+    Op {
+        action: Action::Delier,
+        menu: Menu::Objet,
+        rubrique: "Armature",
+        libelle: "Délier",
+        aide: "détacher les objets choisis de leur armature, sans les déplacer",
+        barre: Some(Barre { groupe: Groupe::Objet, glyphe: "⚮", court: "Délier", defaut: false }),
+    },
+    Op {
+        action: Action::ReposOs,
+        menu: Menu::Os,
+        rubrique: "Pose",
+        libelle: "Remettre au repos",
+        aide: "ramener à leur repos les os choisis, ou tous les os si aucun n’est choisi",
+        barre: Some(Barre { groupe: Groupe::Os, glyphe: "⟲", court: "Repos", defaut: false }),
+    },
+    Op {
+        action: Action::AjouterOs,
+        menu: Menu::Os,
+        rubrique: "Os",
+        libelle: "Ajouter (sur le curseur 3D)",
+        aide: "ajouter un os sans parent, tête sur le curseur 3D, dirigé vers le haut, de la longueur de l’os actif ; il est sélectionné",
+        barre: Some(Barre { groupe: Groupe::Os, glyphe: "+", court: "Ajouter os", defaut: true }),
+    },
+    Op {
+        action: Action::ExtruderOs,
+        menu: Menu::Os,
+        rubrique: "Os",
+        libelle: "Extruder",
+        aide: "prolonger chaque os dont la queue est sélectionnée par un os enfant, soudé, de même direction et de même longueur ; les nouvelles queues sont sélectionnées : glissez pour les placer",
+        barre: Some(Barre { groupe: Groupe::Os, glyphe: "⤴", court: "Extruder", defaut: true }),
+    },
+    Op {
+        action: Action::SupprimerOs,
+        menu: Menu::Os,
+        rubrique: "Os",
+        libelle: "Supprimer",
+        aide: "supprimer les os dont les deux bouts sont sélectionnés ; leurs enfants passent à leur parent, sans bouger ; une armature garde au moins un os",
+        barre: Some(Barre { groupe: Groupe::Os, glyphe: "✕", court: "Suppr. os", defaut: true }),
+    },
+    Op {
+        action: Action::ParenterOs,
+        menu: Menu::Os,
+        rubrique: "Hiérarchie",
+        libelle: "Parenter à l’actif",
+        aide: "rattacher les os choisis à l’os actif, sans les bouger ; refusé pour un os dont l’actif descend (boucle)",
+        barre: Some(Barre { groupe: Groupe::Os, glyphe: "⇠", court: "Parenter", defaut: true }),
+    },
+    Op {
+        action: Action::DetacherOs,
+        menu: Menu::Os,
+        rubrique: "Hiérarchie",
+        libelle: "Détacher du parent",
+        aide: "faire des os choisis des os sans parent, sans les bouger",
+        barre: Some(Barre { groupe: Groupe::Os, glyphe: "⇥", court: "Détacher", defaut: false }),
+    },
+    Op {
+        action: Action::TousOs,
+        menu: Menu::Os,
+        rubrique: "Sélection",
+        libelle: "Tous les os",
+        aide: "sélectionner les deux bouts de tous les os",
+        barre: Some(Barre { groupe: Groupe::Os, glyphe: "▣", court: "Tous les os", defaut: false }),
+    },
+    Op {
+        action: Action::AucunOs,
+        menu: Menu::Os,
+        rubrique: "Sélection",
+        libelle: "Aucun os",
+        aide: "vider la sélection de bouts",
+        barre: Some(Barre { groupe: Groupe::Os, glyphe: "▢", court: "Aucun os", defaut: false }),
+    },
+    Op {
+        action: Action::DescendantsOs,
+        menu: Menu::Os,
+        rubrique: "Sélection",
+        libelle: "Descendants de l’actif",
+        aide: "ajouter à la sélection tous les os qui descendent de l’os actif",
+        barre: Some(Barre { groupe: Groupe::Os, glyphe: "⊶", court: "Descendants", defaut: false }),
+    },
 ];
 
 #[cfg(test)]
@@ -874,7 +1064,7 @@ mod tests {
         for (k, o) in CATALOGUE.iter().enumerate() {
             assert_eq!(o.action as usize, k, "{:?}", o.action);
         }
-        assert_eq!(CATALOGUE.len(), Action::Deplier as usize + 1);
+        assert_eq!(CATALOGUE.len(), Action::DescendantsOs as usize + 1);
     }
 
     #[test]
@@ -898,7 +1088,7 @@ mod tests {
 
     #[test]
     fn les_rubriques_d_un_menu_ne_sont_pas_coupees() {
-        for m in [Menu::Projet, Menu::Importer, Menu::Exporter, Menu::Vue, Menu::Scene, Menu::Objet, Menu::Geometrie, Menu::Modifieurs] {
+        for m in [Menu::Projet, Menu::Importer, Menu::Exporter, Menu::Vue, Menu::Scene, Menu::Objet, Menu::Geometrie, Menu::Modifieurs, Menu::Os] {
             let mut vues: Vec<&str> = Vec::new();
             for o in du_menu(m) {
                 if vues.last() != Some(&o.rubrique) {
@@ -917,7 +1107,7 @@ mod tests {
     fn barre_de_scene_selon_le_choix() {
         let c = Choix::new();
         let vide = Contexte { affiches: 1, ..Default::default() };
-        assert_eq!(noms(&barre(&vide, &c)), ["Fichier", "Cube"]);
+        assert_eq!(noms(&barre(&vide, &c)), ["Fichier", "Cube", "Armature"]);
         let un = Contexte { affiches: 1, choisis: 1, editable: true, ..Default::default() };
         assert_eq!(noms(&barre(&un, &c)), ["Dupliquer", "Supprimer", "Géométrie"]);
     }
@@ -942,7 +1132,7 @@ mod tests {
         c.insert("Ajout:Sphère".into(), true);
         c.insert("Vue:Recadrer".into(), true);
         let vide = Contexte { affiches: 1, ..Default::default() };
-        assert_eq!(noms(&barre(&vide, &c)), ["Fichier", "Sphère", "Recadrer"]);
+        assert_eq!(noms(&barre(&vide, &c)), ["Fichier", "Sphère", "Armature", "Recadrer"]);
         // Une opération du curseur retenue suit la sélection en Géométrie
         c.insert("Objet:Curs. → sél.".into(), true);
         let x = Contexte { geo: true, sommets: 1, ..Default::default() };

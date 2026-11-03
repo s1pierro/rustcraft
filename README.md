@@ -12,9 +12,10 @@ ouvrez la page, puis touchez le fichier `.apk`.
 
 ## État
 
-Version 0.17 : **édition en modes Scène et Géométrie, modifieurs, visserie, UV et matériaux**.
+Version 0.27 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
 
-- Projets `.gda` des formats 1 à 9, fichiers OBJ, STL, glTF et GLB
+- Projets `.gda` des formats 1 à 10, fichiers OBJ, STL, glTF et GLB ; Rustcraft écrit
+  le format 10, que GDA n'ouvre pas
 - Rendus Solide, En jeu et Rayons X, éclairage de GDA
 - Textures PNG et JPEG à l'import : un `.glb` les contient, un `.obj` se choisit avec
   son `.mtl` et ses images ; visibles en rendu En jeu, gardées dans le `.gda` et à
@@ -56,15 +57,33 @@ Version 0.17 : **édition en modes Scène et Géométrie, modifieurs, visserie, 
   sur le modèle, ou les tirer des UV existantes ; déplier les faces choisies ou toutes
   avec le moins de déformation possible, à la densité du modèle, à l'endroit et le haut
   en haut, puis ranger les morceaux, image par image ; enregistrées dans le `.gda`
+- Sets : pliage, visibilité, création, renommage, fusion et suppression dans la liste
+  des objets ; un appui long sur un objet le déplace vers un set, avec la sélection
+- Armatures : une armature d'un os ou un humanoïde de 19 os, ajoutés sur le curseur 3D ;
+  leur géométrie, ce sont leurs os, édités en mode Géométrie : bouts et corps des os au toucher ou en boîte,
+  bouts soudés, déplacement, rotation et échelle, ajout, extrusion, suppression, parent,
+  nom et longueur, arbre des os dans la pastille Os ; en mode Scène, cette pastille
+  montre l'armature active : nom, objets liés, os posés, retour au repos, poids d'un os
+  de l'arbre ; « Au premier plan », dans Contexte › Objet, les montre et les fait toucher
+  à travers les autres objets en mode Scène ; gardées dans le `.gda`
+- Liaison des objets aux armatures, dans Contexte › Objet : à tous les os, à un groupe
+  ou à un seul ; l'armature emporte ses objets ; enregistrée dans le `.gda`
+- Mode Pose, dont la pilule apparaît quand une armature est active : les os tournent
+  autour de leur tête, le panneau Os ne garde que la pose ; un objet lié à
+  un seul os le suit, un objet lié à un groupe se déforme selon des poids automatiques
+  (diffusion de chaleur sur la surface, 4 os au plus par sommet), recalculés quand le
+  maillage ou les os changent ; pose gardée dans le `.gda`, retour au repos par os ou en
+  bloc ; poids de l'os actif en couleur sur les objets
 - Curseur 3D : vers l'origine, vers la sélection, sélection vers le curseur
 - Panneau Fichier à trois onglets : Projet (nom, enregistrement `.gda`, ouverture,
   nouvelle scène), Importer par le sélecteur d'Android, Exporter en OBJ, STL ou GLB la
   scène complète ou les seuls objets choisis, et `.mtl`, dans Téléchargements
   (Android 10 ou plus) ; sauvegarde automatique d'un lancement à l'autre
 
-Pas encore disponibles : déplacement entre sets, curseur 3D à la main,
-armatures (conservées dans le projet, ni affichées ni appliquées à l'export). En mode
-Géométrie, les objets sont édités sans leurs modifieurs.
+Pas encore disponibles : curseur 3D à la main ; poses nommées, contraintes et ancre des
+armatures, conservées dans le projet mais ni éditables ni appliquées ; poids à la main.
+Les armatures et les poids ne sont pas exportés, et les objets s'exportent au repos. En mode Géométrie, les objets sont édités sans leurs
+modifieurs.
 
 ## Ouvrir un fichier
 
@@ -80,6 +99,8 @@ Depuis le panneau Fichier, ou depuis un gestionnaire de fichiers : **Ouvrir avec
 - `src/geometrie.rs` : sélection et opérations du mode Géométrie, sans interface
 - `src/booleens.rs`, `modifs.rs` : opérations booléennes et évaluation des modifieurs
 - `src/primitives.rs`, `visserie.rs` : réglages des primitives, pièces de visserie
+- `src/armature.rs` : os, hiérarchie, pose, bouts soudés et sélection du mode Armature, sans interface
+- `src/peau.rs` : poids automatiques et déformation des objets liés à un groupe d'os, sans interface
 - `src/uv.rs` : points, îlots et transformations des coordonnées de texture, sans interface
 - `src/vue.rs`, `editeur.rs` : du modèle à l'écran, et l'interface de l'éditeur
 - `src/ui.rs`, `shell.rs`, `widgets.rs`, `draw.rs`, `text.rs` : le socle d'interface,
@@ -104,6 +125,16 @@ angles et opérations de géométrie que les vraies méthodes de l'éditeur. Pou
 par le vrai `visserie.js` et le vrai Manifold de GDA :
 
     node tools/reference-visserie.js <dossier de GDA> tests/visserie.json
+
+`tests/armature.rs` rejoue des suites d'opérations sur des armatures et les compare à
+`tests/armature.json`, produit par le vrai `moteur/armature.js` de GDA :
+
+    node tools/reference-armature.js <dossier de GDA> tests/armature.json
+
+`tests/peau.rs` compare les poids et les déformations à `tests/peau.json`, produit par le
+vrai `moteur/peau.js` :
+
+    node tools/reference-peau.js <dossier de GDA> tests/peau.json
 
 `tools/icones.py` régénère `src/icones.rs` depuis les pictogrammes de GDA.
 

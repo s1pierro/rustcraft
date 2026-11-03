@@ -656,14 +656,7 @@ impl Travail {
     pub fn poser(&mut self, indices: &[usize], departs: &[P3], t: Transfo) {
         let m = self.mm();
         for (&i, &v) in indices.iter().zip(departs) {
-            m.sommets[i] = match t {
-                Transfo::Translation(d) => [v[0] + d[0], v[1] + d[1], v[2] + d[2]],
-                Transfo::Rotation { q, c } => {
-                    let r = qappliquer(q, [v[0] - c[0], v[1] - c[1], v[2] - c[2]]);
-                    [r[0] + c[0], r[1] + c[1], r[2] + c[2]]
-                }
-                Transfo::Echelle { s, c } => [0, 1, 2].map(|k| (v[k] - c[k]) * s[k] + c[k]),
-            };
+            m.sommets[i] = crate::edition::transformer(v, t);
         }
         self.version += 1;
     }
@@ -1042,6 +1035,7 @@ impl Travail {
                 *q = vers_local(&o, *q);
             }
             n.maillage = Arc::new(l);
+            n.liaison = o.liaison.clone();
             (n.position, n.rotation, n.echelle, n.set, n.materiau) = (o.position, o.rotation, o.echelle, o.set, o.materiau);
             noms.push(format!("« {} »", n.nom));
             p.objets.push(n);

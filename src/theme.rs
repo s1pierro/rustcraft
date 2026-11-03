@@ -37,6 +37,7 @@ pub enum C {
     ObjetChoisi,
     ObjetActif,
     ContourChoisi,
+    Armature,
     Origine,
 }
 
@@ -62,7 +63,7 @@ const fn l(cle: &'static str, c: C, libelle: &'static str, groupe: &'static str,
     Ligne { cle, c, libelle, groupe, defaut }
 }
 
-pub const NB: usize = 31;
+pub const NB: usize = 32;
 pub const LIGNES: [Ligne; NB] = [
     l("accent", C::Accent, "Accent", "Interface", Hex(0x2a1fd1)),
     l("relief", C::Relief, "Relief", "Interface", Hex(0xff5a36)),
@@ -94,6 +95,7 @@ pub const LIGNES: [Ligne; NB] = [
     l("objet-choisi", C::ObjetChoisi, "Objets choisis", "Objets (mode Scène)", VersBlanc(C::Accent, 0.6)),
     l("objet-actif", C::ObjetActif, "Objet actif", "Objets (mode Scène)", VersBlanc(C::Accent, 0.3)),
     l("contour-choisi", C::ContourChoisi, "Silhouette des objets choisis", "Objets (mode Scène)", De(C::Accent)),
+    l("armature", C::Armature, "Armatures", "Objets (mode Scène)", VersBlanc(C::Accent, 0.35)),
     l("origine", C::Origine, "Origines", "Objets (mode Scène)", De(C::Relief)),
 ];
 

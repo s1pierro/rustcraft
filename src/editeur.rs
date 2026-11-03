@@ -6,6 +6,7 @@
 use crate::theme::{self, coul, C};
 use crate::icones::{self, Icone};
 use crate::draw::{Color, Rect};
+use crate::armature::{Armature, Bout, EditionOs, Os, Pose, Segments, Touche};
 use crate::actions::{self, Action as A, Choix, Contexte, Groupe, Menu, CATALOGUE, GROUPES};
 use crate::edition::{self as ed, Etape, Geste, Historique, Mode, Pas, Pivot, Poignee, Prise, Transfo, Vue, PIVOTS};
 use crate::geometrie::{self as geo, Bilan, El, RegleRevolution, Travail, T};
@@ -13,6 +14,7 @@ use crate::json::J;
 use crate::maillage::{self, Arete, Boite, Cible, Maillage, P3};
 use crate::math::{self, Mat4};
 use crate::modifs;
+use crate::peau;
 use crate::primitives::{self, Genre, Prim, Valeurs, V};
 use crate::projet::{Materiau, Objet, Projet, DEFAUT};
 use crate::shell::{Layout, Shell, Side};
@@ -21,6 +23,7 @@ use crate::uv::{self, Aspect, Coin, Uv};
 use crate::ui::{id, sub_id, Id, Sense};
 use crate::vue::{self, Tampons};
 use crate::widgets::{Cx, Icon, Scrolls};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -31,6 +34,7 @@ const NOM_PROJET: Id = id("nom-projet");
 const FICHIERS: Id = id("pastille-fichier");
 const SCENE: Id = id("pastille-scene");
 const CONTEXTE: Id = id("pastille-contexte");
+const OS: Id = id("pastille-os");
 const TOILE_UV: Id = id("toile-uv");
 const MODIFIEURS: Id = id("pastille-modifieurs");
 const REGLAGES: Id = id("reglages");
@@ -45,6 +49,16 @@ const MTL: &str = "materiaux.mtl";
 const MIME: &str = "application/octet-stream";
 /// Onglets du panneau de réglages.
 const ONGLETS: [&str; 2] = ["Couleurs", "Barre rapide"];
+/// Ce que montre le panneau de gauche.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PageListe {
+    Objets,
+    /// Réglages d'un set.
+    Set(String),
+    /// Choix d'un set pour ces objets.
+    Deplacer(Vec<usize>),
+}
+
 const ONGLET_COULEURS: usize = 0;
 const ONGLET_MATERIAUX: usize = 1;
 /// Valeurs d'`illum` du format Wavefront, comme dans GDA.
@@ -70,6 +84,7 @@ const CLE_CHOISIES: usize = 2;
 const MAX_NUMEROS: usize = 24;
 /// Opacité des objets non édités, et des faces en Rayons X.
 const OPACITE_PASSIF: f32 = 0.4;
+const AUCUN_PARENT: &str = "— aucun —";
 const OPACITE_RAYONS: f32 = 0.45;
 
 /// Champ de vision vertical de GDA, en degrés.
@@ -138,6 +153,8 @@ pub struct ObjetVue {
     pub texture: Option<String>,
     /// Couleur de l'envers, s'il se voit.
     pub envers: Option<[f32; 3]>,
+    /// Dessiné après les autres, à travers eux : une armature au premier plan.
+    pub devant: bool,
 }
 
 /// Fil, points et arêtes choisies de la copie de travail.
@@ -300,6 +317,9 @@ pub enum Champ {
     Nom,
     Projet,
     MatNom,
+    SetNom,
+    OsNom,
+    OsLongueur,
     /// Code d'une couleur du matériau de l'objet actif.
     MatCode(usize),
     /// Champ du panneau d'ajout : son rang et son libellé.
@@ -332,6 +352,9 @@ impl Champ {
             Champ::Pivot(k) => format!("Pivot {}", NOMS_AXES[k]),
             Champ::Nom => "Nom de l'objet".into(),
             Champ::MatNom => "Nom du matériau".into(),
+            Champ::SetNom => "Nom du set".into(),
+            Champ::OsNom => "Nom de l'os".into(),
+            Champ::OsLongueur => "Longueur de l'os".into(),
             Champ::MatCode(k) => format!("{} (#rrggbb)", COULEURS_MAT[k].0),
             Champ::Projet => "Nom du projet".into(),
         }
@@ -339,7 +362,7 @@ impl Champ {
 
     /// Champ qui accepte du texte, pas seulement un nombre.
     fn libre(self) -> bool {
-        matches!(self, Champ::Nom | Champ::Projet | Champ::Couleur(_) | Champ::MatNom | Champ::MatCode(_))
+        matches!(self, Champ::Nom | Champ::Projet | Champ::Couleur(_) | Champ::MatNom | Champ::MatCode(_) | Champ::SetNom | Champ::OsNom)
     }
 }
 
@@ -521,6 +544,13 @@ pub enum Selecteur {
     Image = 3,
 }
 
+/// Choix en cours de la page « Lier à une armature ». Les objets sont ceux de la sélection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageLiaison {
+    pub armature: Option<String>,
+    pub os: Vec<String>,
+}
+
 /// Ce que montre le panneau de fin.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Contenu {
@@ -536,6 +566,8 @@ pub enum Contenu {
     Modifieurs,
     /// Vue UV de la copie de travail, dans le panneau élargi.
     Uv,
+    /// Os de l'armature éditée.
+    Os,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -660,6 +692,7 @@ pub struct App {
     calcul: Option<Receiver<Vec<(String, modifs::Ev)>>>,
     ajout: Option<Ajout>,
     uv: EditeurUv,
+    pub page_liste: PageListe,
     /// Onglet de la pastille Scène.
     pub onglet_scene: usize,
     /// Couleur de matériau dépliée : matériau, couleur, teinte.
@@ -689,6 +722,26 @@ pub struct App {
     fusion: Cible,
     /// Version de la copie déjà envoyée au rendu.
     version_geo: Option<u64>,
+    /// Mode Armature : l'armature éditée et ses bouts sélectionnés.
+    pub os: Option<EditionOs>,
+    /// Os de l'armature au début du geste.
+    depart_os: Segments,
+    depart_pose: Pose,
+    /// Peaux calculées, par identifiant d'objet, et le calcul en cours dans son fil.
+    peaux: HashMap<String, Arc<peau::Liee>>,
+    calcul_peau: Option<Receiver<(String, Arc<peau::Liee>)>>,
+    /// Objets déformés par la pose, avec ce dont ils dépendent.
+    deformes: HashMap<String, (String, Arc<Maillage>)>,
+    /// Objets à la couleur des poids de l'os actif.
+    vues_poids: HashMap<String, (String, Arc<Maillage>)>,
+    pub voir_poids: bool,
+    /// En mode Scène, l'os actif choisi dans le panneau Os : l'armature, puis l'os.
+    os_scene: Option<(String, String)>,
+    /// Objets liés emportés par le geste en cours.
+    suivis: Vec<ed::Suivi>,
+    pub liaison: Option<PageLiaison>,
+    /// Liste des parents dépliée, dans la fiche de l'os actif.
+    parents_ouverts: bool,
     /// Barre rapide : opérations choisies, affichage, décalage du défilement.
     acces: Choix,
     pub barre_visible: bool,
@@ -735,6 +788,7 @@ impl App {
             calcul: None,
             ajout: None,
             uv: EditeurUv::default(),
+            page_liste: PageListe::Objets,
             onglet_scene: 0,
             mat_couleur: None,
             mat_saisie: false,
@@ -754,6 +808,18 @@ impl App {
             derniere: None,
             fusion: Cible::Centre,
             version_geo: None,
+            os: None,
+            depart_os: Segments::new(),
+            depart_pose: Pose::new(),
+            peaux: HashMap::new(),
+            calcul_peau: None,
+            deformes: HashMap::new(),
+            vues_poids: HashMap::new(),
+            voir_poids: false,
+            os_scene: None,
+            suivis: Vec::new(),
+            liaison: None,
+            parents_ouverts: false,
             acces: Choix::new(),
             barre_visible: true,
             defile: 0.0,
@@ -765,11 +831,21 @@ impl App {
     }
 
     pub fn animating(&self) -> bool {
-        self.shell.animating() || self.vol.is_some() || self.message.is_some() || self.calcul.is_some() || self.ajout.as_ref().is_some_and(|a| a.calcul.is_some())
+        self.shell.animating() || self.vol.is_some() || self.message.is_some() || self.calcul.is_some() || self.calcul_peau.is_some() || self.ajout.as_ref().is_some_and(|a| a.calcul.is_some())
     }
 
     /// Maillage que l'objet montre : le modifié, ou son dernier résultat en attendant.
     fn maillage_vu(&self, k: usize) -> Arc<Maillage> {
+        let o = &self.projet.objets[k];
+        let posable = o.liaison.as_ref().is_some_and(|l| !self.au_repos(&l.armature));
+        match self.deformes.get(&o.id).filter(|_| posable) {
+            Some(d) => d.1.clone(),
+            None => self.maillage_base(k),
+        }
+    }
+
+    /// Maillage après modifieurs, au repos.
+    fn maillage_base(&self, k: usize) -> Arc<Maillage> {
         let o = &self.projet.objets[k];
         match self.evals.get(&o.nom).filter(|_| !modifs::liste(o).is_empty()) {
             Some(e) => e.maillage.clone(),
@@ -813,12 +889,107 @@ impl App {
         }
     }
 
+    /// Reçoit la peau calculée, lance la suivante et déforme les objets que la pose
+    /// atteint. Un objet garde sa dernière peau tant que la nouvelle n'est pas là.
+    fn avancer_peaux(&mut self) {
+        if let Some(rx) = &self.calcul_peau {
+            match rx.try_recv() {
+                Ok((id, l)) => {
+                    self.peaux.insert(id, l);
+                    self.calcul_peau = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.calcul_peau = None,
+            }
+        }
+        let p = &self.projet;
+        let voir = self.voir_poids && self.os_vu().is_some();
+        let ouverte = self.os.as_ref().filter(|e| e.pose).and_then(|e| e.objet);
+        let (mut lies, mut gardes, mut neufs, mut a_lancer) = (HashSet::new(), HashSet::new(), Vec::new(), None);
+        for (k, o) in p.objets.iter().enumerate() {
+            let Some(l) = o.liaison.as_ref().filter(|l| l.os.len() > 1) else { continue };
+            let Some(x) = p.objet_id(&l.armature) else { continue };
+            let Some(a) = &x.armature else { continue };
+            lies.insert(o.id.clone());
+            if !p.affiche(o) || self.travail.as_ref().is_some_and(|t| t.edites.contains(&k)) {
+                continue;
+            }
+            if !voir && a.pose.is_empty() && ouverte.is_none_or(|i| p.objets[i].id != x.id) {
+                continue;
+            }
+            let base = self.maillage_base(k);
+            let cle = peau::cle(&base, o, x, &l.os);
+            let e = self.peaux.get(&o.id);
+            if a_lancer.is_none() && e.is_none_or(|e| e.cle != cle) {
+                a_lancer = Some((k, base.clone(), cle.clone()));
+            }
+            let Some(e) = e.filter(|e| !a.pose.is_empty() && !self.au_repos(&x.id) && peau::valide(e, base.sommets.len())) else { continue };
+            gardes.insert(o.id.clone());
+            let ecarts: Vec<_> = a.os.iter().map(|b| a.pose.get(&b.id)).collect();
+            let c = format!("{:p}|{cle}|{ecarts:?}", Arc::as_ptr(e));
+            if self.deformes.get(&o.id).is_none_or(|d| d.0 != c) {
+                neufs.push((o.id.clone(), c, Arc::new(peau::deforme(e, o, x, a))));
+            }
+        }
+        for (id, c, m) in neufs {
+            self.deformes.insert(id, (c, m));
+        }
+        self.deformes.retain(|i, _| gardes.contains(i));
+        self.peaux.retain(|i, _| lies.contains(i));
+        let (Some((k, base, cle)), None) = (a_lancer, &self.calcul_peau) else { return };
+        let o = self.projet.objets[k].clone();
+        let Some(l) = o.liaison.clone() else { return };
+        let Some(x) = self.projet.objet_id(&l.armature).cloned() else { return };
+        let (tx, rx) = mpsc::channel();
+        let fil = std::thread::Builder::new().stack_size(8 << 20).spawn(move || {
+            let (b, c) = (base.clone(), cle.clone());
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| peau::lier(base, &o, &x, &l.os, cle)));
+            // Un échec laisse l'objet au repos, sans relancer le calcul
+            let _ = tx.send((o.id.clone(), Arc::new(r.unwrap_or_else(|_| peau::Liee { cle: c, peau: Default::default(), repos: Vec::new(), base: b }))));
+        });
+        if fil.is_ok() {
+            self.calcul_peau = Some(rx);
+        }
+    }
+
+    /// Le maillage de `k` à la couleur des poids de l'os actif : l'U de chaque coin porte
+    /// le poids, et un dégradé en texture le colore. Rien tant que sa peau n'est pas prête.
+    fn vue_poids(&mut self, k: usize, vu: &Arc<Maillage>) -> Option<Arc<Maillage>> {
+        if !self.voir_poids {
+            return None;
+        }
+        let (x, actif) = self.os_vu()?;
+        let actif = actif?;
+        let o = &self.projet.objets[k];
+        let l = o.liaison.as_ref().filter(|l| l.armature == x.id)?;
+        let peau = self.peaux.get(&o.id).filter(|p| l.os.len() > 1 && peau::valide(p, vu.sommets.len()));
+        if l.os.len() > 1 && peau.is_none() {
+            return None;
+        }
+        let cle = format!("{:p}|{actif}|{:?}|{:?}", Arc::as_ptr(vu), peau.map(Arc::as_ptr), l.os);
+        if let Some(v) = self.vues_poids.get(&o.id).filter(|v| v.0 == cle) {
+            return Some(v.1.clone());
+        }
+        let w = match peau {
+            Some(p) => p.peau.poids_de(&actif),
+            None => vec![if l.os.contains(&actif) { 1.0 } else { 0.0 }; vu.sommets.len()],
+        };
+        let mut m = (**vu).clone();
+        for f in &mut m.faces {
+            f.uv = f.s.iter().map(|i| [w[*i].clamp(0.01, 0.99), 0.5]).collect();
+        }
+        let (id, m) = (o.id.clone(), Arc::new(m));
+        self.vues_poids.insert(id, (cle, m.clone()));
+        Some(m)
+    }
+
     /// Attend la fin des calculs : pour les aperçus hors écran et les vérifications.
     pub fn attendre_calculs(&mut self) {
         loop {
             self.avancer_calculs();
             self.avancer_ajout();
-            if self.calcul.is_none() && self.ajout.as_ref().is_none_or(|a| a.calcul.is_none()) {
+            self.avancer_peaux();
+            if self.calcul.is_none() && self.calcul_peau.is_none() && self.ajout.as_ref().is_none_or(|a| a.calcul.is_none()) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -882,7 +1053,7 @@ impl App {
 
     fn avancer_ajout(&mut self) {
         // Panneau fermé, autre contenu ou mode Géométrie : l'ajout est abandonné
-        if self.ajout.is_some() && (self.contenu != Contenu::Ajout || !self.shell.end.open || self.travail.is_some()) {
+        if self.ajout.is_some() && (self.contenu != Contenu::Ajout || !self.shell.end.open || self.travail.is_some() || self.os.is_some()) {
             self.ajout = None;
         }
         let r = self.ajout.as_ref().and_then(|a| a.calcul.as_ref()).map(|rx| rx.try_recv());
@@ -1887,6 +2058,7 @@ impl App {
         self.choix.clear();
         self.histoire = Historique::default();
         self.travail = None;
+        self.os = None;
         self.derniere = None;
         self.geste = None;
         self.pave = None;
@@ -1931,16 +2103,155 @@ impl App {
         p
     }
 
-    /// Passe en mode Géométrie : les objets choisis, l'actif compris.
+    /// Passe à l'édition des os, le mode Géométrie d'une armature : sur l'armature
+    /// active, sinon la dernière choisie. Le panneau Os reste comme il était.
+    pub fn entrer_armature(&mut self) {
+        if self.os.is_some() {
+            return;
+        }
+        let p = &self.projet;
+        let est = |k: usize| p.objets.get(k).is_some_and(|o| o.armature.is_some());
+        let k = p.actif.filter(|k| est(*k)).or(self.choix.iter().rev().copied().find(|k| est(*k)));
+        if k.is_some_and(|k| !p.affiche(&p.objets[k])) {
+            return self.dire("Objet caché".into());
+        }
+        self.sortir_geometrie();
+        self.os = Some(EditionOs::default());
+        if let Some(k) = k {
+            self.ouvrir_armature(k);
+        }
+        // L'os choisi dans le panneau, en mode Scène, reste actif
+        let id = self.os.as_ref().and_then(|e| e.objet).map(|k| self.projet.objets[k].id.clone());
+        if let (Some(e), Some((a, x))) = (&mut self.os, &self.os_scene) {
+            if id.as_ref() == Some(a) {
+                e.actif = Some(x.clone());
+            }
+        }
+        self.parents_ouverts = false;
+        self.fin_geste();
+        self.redessiner_armatures();
+    }
+
+    /// Le dessin des armatures : au repos celle qu'on édite ainsi, en pose toutes les autres.
+    pub fn redessiner_armatures(&mut self) {
+        let ouverte = self.os.as_ref().filter(|e| !e.pose).and_then(|e| e.objet);
+        for (k, o) in self.projet.objets.iter_mut().enumerate() {
+            let Some(a) = &o.armature else { continue };
+            let m = if ouverte == Some(k) { a.enveloppe() } else { a.enveloppe_pose() };
+            if *o.maillage != m {
+                o.maillage = Arc::new(m);
+            }
+        }
+        self.version_geo = None;
+    }
+
+    /// Passe en mode Pose sur l'armature active : depuis la Scène, ou depuis ses os au repos.
+    pub fn entrer_pose(&mut self) {
+        if self.os.is_none() {
+            if self.travail.is_some() {
+                return;
+            }
+            self.entrer_armature();
+        }
+        if self.os.as_ref().is_some_and(|e| !e.pose && e.objet.is_some()) {
+            self.basculer_pose();
+        }
+    }
+
+    /// Bascule entre l'édition du repos (mode Géométrie) et la pose (mode Pose) ; la
+    /// pose reste, d'un mode à l'autre.
+    pub fn basculer_pose(&mut self) {
+        let Some(e) = &mut self.os else { return };
+        e.pose = !e.pose;
+        e.version += 1;
+        let m = if e.pose { "Pose : touchez un os, puis tournez-le" } else { "Géométrie : les os s'éditent au repos, la pose est gardée" };
+        self.fin_geste();
+        self.redessiner_armatures();
+        self.dire(m.into());
+    }
+
+    /// L'armature `id` est montrée au repos : ouverte en mode Armature, hors de la pose.
+    fn au_repos(&self, id: &str) -> bool {
+        self.os.as_ref().filter(|e| !e.pose).and_then(|e| e.objet).and_then(|k| self.projet.objets.get(k)).is_some_and(|o| o.id == id)
+    }
+
+    /// Où la pose emmène l'objet `k`, s'il suit un os.
+    fn place_posee(&self, k: usize) -> Option<(P3, ed::Q)> {
+        let o = &self.projet.objets[k];
+        if self.au_repos(&o.liaison.as_ref()?.armature) {
+            return None;
+        }
+        self.projet.place_posee(o)
+    }
+
+    /// L'objet tel qu'il est montré.
+    fn objet_vu(&self, k: usize) -> Cow<'_, Objet> {
+        let o = &self.projet.objets[k];
+        match self.place_posee(k) {
+            Some((position, rotation)) => {
+                let mut x = o.clone();
+                (x.position, x.rotation) = (position, rotation);
+                Cow::Owned(x)
+            }
+            None => Cow::Borrowed(o),
+        }
+    }
+
+    /// Un objet choisi suit un os posé : il se déplace au repos seulement.
+    fn selection_posee(&mut self) -> bool {
+        let oui = self.travail.is_none() && self.os.is_none() && self.choix.iter().any(|k| self.place_posee(*k).is_some() || self.deformes.contains_key(&self.projet.objets[*k].id));
+        if oui {
+            self.dire("Objet posé par ses os : remettez-les au repos pour le déplacer".into());
+        }
+        oui
+    }
+
+    /// Ramène au repos tous les os de l'armature `k`, depuis le mode Scène.
+    fn repos_armature(&mut self, k: usize) {
+        self.memoriser();
+        let Some(a) = &mut self.projet.objets[k].armature else { return };
+        let l: Vec<String> = a.os.iter().map(|b| b.id.clone()).collect();
+        a.remettre(&l);
+        self.a_sauver = true;
+        self.redessiner_armatures();
+        self.dire("Armature au repos".into());
+    }
+
+    /// Ramène à leur repos les os choisis, sinon tous.
+    fn repos_os(&mut self) {
+        self.changer_os(|a, e| {
+            let mut l = e.os_choisis(a);
+            if l.is_empty() {
+                l = a.os.iter().map(|b| b.id.clone()).collect();
+            }
+            a.remettre(&l);
+        });
+    }
+
+    /// Dans le mode Armature : cette armature devient celle qu'on édite.
+    fn ouvrir_armature(&mut self, k: usize) {
+        let pose = self.os.as_ref().is_some_and(|e| e.pose);
+        self.os = Some(EditionOs { objet: Some(k), pose, ..Default::default() });
+        self.projet.actif = Some(k);
+        self.choix = vec![k];
+        self.parents_ouverts = false;
+        self.redessiner_armatures();
+    }
+
+    /// Passe en mode Géométrie : les objets choisis, l'actif compris. Sur une
+    /// armature active, ce sont ses os qui s'éditent, panneau Os ouvert.
     pub fn entrer_geometrie(&mut self) {
-        if self.travail.is_some() {
+        if self.os.as_ref().is_some_and(|e| e.pose) {
+            return self.basculer_pose();
+        }
+        if self.travail.is_some() || self.os.is_some() {
             return;
         }
         let Some(a) = self.projet.actif.filter(|k| *k < self.projet.objets.len()) else {
             return self.dire("Aucun objet actif : touchez un objet".into());
         };
         if self.projet.objets[a].armature.is_some() {
-            return self.dire("Une armature n’a pas de géométrie".into());
+            return self.entrer_armature();
         }
         let l: Vec<usize> = self.choix.iter().copied().filter(|k| self.projet.affiche(&self.projet.objets[*k])).collect();
         self.travail = Some(Travail::ouvrir(&self.projet.objets, &l, a, self.filtres));
@@ -1948,7 +2259,19 @@ impl App {
         self.version_geo = None;
     }
 
+    fn sortir_os(&mut self) {
+        if let Some(e) = self.os.take() {
+            let a = e.objet.and_then(|k| self.projet.objets.get(k)).map(|o| o.id.clone());
+            if let (Some(a), Some(x)) = (a, e.actif) {
+                self.os_scene = Some((a, x));
+            }
+            self.fin_geste();
+            self.redessiner_armatures();
+        }
+    }
+
     pub fn sortir_geometrie(&mut self) {
+        self.sortir_os();
         if let Some(mut t) = self.travail.take() {
             t.ranger(&mut self.projet.objets);
             self.filtres = t.filtres;
@@ -1965,6 +2288,287 @@ impl App {
         self.geste = None;
         self.boite = None;
         self.derniere = None;
+    }
+
+    // ----- Mode Armature --------------------------------------------------
+
+    /// Le mode Armature, l'objet et l'armature qu'il édite.
+    /// L'armature dont le panneau Os montre les poids, et son os actif s'il y en a un :
+    /// celle qu'on édite, ou en mode Scène l'armature active.
+    fn os_vu(&self) -> Option<(&Objet, Option<String>)> {
+        if let Some((e, o, _)) = self.armature_os() {
+            return Some((o, e.actif.clone()));
+        }
+        if self.travail.is_some() || self.os.is_some() {
+            return None;
+        }
+        let o = self.projet.actif.and_then(|k| self.projet.objets.get(k)).filter(|o| o.armature.is_some())?;
+        let x = self.os_scene.as_ref().filter(|(a, _)| *a == o.id).map(|(_, x)| x.clone());
+        Some((o, x))
+    }
+
+    fn armature_os(&self) -> Option<(&EditionOs, &Objet, &Armature)> {
+        let e = self.os.as_ref()?;
+        let o = self.projet.objets.get(e.objet?)?;
+        Some((e, o, o.armature.as_ref()?))
+    }
+
+    fn os_actif(&self) -> Option<(&Objet, &Os)> {
+        let (e, o, a) = self.armature_os()?;
+        Some((o, a.trouver(e.actif.as_ref()?)?))
+    }
+
+    /// Ce qui est sous le doigt, en pixels de la vue : un bout d'abord, sinon un corps.
+    fn os_sous(&self, x: f64, y: f64, vue: &Vue, rayon: f64) -> Option<Touche> {
+        let (_, o, a) = self.armature_os()?;
+        let (e, s, mx) = (self.os.as_ref()?, segments_os(self.os.as_ref()?, a), o.matrice());
+        let ecran = |p: P3| vue.ecran(vue::appliquer(&mx, p));
+        let mut bout: Option<(f64, Touche)> = None;
+        let mut corps: Option<(f64, Touche)> = None;
+        for b in a.ordre() {
+            let Some(g) = s.get(&b.id) else { continue };
+            let (t, q) = (ecran(g.tete), ecran(g.queue));
+            for (queue, e) in [(false, t), (true, q)] {
+                let Some(e) = e else { continue };
+                let d = (e[0] - x).hypot(e[1] - y);
+                if d < rayon * 0.7 && bout.as_ref().is_none_or(|m| d < m.0) {
+                    bout = Some((d, Touche { os: b.id.clone(), queue: Some(queue) }));
+                }
+            }
+            if let (Some(t), Some(q)) = (t, q) {
+                let d = ed::distance_segment(t, q, x, y);
+                if d < rayon && corps.as_ref().is_none_or(|m| d < m.0) {
+                    corps = Some((d, Touche { os: b.id.clone(), queue: None }));
+                }
+            }
+        }
+        // En pose, on prend un os entier
+        if e.pose { corps } else { bout.or(corps) }.map(|m| m.1)
+    }
+
+    /// Le doigt est sur des bouts tous sélectionnés.
+    fn sur_os(&self, x: f64, y: f64, vue: &Vue, rayon: f64) -> bool {
+        let (Some((e, _, a)), Some(t)) = (self.armature_os(), self.os_sous(x, y, vue, rayon)) else { return false };
+        EditionOs::cles_de(a, &t).iter().all(|c| e.bouts.contains(c))
+    }
+
+    fn toucher_os(&mut self, t: &Touche) {
+        let Some((_, _, a)) = self.armature_os() else { return };
+        let a = a.clone();
+        if let Some(e) = &mut self.os {
+            e.basculer(&a, t);
+        }
+    }
+
+    /// Une boîte ajoute à la sélection les bouts qu'elle couvre, ou les en retire.
+    fn boite_os(&mut self, r: [f64; 4], vue: &Vue, retire: bool) {
+        let Some((e, o, a)) = self.armature_os() else { return };
+        let (s, mx, soudures) = (segments_os(e, a), o.matrice(), a.soudures());
+        let mut pris: Vec<Bout> = Vec::new();
+        for b in &a.os {
+            let Some(g) = s.get(&b.id) else { continue };
+            for (bout, p) in [(Bout::tete(&b.id), g.tete), (Bout::queue(&b.id), g.queue)] {
+                if vue.ecran(vue::appliquer(&mx, p)).is_some_and(|e| e[0] >= r[0] && e[0] <= r[2] && e[1] >= r[1] && e[1] <= r[3]) {
+                    pris.extend(soudures.get(&bout).into_iter().flatten().cloned());
+                }
+            }
+        }
+        let Some(e) = &mut self.os else { return };
+        let avant = e.bouts.len();
+        if retire {
+            e.bouts.retain(|b| !pris.contains(b));
+        } else {
+            for b in pris {
+                if !e.bouts.contains(&b) {
+                    e.bouts.push(b);
+                }
+            }
+        }
+        e.version += 1;
+        let n = e.bouts.len().abs_diff(avant);
+        self.dire(format!("Boîte : {}{n} bout{}", if retire { "−" } else { "+" }, if n > 1 { "s" } else { "" }));
+    }
+
+    /// Modification mémorisée de l'armature éditée ; son dessin suit.
+    fn changer_os(&mut self, f: impl FnOnce(&mut Armature, &mut EditionOs)) {
+        self.memoriser();
+        let Some(e) = &mut self.os else { return };
+        let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
+        let Some(mut a) = o.armature.take() else { return };
+        f(&mut a, e);
+        o.maillage = Arc::new(if e.pose { a.enveloppe_pose() } else { a.enveloppe() });
+        o.armature = Some(a);
+        e.version += 1;
+        self.a_sauver = true;
+    }
+
+    fn ajouter_os(&mut self) {
+        let Some((e, o, a)) = self.armature_os() else { return };
+        let p = geo::vers_local(o, self.projet.curseur);
+        let l = e.actif.as_ref().and_then(|i| a.trouver(i)).map_or(1.0, |b| b.longueur);
+        self.changer_os(|a, e| {
+            let id = a.ajouter("os", None, p, [0.0, 0.0, 0.0, 1.0], l);
+            e.selectionner(a, std::slice::from_ref(&id), false);
+            e.actif = Some(id);
+        });
+    }
+
+    fn extruder_os(&mut self) {
+        let Some((e, _, a)) = self.armature_os() else { return };
+        let l = e.queues_choisies(a);
+        if l.is_empty() {
+            return self.dire("Sélectionnez la queue d’un os".into());
+        }
+        self.changer_os(|a, e| {
+            let nouveaux: Vec<String> = l.iter().filter_map(|id| a.extruder(id)).collect();
+            let s = a.soudures();
+            e.bouts = nouveaux.iter().flat_map(|id| s[&Bout::queue(id)].iter().cloned()).collect();
+            e.actif = nouveaux.last().cloned();
+        });
+    }
+
+    fn supprimer_os(&mut self) {
+        let Some((e, _, a)) = self.armature_os() else { return };
+        let l = e.os_choisis(a);
+        if l.is_empty() {
+            return;
+        }
+        if l.len() >= a.os.len() {
+            return self.dire("Une armature garde au moins un os : supprimez-la en mode Scène".into());
+        }
+        self.changer_os(|a, e| {
+            for id in &l {
+                a.retirer(id);
+            }
+            e.bouts.clear();
+            e.actif = None;
+        });
+        self.projet.verifier_liaisons();
+    }
+
+    fn parenter_os(&mut self) {
+        let Some((e, _, a)) = self.armature_os() else { return };
+        let Some(actif) = e.actif.clone() else { return };
+        let l: Vec<String> = e.os_choisis(a).into_iter().filter(|i| *i != actif).collect();
+        if l.is_empty() {
+            return;
+        }
+        let mut refus = 0;
+        self.changer_os(|a, _| refus = l.iter().filter(|id| !a.changer_parent(id, Some(&actif))).count());
+        if refus > 0 {
+            self.dire(format!("{refus} os refusé{} : l’actif en descend", if refus > 1 { "s" } else { "" }));
+        }
+    }
+
+    fn detacher_os(&mut self) {
+        let Some((e, _, a)) = self.armature_os() else { return };
+        let l = e.os_choisis(a);
+        self.changer_os(|a, _| {
+            for id in &l {
+                a.changer_parent(id, None);
+            }
+        });
+    }
+
+    fn changer_parent_os(&mut self, id: &str, parent: Option<&str>) {
+        let Some((_, _, a)) = self.armature_os() else { return };
+        if parent.is_some_and(|p| a.descendants(id).iter().any(|d| d == p)) {
+            return self.dire("Cet os descend de celui-ci".into());
+        }
+        self.changer_os(|a, _| {
+            a.changer_parent(id, parent);
+        });
+        self.parents_ouverts = false;
+    }
+
+    fn tous_os(&mut self, tout: bool) {
+        let Some((_, _, a)) = self.armature_os() else { return };
+        let (a, ids): (Armature, Vec<String>) = (a.clone(), if tout { a.os.iter().map(|b| b.id.clone()).collect() } else { Vec::new() });
+        if let Some(e) = &mut self.os {
+            e.selectionner(&a, &ids, false);
+        }
+    }
+
+    fn descendants_os(&mut self) {
+        let Some((e, _, a)) = self.armature_os() else { return };
+        let Some(ids) = e.actif.as_ref().map(|i| a.descendants(i)) else { return };
+        let a = a.clone();
+        if let Some(e) = &mut self.os {
+            e.selectionner(&a, &ids, true);
+        }
+    }
+
+    fn renommer_os(&mut self, nom: &str) {
+        let nom = nom.trim().to_string();
+        if nom.is_empty() {
+            return self.dire("Nom vide".into());
+        }
+        let Some((e, _, a)) = self.armature_os() else { return };
+        let Some(id) = e.actif.clone() else { return };
+        if a.os.iter().any(|b| b.nom == nom && b.id != id) {
+            return self.dire("Ce nom est déjà pris".into());
+        }
+        self.changer_os(|a, _| {
+            if let Some(b) = a.os.iter_mut().find(|b| b.id == id) {
+                b.nom = nom;
+            }
+        });
+    }
+
+    /// Longueur au monde de l'os actif : sa queue et ce qui y est soudé glissent le long de lui.
+    fn saisir_longueur_os(&mut self, v: f64) {
+        let Some((e, o, a)) = self.armature_os() else { return };
+        let Some(id) = e.actif.clone() else { return };
+        let (s, mx) = (a.segments(), o.matrice());
+        let Some(g) = s.get(&id) else { return };
+        let (t, q) = (vue::appliquer(&mx, g.tete), vue::appliquer(&mx, g.queue));
+        let u = [q[0] - t[0], q[1] - t[1], q[2] - t[2]];
+        let l = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+        if v <= 0.0 || (v - l).abs() < 1e-9 || l <= 0.0 {
+            return;
+        }
+        let cles = a.soudures()[&Bout::queue(&id)].clone();
+        self.memoriser();
+        let Some(e) = &mut self.os else { return };
+        let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
+        poser_bouts(o, &cles, &s, Transfo::Translation(u.map(|x| x * (v - l) / l)));
+        e.version += 1;
+    }
+
+    /// Bouts et os vers le rendu, à travers les autres objets, seulement s'ils ont changé.
+    fn vue_os(&mut self) -> Option<GeoVue> {
+        let (e, o, a) = self.armature_os()?;
+        if self.version_geo == Some(e.version) {
+            return Some(GeoVue { maj: None, rayons: true });
+        }
+        let version = e.version;
+        let (s, mx) = (segments_os(e, a), o.matrice());
+        let f3 = |p: P3| vue::appliquer(&mx, p).map(|x| x as f32);
+        let mut g = GeoTampons::default();
+        for b in &a.os {
+            let Some(x) = s.get(&b.id) else { continue };
+            let (t, q) = (f3(x.tete), f3(x.queue));
+            g.points.extend(t);
+            g.points.extend(q);
+            g.lignes.extend(t);
+            g.lignes.extend(q);
+        }
+        for b in &e.bouts {
+            if let Some(x) = s.get(&b.os) {
+                g.choisis.extend(f3(if b.queue { x.queue } else { x.tete }));
+            }
+        }
+        for id in e.os_choisis(a) {
+            let Some(x) = s.get(&id) else { continue };
+            let (p, q) = (f3(x.tete), f3(x.queue));
+            for (a, b, c) in [(p, q, 1.0), (p, q, -1.0), (q, p, -1.0), (p, q, -1.0), (q, p, 1.0), (q, p, -1.0)] {
+                g.bandes.extend(a);
+                g.bandes.extend(b);
+                g.bandes.push(c);
+            }
+        }
+        self.version_geo = Some(version);
+        Some(GeoVue { maj: Some(g), rayons: true })
     }
 
     /// Opération sur la copie de travail : mémorisée si elle réussit.
@@ -2108,7 +2712,7 @@ impl App {
 
     fn selection_vers_curseur(&mut self) {
         let pts = self.points();
-        if pts.is_empty() {
+        if pts.is_empty() || self.selection_posee() {
             return;
         }
         let (c, u) = (ed::centre(&pts), self.projet.curseur);
@@ -2124,20 +2728,32 @@ impl App {
 
     /// Transforme la sélection depuis son état présent.
     fn poser_selection(&mut self, v: Transfo) {
-        if let Some(t) = &mut self.travail {
+        if let Some(e) = &mut self.os {
+            let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
+            if e.pose {
+                let Some(depart) = o.armature.as_ref().map(|a| a.pose.clone()) else { return };
+                poser_os(o, e, &depart, v);
+            } else {
+                let Some(depart) = o.armature.as_ref().map(Armature::segments) else { return };
+                poser_bouts(o, &e.bouts, &depart, v);
+            }
+            e.version += 1;
+        } else if let Some(t) = &mut self.travail {
             let l = t.impliques();
             let depart: Vec<P3> = l.iter().map(|i| t.m.sommets[*i]).collect();
             t.poser(&l, &depart, v);
         } else {
             let l = self.choix.clone();
             let departs = ed::depart(&self.projet.objets, &l);
+            let suivis = ed::suivis(&self.projet.objets, &l);
             ed::poser(&mut self.projet.objets, &l, &departs, v);
+            ed::suivre(&mut self.projet.objets, &suivis);
         }
     }
 
     fn etape(&self) -> Etape {
         let p = &self.projet;
-        Etape { objets: p.objets.clone(), sets: p.sets.clone(), materiaux: p.materiaux.clone(), actif: p.actif, choix: self.choix.clone(), travail: self.travail.clone() }
+        Etape { objets: p.objets.clone(), sets: p.sets.clone(), materiaux: p.materiaux.clone(), actif: p.actif, choix: self.choix.clone(), travail: self.travail.clone(), os: self.os.clone() }
     }
 
     /// La visibilité échappe à l'annulation : refaire la dernière opération la défairait.
@@ -2157,7 +2773,13 @@ impl App {
         (p.objets, p.sets, p.materiaux, p.actif) = (e.objets, e.sets, e.materiaux, e.actif);
         self.choix = e.choix;
         self.travail = e.travail;
-        self.version_geo = None;
+        // L'étape vaut pour les données : on reste en pose ou au repos
+        let pose = self.os.as_ref().map(|x| x.pose);
+        self.os = e.os;
+        if let (Some(x), Some(p)) = (&mut self.os, pose) {
+            x.pose = p;
+        }
+        self.redessiner_armatures();
         self.contexte_geo = None;
         self.a_sauver = true;
         self.boite = None;
@@ -2211,9 +2833,18 @@ impl App {
 
     /// Points que transforme la poignée : sommets concernés, ou origines des objets.
     fn points(&self) -> Vec<P3> {
+        if let Some((e, o, a)) = self.armature_os() {
+            let mx = o.matrice();
+            if e.pose {
+                let m = a.matrices_pose();
+                return e.racines(a).iter().filter_map(|i| m.get(i)).map(|x| vue::appliquer(&mx, x.0)).collect();
+            }
+            let s = a.segments();
+            return e.bouts.iter().filter_map(|b| s.get(&b.os).map(|x| vue::appliquer(&mx, if b.queue { x.queue } else { x.tete }))).collect();
+        }
         match &self.travail {
             Some(t) => t.points(),
-            None => self.choix.iter().map(|k| self.projet.objets[*k].position).collect(),
+            None => self.choix.iter().map(|k| self.objet_vu(*k).position).collect(),
         }
     }
 
@@ -2270,6 +2901,7 @@ impl App {
         if prise.is_none() && !boite && poignee.is_some() {
             let dessus = match &self.travail {
                 Some(t) => t.sur_selection(px, py, &vue, self.rayon(cx.dp), self.rayons),
+                None if self.os.is_some() => self.sur_os(px, py, &vue, self.rayon(cx.dp)),
                 None => self.objet_sous(w, x, y).is_some_and(|k| self.choix.contains(&k)),
             };
             if dessus {
@@ -2283,18 +2915,28 @@ impl App {
             }
             return;
         };
+        if self.selection_posee() {
+            return;
+        }
         self.memoriser();
         let pts = self.points();
         let pivot = self.pivot_courant(&pts);
         self.pas_t = self.pas_translation();
-        let (indices, departs) = match &self.travail {
-            Some(_) => (Vec::new(), Vec::new()),
-            None => (self.choix.clone(), ed::depart(&self.projet.objets, &self.choix)),
+        let (indices, departs) = if self.travail.is_some() || self.os.is_some() {
+            (Vec::new(), Vec::new())
+        } else {
+            (self.choix.clone(), ed::depart(&self.projet.objets, &self.choix))
         };
+        self.suivis = ed::suivis(&self.projet.objets, &indices);
         let mut g = Geste::new(self.mode, prise, px, py, vue, self.axes, indices, departs, ed::centre(&pts), pivot);
         if let Some(t) = &self.travail {
             g.indices = t.impliques();
             g.sommets = pts;
+        } else if let Some((e, _, a)) = self.armature_os() {
+            g.indices = (0..e.bouts.len()).collect();
+            let (s, p) = (a.segments(), a.pose.clone());
+            self.depart_os = s;
+            self.depart_pose = p;
         }
         self.geste = Some(g);
         self.vol = None;
@@ -2313,16 +2955,34 @@ impl App {
             return;
         }
         // Un second doigt a pu changer la scène pendant le glissé
-        let n = self.travail.as_ref().map_or(self.projet.objets.len(), |t| t.m.sommets.len());
+        let n = match (&self.os, &self.travail) {
+            (Some(e), _) => e.bouts.len(),
+            (_, Some(t)) => t.m.sommets.len(),
+            _ => self.projet.objets.len(),
+        };
         if self.geste.as_ref().is_some_and(|g| g.indices.iter().any(|k| *k >= n)) {
             self.geste = None;
         }
         let mut faite = None;
         if let Some(g) = &mut self.geste {
             let v = g.suivre((x - w.x) as f64, (y - w.y) as f64, &self.pas, self.pas_t);
-            match &mut self.travail {
-                Some(t) => t.poser(&g.indices, &g.sommets, v),
-                None => ed::poser(&mut self.projet.objets, &g.indices, &g.departs, v),
+            if let Some(e) = &mut self.os {
+                if let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) {
+                    if e.pose {
+                        poser_os(o, e, &self.depart_pose, v);
+                    } else {
+                        poser_bouts(o, &e.bouts, &self.depart_os, v);
+                    }
+                    e.version += 1;
+                }
+            } else {
+                match &mut self.travail {
+                    Some(t) => t.poser(&g.indices, &g.sommets, v),
+                    None => {
+                        ed::poser(&mut self.projet.objets, &g.indices, &g.departs, v);
+                        ed::suivre(&mut self.projet.objets, &self.suivis);
+                    }
+                }
             }
             faite = Some(v);
         }
@@ -2344,6 +3004,9 @@ impl App {
         let vue = self.vue_ecran(w);
         let r = [b[0].min(b[2]) - w.x, b[1].min(b[3]) - w.y, b[0].max(b[2]) - w.x, b[1].max(b[3]) - w.y].map(|v| v as f64);
         let (retire, rayons) = (self.boite_retire, self.rayons);
+        if self.os.is_some() {
+            return self.boite_os(r, &vue, retire);
+        }
         if let Some(t) = &mut self.travail {
             let m = t.boite(r, &vue, retire, rayons);
             return self.dire(m);
@@ -2373,6 +3036,18 @@ impl App {
         if !w.contains(x, y) {
             return;
         }
+        if self.os.is_some() {
+            let (vue, r) = (self.vue_ecran(w), self.rayon(cx.dp));
+            let t = self.os_sous((x - w.x) as f64, (y - w.y) as f64, &vue, r);
+            if let Some(e) = &mut self.os {
+                e.bouts.clear();
+                e.version += 1;
+            }
+            if let Some(t) = t {
+                self.toucher_os(&t);
+            }
+            return;
+        }
         if self.travail.is_some() {
             let (vue, r, ry) = (self.vue_ecran(w), self.rayon(cx.dp), self.rayons);
             if let Some(t) = &mut self.travail {
@@ -2400,6 +3075,24 @@ impl App {
             return;
         }
         let (r, ry, chemin) = (self.rayon(cx.dp), self.rayons, self.selection == Selection::Chemin);
+        if self.os.as_ref().is_some_and(|e| e.objet.is_none()) {
+            // Rien d'ouvert : un appui prend l'armature touchée
+            if let Some(k) = self.objet_sous(w, t.x, t.y).filter(|k| self.projet.objets[*k].armature.is_some()) {
+                self.ouvrir_armature(k);
+            } else if t.double {
+                self.recadrer();
+            }
+            return;
+        }
+        if self.os.is_some() {
+            match self.os_sous(px, py, &vue, r) {
+                Some(_) if t.double => {}
+                Some(x) => self.toucher_os(&x),
+                None if t.double => self.recadrer(),
+                None => {}
+            }
+            return;
+        }
         if let Some(c) = &mut self.travail {
             let el = c.element_sous(px, py, &vue, r, ry);
             if t.double {
@@ -2434,6 +3127,10 @@ impl App {
     fn ajouter(&mut self, nom: &str, m: Maillage) {
         self.sortir_geometrie();
         self.memoriser();
+        self.poser_objet(nom, m);
+    }
+
+    fn poser_objet(&mut self, nom: &str, m: Maillage) {
         let p = &mut self.projet;
         let mut o = Objet::neuf(&ed::nom_libre(&p.objets, nom), m);
         o.position = p.curseur;
@@ -2446,6 +3143,22 @@ impl App {
         self.a_sauver = true;
     }
 
+    /// Armature sur le curseur. Ajoutée depuis le mode Armature, elle s'y ouvre, et
+    /// l'annulation y revient.
+    pub fn ajouter_armature(&mut self, nom: &str, a: Armature) {
+        if self.os.is_some() {
+            self.memoriser();
+            self.poser_objet(nom, a.enveloppe());
+        } else {
+            self.ajouter(nom, a.enveloppe());
+        }
+        let k = self.projet.objets.len() - 1;
+        self.projet.objets[k].armature = Some(a);
+        if self.os.is_some() {
+            self.ouvrir_armature(k);
+        }
+    }
+
     /// Copies sur place : les maillages restent partagés jusqu'à ce que l'un change.
     fn dupliquer(&mut self) {
         if self.choix.is_empty() {
@@ -2453,16 +3166,26 @@ impl App {
         }
         self.memoriser();
         let p = &mut self.projet;
+        let mut ids: Vec<(String, String)> = Vec::new();
         self.choix = self
             .choix
             .iter()
             .map(|&k| {
                 let mut o = p.objets[k].clone();
                 o.nom = ed::nom_libre(&p.objets, &o.nom);
+                ids.push((std::mem::replace(&mut o.id, crate::projet::nouvel_id()), o.id.clone()));
                 p.objets.push(o);
                 p.objets.len() - 1
             })
             .collect();
+        // Une armature copiée avec ses objets garde les copies ; seuls, ils restent sur l'originale
+        for &k in &self.choix {
+            if let Some(l) = &mut p.objets[k].liaison {
+                if let Some((_, n)) = ids.iter().find(|(a, _)| *a == l.armature) {
+                    l.armature = n.clone();
+                }
+            }
+        }
         p.actif = self.choix.last().copied();
         self.a_sauver = true;
         self.dire("Dupliqué : glissez pour écarter la copie".into());
@@ -2473,14 +3196,81 @@ impl App {
             return self.dire("Aucun objet sélectionné".into());
         }
         self.memoriser();
-        let (p, retires) = (&mut self.projet, std::mem::take(&mut self.choix));
-        p.actif = p.actif.filter(|a| !retires.contains(a)).map(|a| a - retires.iter().filter(|k| **k < a).count());
+        let retires = std::mem::take(&mut self.choix);
+        self.retirer_objets(&retires);
+        self.a_sauver = true;
+    }
+
+    /// Retire des objets ; l'actif et la sélection gardent leurs objets.
+    fn retirer_objets(&mut self, retires: &[usize]) {
+        let avant = |k: usize| k - retires.iter().filter(|r| **r < k).count();
+        let p = &mut self.projet;
+        p.actif = p.actif.filter(|a| !retires.contains(a)).map(avant);
+        self.choix = self.choix.iter().copied().filter(|k| !retires.contains(k)).map(avant).collect();
         let mut k = 0;
         p.objets.retain(|_| {
             k += 1;
             !retires.contains(&(k - 1))
         });
+        p.verifier_liaisons();
+    }
+
+    /// Objets choisis qu'on peut lier : pas les armatures.
+    fn cibles_liaison(&self) -> Vec<usize> {
+        self.choix.iter().copied().filter(|k| self.projet.objets[*k].armature.is_none()).collect()
+    }
+
+    /// Ouvre la page de liaison, sur l'armature choisie, sinon celle de la liaison en
+    /// place, sinon la seule du projet ; une nouvelle armature propose tous ses os.
+    pub fn ouvrir_liaison(&mut self) {
+        let p = &self.projet;
+        let objets = || self.choix.iter().map(|k| &p.objets[*k]);
+        let lien = objets().find_map(|o| o.liaison.as_ref());
+        let armatures = || p.objets.iter().filter(|o| o.armature.is_some());
+        let seule = (armatures().count() == 1).then(|| armatures().next()).flatten();
+        let armature = objets().find(|o| o.armature.is_some()).or(lien.and_then(|l| p.objet_id(&l.armature))).or(seule);
+        let page = match (armature, lien) {
+            (Some(a), Some(l)) if a.id == l.armature => PageLiaison { armature: Some(a.id.clone()), os: l.os.clone() },
+            (Some(a), _) => PageLiaison { armature: Some(a.id.clone()), os: a.armature.iter().flat_map(|x| &x.os).map(|b| b.id.clone()).collect() },
+            (None, _) => PageLiaison { armature: None, os: Vec::new() },
+        };
+        self.liaison = Some(page);
+        self.contenu = Contenu::Contexte;
+        self.onglet_contexte = 0;
+        self.shell.end.open = true;
+    }
+
+    /// Lie les objets choisis selon la page ouverte.
+    pub fn lier(&mut self) {
+        let Some(PageLiaison { armature: Some(armature), os }) = self.liaison.clone() else { return };
+        let l = self.cibles_liaison();
+        let Some(nom) = self.projet.objet_id(&armature).map(|o| o.nom.clone()) else { return };
+        if os.is_empty() || l.is_empty() {
+            return;
+        }
+        self.memoriser();
+        for &k in &l {
+            self.projet.objets[k].liaison = Some(crate::projet::Liaison { armature: armature.clone(), os: os.clone() });
+        }
+        self.liaison = None;
         self.a_sauver = true;
+        let qui = if let [k] = l[..] { format!("« {} » lié", self.projet.objets[k].nom) } else { format!("{} objets liés", l.len()) };
+        let n = os.len();
+        self.dire(format!("{qui} à « {nom} » : {n} os"));
+    }
+
+    fn delier(&mut self) {
+        let l: Vec<usize> = self.choix.iter().copied().filter(|k| self.projet.objets[*k].liaison.is_some()).collect();
+        if l.is_empty() {
+            return;
+        }
+        self.memoriser();
+        for &k in &l {
+            self.projet.objets[k].liaison = None;
+        }
+        self.a_sauver = true;
+        let qui = if let [k] = l[..] { format!("« {} » délié", self.projet.objets[k].nom) } else { format!("{} objets déliés", l.len()) };
+        self.dire(qui);
     }
 
     fn appliquer_echelle(&mut self) {
@@ -2543,6 +3333,12 @@ impl App {
             (Champ::Nom, _) => return Some(objet?.nom.clone()),
             (Champ::Projet, _) => return Some(self.nom.clone()),
             (Champ::Couleur(i), _) => return Some(theme::hex(coul(theme::LIGNES[i].c))),
+            (Champ::OsNom, _) => return self.os_actif().map(|x| x.1.nom.clone()),
+            (Champ::OsLongueur, _) => self.os_actif().map(|(o, x)| x.longueur * o.echelle[0])?,
+            (Champ::SetNom, _) => return match &self.page_liste {
+                PageListe::Set(n) => Some(n.clone()),
+                _ => None,
+            },
             (Champ::MatNom, _) => return self.materiau_actif().map(|n| nom_mat(&n).to_string()),
             (Champ::MatCode(k), _) => return self.materiau_actif().and_then(|n| self.projet.materiau(&n).map(|m| couleur_mat(m, k).to_string())),
             _ => return None,
@@ -2604,7 +3400,7 @@ impl App {
 
     /// Base de l'objet : son maillage, avant échelle.
     fn base(&self, k: usize) -> [f64; 3] {
-        self.maillage_vu(k).boite_englobante().map_or([0.0; 3], |b| [0, 1, 2].map(|c| b.max[c] - b.min[c]))
+        self.maillage_base(k).boite_englobante().map_or([0.0; 3], |b| [0, 1, 2].map(|c| b.max[c] - b.min[c]))
     }
 
     fn appliquer_champ(&mut self, c: Champ, v: f64) {
@@ -2664,6 +3460,9 @@ impl App {
                 return self.rejouer(d);
             }
         }
+        if matches!(c, Champ::Position(_) | Champ::Rotation(_) | Champ::Dimension(_)) && self.selection_posee() {
+            return;
+        }
         match c {
             Champ::Position(k) => {
                 let pts = self.points();
@@ -2686,7 +3485,9 @@ impl App {
                 }
                 deg[k] = v;
                 self.memoriser();
+                let s = ed::suivis(&self.projet.objets, &[i]);
                 self.projet.objets[i].rotation = ed::depuis_euler(deg);
+                ed::suivre(&mut self.projet.objets, &s);
             }
             Champ::Dimension(k) => {
                 let Some(i) = self.seul() else { return };
@@ -2697,13 +3498,16 @@ impl App {
                 }
                 let f = v / base;
                 self.memoriser();
+                let s = ed::suivis(&self.projet.objets, &[i]);
                 let o = &mut self.projet.objets[i];
                 if o.armature.is_some() {
                     o.echelle = [f; 3];
                 } else {
                     o.echelle[k] = f;
                 }
+                ed::suivre(&mut self.projet.objets, &s);
             }
+            Champ::OsLongueur => self.saisir_longueur_os(v),
             Champ::PasTranslation => self.pas.translation = (1e-6..=1e6).contains(&v).then_some(v),
             Champ::PasAngle => self.pas.angle = v.clamp(0.1, 180.0),
             Champ::PasEchelle => self.pas.echelle = v.clamp(0.001, 10.0),
@@ -2725,6 +3529,12 @@ impl App {
             } else if p.cible == Champ::Projet {
                 self.nom = p.texte.trim().to_string();
                 self.a_sauver = true;
+            } else if p.cible == Champ::OsNom {
+                self.renommer_os(&p.texte);
+            } else if p.cible == Champ::SetNom {
+                if let PageListe::Set(n) = self.page_liste.clone() {
+                    self.renommer_set(&n, &p.texte);
+                }
             } else if p.cible == Champ::MatNom {
                 if let Some(n) = self.materiau_actif() {
                     self.renommer_materiau(&n, &p.texte);
@@ -2798,6 +3608,7 @@ impl App {
         let p = &mut self.projet;
         (p.objets, p.sets, p.materiaux, p.actif) = (n.objets, n.sets, n.materiaux, n.actif);
         self.travail = None;
+        self.os = None;
         self.version_geo = None;
         self.contexte_geo = None;
         self.boite = None;
@@ -2910,7 +3721,7 @@ impl App {
                 t.m.sommets.iter().zip(&t.proprio).filter(|x| *x.1 == k).for_each(|x| plus(*x.0));
                 continue;
             }
-            let m = self.projet.objets[k].matrice();
+            let m = self.objet_vu(k).matrice();
             for p in &self.maillage_vu(k).sommets {
                 plus(vue::appliquer(&m, *p));
             }
@@ -2934,7 +3745,13 @@ impl App {
         Camera { cible, distance: r / (CHAMP.to_radians() / 2.0).sin() / asp * 1.15, ..self.cam }
     }
 
-    fn recadrer(&mut self) {
+    /// Pose la caméra : pour les aperçus.
+    pub fn cadrer_cible(&mut self, cible: P3, distance: f64) {
+        (self.cam.cible, self.cam.distance) = (cible, distance);
+        self.vol = None;
+    }
+
+    pub fn recadrer(&mut self) {
         let liste = self.travail.as_ref().map_or(self.choix.clone(), |t| t.edites.clone());
         if let Some(arrivee) = self.cadre(&liste) {
             self.vol = Some(Vol { depart: self.cam, arrivee, t: 0.0 });
@@ -2947,7 +3764,15 @@ impl App {
             self.contenu = Contenu::Contexte;
             self.shell.end.open = false;
         }
+        if self.contenu == Contenu::Os && self.travail.is_some() {
+            self.contenu = Contenu::Contexte;
+            self.shell.end.open = false;
+        }
         self.shell.large = self.contenu == Contenu::Uv;
+        // Un os posé ne fait que tourner
+        if self.os.as_ref().is_some_and(|e| e.pose) {
+            self.mode = Mode::Rotation;
+        }
         let l = self.shell.layout(screen, dt);
         let w = l.workspace;
         self.espace = w;
@@ -3027,6 +3852,11 @@ impl App {
         }
     }
 
+    /// L'objet `k` est une armature au premier plan, et le mode Scène la montre ainsi.
+    fn devant(&self, k: usize) -> bool {
+        self.travail.is_none() && self.os.is_none() && self.projet.objets.get(k).and_then(|o| o.armature.as_ref()).is_some_and(|a| a.devant())
+    }
+
     /// Objet affiché sous le doigt, le plus proche de l'œil.
     fn objet_sous(&self, w: Rect, x: f32, y: f32) -> Option<usize> {
         let (oeil, droite, haut, dos) = self.repere();
@@ -3034,11 +3864,13 @@ impl App {
         let nx = ((x - w.x) / w.w * 2.0 - 1.0) as f64 * t * (w.w / w.h.max(1.0)) as f64;
         let ny = (1.0 - (y - w.y) / w.h * 2.0) as f64 * t;
         let d = [0, 1, 2].map(|k| droite[k] * nx + haut[k] * ny - dos[k]);
-        let mut mieux: Option<(usize, f64)> = None;
+        // Une armature au premier plan passe devant les autres objets
+        let mut mieux: Option<(usize, bool, f64)> = None;
         for k in self.affiches() {
-            if let Some(t) = vue::toucher(&self.projet.objets[k], &self.maillage_vu(k), oeil, d) {
-                if mieux.is_none_or(|m| t < m.1) {
-                    mieux = Some((k, t));
+            if let Some(t) = vue::toucher(&self.objet_vu(k), &self.maillage_vu(k), oeil, d) {
+                let devant = self.devant(k);
+                if mieux.is_none_or(|m| (!devant, t) < (!m.1, m.2)) {
+                    mieux = Some((k, devant, t));
                 }
             }
         }
@@ -3066,7 +3898,7 @@ impl App {
             if o.armature.is_some() || self.travail.is_some() {
                 continue;
             }
-            let q = o.position.map(|x| x as f32);
+            let q = self.objet_vu(k).position.map(|x| x as f32);
             let c = [
                 vp[0] * q[0] + vp[4] * q[1] + vp[8] * q[2] + vp[12],
                 vp[1] * q[0] + vp[5] * q[1] + vp[9] * q[2] + vp[13],
@@ -3188,11 +4020,11 @@ impl App {
         }
     }
 
-    /// Taille et écart des neuf pastilles : sur écran étroit, l'écart cède avant la taille.
+    /// Taille et écart des dix pastilles : sur écran étroit, l'écart cède avant la taille.
     fn mesure_pastilles(largeur: f32, d: f32) -> (f32, f32) {
         let libre = largeur - 28.0 * d;
-        let ecart = ((libre - 9.0 * 36.0 * d) / 8.0).clamp(3.0 * d, 10.0 * d);
-        (((libre - 8.0 * ecart) / 9.0).clamp(34.0 * d, 52.0 * d), ecart)
+        let ecart = ((libre - 10.0 * 36.0 * d) / 9.0).clamp(3.0 * d, 10.0 * d);
+        (((libre - 9.0 * ecart) / 10.0).clamp(34.0 * d, 52.0 * d), ecart)
     }
 
     fn flottants(&mut self, cx: &mut Cx, w: Rect) {
@@ -3210,22 +4042,28 @@ impl App {
         if cx.pastille(CONTEXTE, a(2.0), Icon::Contexte, fin && contenu == Contenu::Contexte) {
             self.basculer(Contenu::Contexte);
         }
-        // Les modifieurs se règlent en mode Scène : en Géométrie, on édite le maillage de base
+        // Le panneau Os, en Scène et sur les os ; pas sur la géométrie d'un maillage
         if self.travail.is_some() {
-            cx.pastille_eteinte(MODIFIEURS, a(3.0), Icon::Cle);
-        } else if cx.pastille(MODIFIEURS, a(3.0), Icon::Cle, fin && contenu == Contenu::Modifieurs) {
+            cx.pastille_eteinte(OS, a(3.0), Icon::Os);
+        } else if cx.pastille(OS, a(3.0), Icon::Os, fin && contenu == Contenu::Os) {
+            self.basculer(Contenu::Os);
+        }
+        // Les modifieurs se règlent en mode Scène : en Géométrie, on édite le maillage de base
+        if self.travail.is_some() || self.os.is_some() {
+            cx.pastille_eteinte(MODIFIEURS, a(4.0), Icon::Cle);
+        } else if cx.pastille(MODIFIEURS, a(4.0), Icon::Cle, fin && contenu == Contenu::Modifieurs) {
             self.basculer(Contenu::Modifieurs);
         }
-        if cx.pastille(FICHIERS, a(4.0), Icon::Dossier, fin && contenu == Contenu::Fichier) {
+        if cx.pastille(FICHIERS, a(5.0), Icon::Dossier, fin && contenu == Contenu::Fichier) {
             self.basculer(Contenu::Fichier);
         }
-        if cx.pastille(REGLAGES, a(5.0), Icon::Sliders, fin && contenu == Contenu::Reglages) {
+        if cx.pastille(REGLAGES, a(6.0), Icon::Sliders, fin && contenu == Contenu::Reglages) {
             self.basculer(Contenu::Reglages);
         }
-        if cx.pastille(AIDE, a(6.0), Icon::Help, fin && contenu == Contenu::Aide) {
+        if cx.pastille(AIDE, a(7.0), Icon::Help, fin && contenu == Contenu::Aide) {
             self.basculer(Contenu::Aide);
         }
-        for (i, cle, icone, possible) in [(7.0, ANNULER, Icon::Annuler, !self.histoire.annuler.is_empty()), (8.0, RETABLIR, Icon::Retablir, !self.histoire.retablir.is_empty())] {
+        for (i, cle, icone, possible) in [(8.0, ANNULER, Icon::Annuler, !self.histoire.annuler.is_empty()), (9.0, RETABLIR, Icon::Retablir, !self.histoire.retablir.is_empty())] {
             if !possible {
                 cx.pastille_eteinte(cle, a(i), icone);
             } else if cx.pastille(cle, a(i), icone, false) {
@@ -3289,15 +4127,23 @@ impl App {
     fn barre_haute(&mut self, cx: &mut Cx, w: Rect, y: f32) {
         let m = 14.0 * cx.dp;
         let cle = id("barre-haute");
-        let geo = self.travail.is_some();
+        let edition = self.travail.is_some();
+        let pose = self.os.as_ref().is_some_and(|e| e.pose);
+        let geo = edition || (self.os.is_some() && !pose);
+        // La pilule Pose, quand une armature est active ou posée
+        let avec_pose = self.os.is_some() || (self.travail.is_none() && self.projet.actif.and_then(|k| self.projet.objets.get(k)).is_some_and(|o| o.armature.is_some()));
         let etroit = w.w < 760.0 * cx.dp;
         let sel = match self.selection { Selection::Toucher => &icones::SELECTION_TOUCHER, Selection::Boite => &icones::SELECTION_BOITE, Selection::Chemin => &icones::SELECTION_CHEMIN };
         let mut l = vec![
-            Pilule::nommee(cx, sub_id(cle, 0), "Scène", &icones::SCENE, !geo, etroit),
+            Pilule::nommee(cx, sub_id(cle, 0), "Scène", &icones::SCENE, self.travail.is_none() && self.os.is_none(), etroit),
             // Sur écran étroit, le nom laisserait les filtres passer à la ligne
-            if etroit && geo { Pilule::icone(cx, sub_id(cle, 1), "Géométrie", &icones::PIVOT_ACTIF, true) } else { Pilule::nommee(cx, sub_id(cle, 1), "Géométrie", &icones::PIVOT_ACTIF, geo, etroit) },
+            if etroit && edition { Pilule::icone(cx, sub_id(cle, 1), "Géométrie", &icones::PIVOT_ACTIF, true) } else { Pilule::nommee(cx, sub_id(cle, 1), "Géométrie", &icones::PIVOT_ACTIF, geo, etroit) },
             Pilule::icone(cx, sub_id(cle, 2), "Sélection", sel, false),
         ];
+        if avec_pose {
+            l.insert(2, Pilule::nommee(cx, sub_id(cle, 5), "Pose", &icones::OS, pose, etroit));
+        }
+        let decal = avec_pose as usize;
         if self.selection == Selection::Boite {
             let mut p = Pilule::new(cx, sub_id(cle, 3), if self.boite_retire { "−" } else { "+" }, self.boite_retire);
             p.l = 44.0 * cx.dp;
@@ -3319,11 +4165,16 @@ impl App {
                 self.dire(m);
             }
         }
+        if avec_pose && appui == Some(2) {
+            return self.entrer_pose();
+        }
+        let appui = appui.map(|i| if avec_pose && i > 2 { i - 1 } else { i });
+        let base = base - decal;
         match appui {
             Some(0) => self.sortir_geometrie(),
             Some(1) => self.entrer_geometrie(),
             Some(2) => {
-                self.selection = match (self.selection, geo) {
+                self.selection = match (self.selection, edition) {
                     (Selection::Toucher, _) => Selection::Boite,
                     (Selection::Boite, true) => Selection::Chemin,
                     _ => Selection::Toucher,
@@ -3541,7 +4392,7 @@ impl App {
         let (nom, couleur) = if self.nom.is_empty() { ("Sans nom", coul(C::Secondaire)) } else { (self.nom.as_str(), coul(C::Texte)) };
         cx.text_at(f.x + 12.0 * d, f.cy(), nom, 17.0, couleur);
         cx.clip(None);
-        let faces: usize = self.projet.objets.iter().map(|o| o.maillage.faces.len()).sum();
+        let faces: usize = self.projet.objets.iter().filter(|o| o.armature.is_none()).map(|o| o.maillage.faces.len()).sum();
         let n = self.projet.objets.len();
         cx.text_at(f.x + 2.0 * d, f.bottom() + 17.0 * d, &format!("{n} objet{} · {faces} faces", if n > 1 { "s" } else { "" }), 14.0, coul(C::Secondaire));
         Self::sous_entete(cx, r, 84.0 * d)
@@ -3555,15 +4406,51 @@ impl App {
         self.cadre_panneau(cx, id("panneau-debut"), r, Side::Start, l.landscape);
         let corps = self.entete_projet(cx, r);
         let z = id("liste-objets");
+        // Un set ou des objets disparus, par une annulation, ramènent à la liste
+        let page = match self.page_liste.clone() {
+            PageListe::Set(n) if self.projet.set(&n).is_none() => PageListe::Objets,
+            PageListe::Deplacer(l) => {
+                let l: Vec<usize> = l.into_iter().filter(|k| *k < self.projet.objets.len()).collect();
+                if l.is_empty() { PageListe::Objets } else { PageListe::Deplacer(l) }
+            }
+            p => p,
+        };
+        self.page_liste = page.clone();
+        match page {
+            PageListe::Set(n) => {
+                let mut b = cx.body(sub_id(z, 1_000_001), corps, &self.scrolls);
+                self.page_set(cx, &mut b, &n);
+                return cx.body_end(b, &mut self.scrolls);
+            }
+            PageListe::Deplacer(l) => {
+                let mut b = cx.body(sub_id(z, 1_000_002), corps, &self.scrolls);
+                self.page_deplacer(cx, &mut b, &l);
+                return cx.body_end(b, &mut self.scrolls);
+            }
+            PageListe::Objets => {}
+        }
         let mut b = cx.body(z, corps, &self.scrolls);
         for e in 0..self.projet.sets.len() {
-            let nom = self.projet.sets[e].nom.clone();
-            let mut visible = self.projet.sets[e].visible;
-            cx.toggle(&mut b, sub_id(id("set"), e), &nom, &mut visible);
-            if self.projet.sets[e].visible != visible {
+            let (nom, visible, replie) = { let s = &self.projet.sets[e]; (s.nom.clone(), s.visible, s.replie) };
+            let membres = self.projet.objets.iter().filter(|o| o.set == nom).count();
+            let (plier, oeil, menu) = cx.tete_set(&mut b, sub_id(id("set"), e), &nom, membres, replie, visible);
+            if plier {
+                self.projet.sets[e].replie = !replie;
+                self.a_sauver = true;
+            }
+            if oeil {
+                self.projet.sets[e].visible = !visible;
                 self.visibilite_changee();
             }
-            self.projet.sets[e].visible = visible;
+            if menu {
+                self.page_liste = PageListe::Set(nom.clone());
+            }
+            if replie {
+                continue;
+            }
+            if membres == 0 {
+                cx.paragraph(&mut b, "Vide : un appui long sur un objet l'y déplace.");
+            }
             for k in 0..self.projet.objets.len() {
                 let o = &self.projet.objets[k];
                 if o.set != nom {
@@ -3572,13 +4459,163 @@ impl App {
                 let c = self.projet.materiau(&o.materiau).map_or(coul(C::Bordures), |m| octets_hex(&m.couleur));
                 let choisi = self.choix.contains(&k);
                 if cx.row(&mut b, sub_id(z, k), &o.nom, Some(c), choisi) {
-                    if self.travail.is_none() {
+                    if self.travail.is_none() && self.os.is_none() {
                         self.basculer_objet(k);
                     }
                 }
+                if cx.ui.long_press(sub_id(z, k)) {
+                    // Un objet de la sélection emmène les autres
+                    self.page_liste = PageListe::Deplacer(if choisi { self.choix.clone() } else { vec![k] });
+                }
             }
         }
+        if cx.button(&mut b, id("set-nouveau"), "Nouveau set") {
+            self.nouveau_set(&[]);
+        }
         cx.body_end(b, &mut self.scrolls);
+    }
+
+    /// Choix du set où ranger des objets.
+    fn page_deplacer(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, l: &[usize]) {
+        let titre = match l {
+            [k] => format!("DÉPLACER « {} » VERS", self.projet.objets[*k].nom.to_uppercase()),
+            _ => format!("DÉPLACER {} OBJETS VERS", l.len()),
+        };
+        cx.section(b, &titre);
+        for e in 0..self.projet.sets.len() {
+            let (nom, visible) = (self.projet.sets[e].nom.clone(), self.projet.sets[e].visible);
+            let la = l.iter().all(|k| self.projet.objets[*k].set == nom);
+            let texte = if visible { nom.clone() } else { format!("{nom} (masqué)") };
+            if cx.row(b, sub_id(id("set-vers"), e), &texte, None, la) {
+                self.deplacer_objets(l, &nom);
+                self.page_liste = PageListe::Objets;
+            }
+        }
+        if cx.button(b, id("set-vers-nouveau"), "Nouveau set") {
+            self.nouveau_set(l);
+        }
+        if cx.button(b, id("set-annuler"), "Annuler") {
+            self.page_liste = PageListe::Objets;
+        }
+    }
+
+    /// Nom d'un set, fusion et suppression. Le premier reste : il recueille les objets.
+    fn page_set(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, nom: &str) {
+        cx.section(b, "SET");
+        if cx.champ(b, id("set-nom"), "Nom", coul(C::Texte), nom) {
+            self.saisir(Champ::SetNom);
+        }
+        let premier = self.projet.sets[0].nom.clone();
+        if nom == premier {
+            cx.paragraph(b, "Le premier set reste toujours : il recueille les objets des sets retirés.");
+        } else {
+            let n = self.projet.objets.iter().filter(|o| o.set == nom).count();
+            cx.section(b, "FUSIONNER DANS");
+            for e in 0..self.projet.sets.len() {
+                let dans = self.projet.sets[e].nom.clone();
+                if dans != nom && cx.row(b, sub_id(id("set-dans"), e), &dans, None, false) {
+                    self.fusionner_set(nom, &dans);
+                }
+            }
+            cx.section(b, "SUPPRIMER");
+            if cx.button(b, id("set-seul"), &format!("Le set seul (objets vers « {premier} »)")) {
+                self.fusionner_set(nom, &premier);
+            }
+            if cx.button(b, id("set-tout"), &format!("Le set et ses {n} objet{}", if n > 1 { "s" } else { "" })) {
+                self.supprimer_set(nom);
+            }
+        }
+        if cx.button(b, id("set-retour"), "Retour") {
+            self.page_liste = PageListe::Objets;
+        }
+    }
+
+    /// Les objets rangés dans un set masqué quittent la sélection, comme à l'écran.
+    fn deplacer_objets(&mut self, l: &[usize], set: &str) {
+        let a: Vec<usize> = l.iter().copied().filter(|k| self.projet.objets[*k].set != set).collect();
+        if a.is_empty() || self.projet.set(set).is_none() {
+            return;
+        }
+        self.memoriser();
+        for &k in &a {
+            self.projet.objets[k].set = set.to_string();
+        }
+        self.apres_sets();
+        self.dire(match a[..] {
+            [k] => format!("« {} » → {set}", self.projet.objets[k].nom),
+            _ => format!("{} objets → {set}", a.len()),
+        });
+    }
+
+    /// Crée un set, y range les objets donnés, et ouvre sa page pour le nommer.
+    fn nouveau_set(&mut self, l: &[usize]) {
+        self.memoriser();
+        let nom = self.projet.nom_set_libre("set");
+        self.projet.sets.push(crate::projet::Set { nom: nom.clone(), visible: true, replie: false });
+        for &k in l {
+            self.projet.objets[k].set = nom.clone();
+        }
+        self.apres_sets();
+        self.page_liste = PageListe::Set(nom);
+    }
+
+    fn renommer_set(&mut self, ancien: &str, nom: &str) {
+        let nom = nom.trim();
+        if nom.is_empty() {
+            return self.dire("Nom vide".into());
+        }
+        if nom == ancien {
+            return;
+        }
+        if self.projet.set(nom).is_some() {
+            return self.dire("Ce nom est déjà pris".into());
+        }
+        self.memoriser();
+        for o in self.projet.objets.iter_mut().filter(|o| o.set == ancien) {
+            o.set = nom.to_string();
+        }
+        if let Some(e) = self.projet.sets.iter_mut().find(|e| e.nom == ancien) {
+            e.nom = nom.to_string();
+        }
+        self.page_liste = PageListe::Set(nom.to_string());
+        self.apres_sets();
+    }
+
+    /// Les objets de `de` passent dans `dans`, puis `de` disparaît.
+    fn fusionner_set(&mut self, de: &str, dans: &str) {
+        if self.projet.sets.first().is_some_and(|e| e.nom == de) {
+            return;
+        }
+        self.memoriser();
+        for o in self.projet.objets.iter_mut().filter(|o| o.set == de) {
+            o.set = dans.to_string();
+        }
+        self.projet.sets.retain(|e| e.nom != de);
+        self.page_liste = PageListe::Objets;
+        self.apres_sets();
+    }
+
+    /// Le set et ses objets. Repasse en mode Scène : ils peuvent être en cours d'édition.
+    fn supprimer_set(&mut self, nom: &str) {
+        if self.projet.sets.first().is_some_and(|e| e.nom == nom) {
+            return;
+        }
+        self.sortir_geometrie();
+        self.memoriser();
+        let l: Vec<usize> = (0..self.projet.objets.len()).filter(|k| self.projet.objets[*k].set == nom).collect();
+        self.retirer_objets(&l);
+        self.projet.sets.retain(|e| e.nom != nom);
+        self.page_liste = PageListe::Objets;
+        self.a_sauver = true;
+    }
+
+    fn apres_sets(&mut self) {
+        let p = &self.projet;
+        if self.travail.is_none() {
+            let choix: Vec<usize> = self.choix.iter().copied().filter(|k| p.affiche(&p.objets[*k])).collect();
+            self.choix = choix;
+        }
+        self.a_sauver = true;
     }
 
     fn panneau_fin(&mut self, cx: &mut Cx, l: &Layout) {
@@ -3621,10 +4658,19 @@ impl App {
                 }
                 cx.body_end(b, &mut self.scrolls);
             }
+            Contenu::Os => {
+                let titre = if self.os.as_ref().is_some_and(|e| e.pose) { "Pose" } else { "Os" };
+                cx.tabs(id("onglets-os"), onglets, &[titre], 0);
+                let mut b = cx.body(id("corps-os"), corps, &self.scrolls);
+                self.panneau_os(cx, &mut b);
+                cx.body_end(b, &mut self.scrolls);
+            }
             Contenu::Modifieurs => {
                 cx.tabs(id("onglets-modifieurs"), onglets, &["Modifieurs"], 0);
                 let mut b = cx.body(id("corps-modifieurs"), corps, &self.scrolls);
-                if self.travail.is_some() {
+                if self.os.is_some() {
+                    cx.paragraph(&mut b, "Une armature n'a pas de modifieurs. Revenez en mode Scène pour régler ceux des autres objets.");
+                } else if self.travail.is_some() {
                     cx.paragraph(&mut b, "Le mode Géométrie édite le maillage de base, sans ses modifieurs. Revenez en mode Scène pour les régler.");
                 } else {
                     self.panneau_modifs(cx, &mut b);
@@ -3632,12 +4678,14 @@ impl App {
                 cx.body_end(b, &mut self.scrolls);
             }
             Contenu::Contexte => {
-                let geo = self.travail.is_some();
-                self.onglet_contexte = cx.tabs(id("onglets-contexte"), onglets, &[if geo { "Géométrie" } else { "Objet" }, "Dernière opération"], self.onglet_contexte);
+                let (geo, os) = (self.travail.is_some(), self.os.is_some());
+                self.onglet_contexte = cx.tabs(id("onglets-contexte"), onglets, &[if os { "Armature" } else if geo { "Géométrie" } else { "Objet" }, "Dernière opération"], self.onglet_contexte);
                 let mut b = cx.body(sub_id(id("corps-contexte"), self.onglet_contexte), corps, &self.scrolls);
                 match self.onglet_contexte {
                     ONGLET_DERNIERE => self.reglages_derniere(cx, &mut b),
+                    _ if os => self.fiche_os(cx, &mut b),
                     _ if geo => self.fiche_geo(cx, &mut b),
+                    _ if self.liaison.is_some() => self.page_liaison(cx, &mut b),
                     _ => self.fiche(cx, &mut b),
                 }
                 cx.body_end(b, &mut self.scrolls);
@@ -3669,6 +4717,8 @@ impl App {
                 cx.section(&mut b, "GÉOMÉTRIE");
                 cx.paragraph(&mut b, "Un double appui sur un objet l'édite, avec les autres objets choisis. Les icônes de sommet, d'arête et de face, en haut, disent ce qui se touche : un appui bref garde ce type seul, un appui long l'ajoute ou le retire.");
                 cx.paragraph(&mut b, "Glisser depuis la sélection ou la poignée la transforme. Contexte › Géométrie regroupe les opérations. Le bouton de sélection, en haut, passe de Toucher à Boîte, qui trace un cadre, puis à Chemin, qui relie deux éléments.");
+                cx.section(&mut b, "ARMATURES");
+                cx.paragraph(&mut b, "La géométrie d'une armature, ce sont ses os : la pilule Géométrie, l'action Éditer la géométrie ou un double appui sur une armature ouvrent ce mode sur elle. Quand une armature est active, la pilule Pose apparaît : les os y tournent autour de leur tête, et le panneau Os ne garde que ce qui sert à la pose ; en mode Scène, il montre l'armature active, ses objets liés, ses poids, et la remet au repos. Les autres objets sont estompés et inertes. Un appui sur un bout, tête ou queue, le prend avec ce qui lui est soudé ; un appui sur le corps d'un os prend ses deux bouts ; un appui long les prend seuls. Glisser depuis la sélection ou la poignée déplace les bouts, et les enfants restent en place. Le panneau Os, sous sa pastille, regroupe l'os actif, les opérations et l'arbre des os ; Contexte › Armature donne la position des bouts choisis.");
                 cx.section(&mut b, "DERNIÈRE OPÉRATION");
                 cx.paragraph(&mut b, "Contexte › Dernière opération récapitule la dernière transformation au doigt ou la dernière opération réglable. Changer une valeur la refait depuis l'état d'avant, sans ajouter d'étape d'annulation. Elle disparaît à la modification suivante ou à l'annulation.");
                 cx.section(&mut b, "BARRE RAPIDE");
@@ -3680,7 +4730,7 @@ impl App {
                 cx.section(&mut b, "OUVRIR UN PROJET");
                 cx.paragraph(&mut b, "Depuis un gestionnaire de fichiers : Ouvrir avec, ou Partager, puis Rustcraft. Les formats .gda, OBJ, STL et GLB sont lus. La pastille Fichier réunit Projet, Importer et Exporter ; l'export prend la scène complète ou les seuls objets choisis.");
                 cx.section(&mut b, "ÉTAT DU PORTAGE");
-                cx.paragraph(&mut b, "Modes Scène et Géométrie, modifieurs booléen et répétition, visserie. Armatures conservées, ni affichées ni appliquées.");
+                cx.paragraph(&mut b, "Modes Scène, Géométrie et Armature, modifieurs booléen et répétition, visserie. Poses, contraintes et liaison des pièces des armatures conservées dans le projet, pas encore éditables.");
                 cx.body_end(b, &mut self.scrolls);
             }
         }
@@ -3721,7 +4771,7 @@ impl App {
             }
         }
         self.operations(cx, b, Menu::Vue);
-        if !geo {
+        if !geo && self.os.is_none() {
             self.operations(cx, b, Menu::Scene);
         }
     }
@@ -3729,9 +4779,13 @@ impl App {
     /// Boutons d'un menu du catalogue, par rubrique, grisés quand ils ne s'appliquent
     /// pas. L'action attend la fin de la liste : elle peut changer ce qui s'y affiche.
     fn operations(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, menu: Menu) {
+        self.operations_si(cx, b, menu, |_| true);
+    }
+
+    fn operations_si(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, menu: Menu, garder: impl Fn(A) -> bool) {
         let c = self.contexte();
         let (mut rubrique, mut choisie) = ("", None);
-        for o in actions::du_menu(menu) {
+        for o in actions::du_menu(menu).into_iter().filter(|o| garder(o.action)) {
             if o.rubrique != rubrique {
                 rubrique = o.rubrique;
                 cx.section(b, &rubrique.to_uppercase());
@@ -3762,9 +4816,25 @@ impl App {
             choisis: self.choix.len(),
             affiches: self.affiches().len(),
             echelle: self.choix.iter().any(|k| p.objets[*k].armature.is_none() && p.objets[*k].echelle != [1.0; 3]),
-            editable: p.actif.and_then(|k| p.objets.get(k)).is_some_and(|o| o.armature.is_none()),
+            editable: p.actif.is_some_and(|k| k < p.objets.len()),
             ..Default::default()
         };
+        c.liables = p.objets.iter().any(|o| o.armature.is_some()) && self.choix.iter().any(|k| p.objets[*k].armature.is_none());
+        c.lies = self.choix.iter().any(|k| p.objets[*k].liaison.is_some());
+        c.os = self.os.is_some();
+        if let Some((e, _, a)) = self.armature_os() {
+            let choisis = e.os_choisis(a);
+            c.os_ouvert = true;
+            c.pose = e.pose;
+            c.posee = !a.pose.is_empty();
+            c.bouts = e.bouts.len();
+            c.os_choisis = choisis.len();
+            c.queues = e.queues_choisies(a).len();
+            c.os_actif = e.actif.is_some();
+            c.os_enfants = e.actif.as_ref().is_some_and(|i| a.enfants(Some(i)).next().is_some());
+            c.rattachables = choisis.iter().any(|i| Some(i) != e.actif.as_ref());
+            c.attaches = choisis.iter().any(|i| a.trouver(i).is_some_and(|b| b.parent.is_some()));
+        }
         if let Some(t) = &self.travail {
             c.sommets = t.sel.sommets.len();
             c.aretes = t.sel.aretes.len();
@@ -4004,6 +5074,10 @@ impl App {
             A::EffacerCoutures => self.operer(|t| t.marquer_coutures(false)),
             A::CouturesDepuisUv => self.coutures_depuis_uv(),
             A::Deplier => self.deplier(),
+            A::DeplacerSet => {
+                self.page_liste = PageListe::Deplacer(self.choix.clone());
+                self.shell.start.open = true;
+            }
             A::EditerUv => self.basculer(Contenu::Uv),
             A::ProjeterVue => {
                 let (_, droite, haut, _) = self.repere();
@@ -4022,7 +5096,20 @@ impl App {
             A::Dupliquer => self.dupliquer(),
             A::Supprimer => self.supprimer(),
             A::AppliquerEchelle => self.appliquer_echelle(),
+            A::LierArmature => self.ouvrir_liaison(),
+            A::Delier => self.delier(),
             A::EditerGeometrie => self.entrer_geometrie(),
+            A::AjouterArmature => self.ajouter_armature("armature", Armature::nouvelle()),
+            A::AjouterHumanoide => self.ajouter_armature("humanoide", Armature::humanoide()),
+            A::AjouterOs => self.ajouter_os(),
+            A::ExtruderOs => self.extruder_os(),
+            A::SupprimerOs => self.supprimer_os(),
+            A::ParenterOs => self.parenter_os(),
+            A::DetacherOs => self.detacher_os(),
+            A::TousOs => self.tous_os(true),
+            A::AucunOs => self.tous_os(false),
+            A::DescendantsOs => self.descendants_os(),
+            A::ReposOs => self.repos_os(),
             A::CreerFace => self.operer(Travail::creer_face),
             A::Inverser => self.operer(Travail::inverser),
             A::Trianguler => self.operer(Travail::trianguler),
@@ -4163,6 +5250,157 @@ impl App {
         }
     }
 
+    /// Fiche de la sélection en mode Armature : où sont les bouts choisis.
+    fn fiche_os(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        let Some((e, _, a)) = self.armature_os() else {
+            return cx.paragraph(b, "Aucune armature ouverte.");
+        };
+        let (nb, n) = (a.os.len(), e.os_choisis(a).len());
+        cx.paragraph(b, &format!("{nb} os · {n} choisi{}", if n > 1 { "s" } else { "" }));
+        let (pose, pts) = (e.pose, self.points());
+        if pose {
+            cx.paragraph(b, "En pose : les os tournent autour de leur tête.");
+        } else if !pts.is_empty() {
+            self.champs(cx, b, "Position", id("c-pos"), ed::centre(&pts), Champ::Position);
+        }
+        self.reglages_pas(cx, b);
+    }
+
+    /// Panneau Os : l'os actif, les opérations, l'arbre des os.
+    fn panneau_os(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        if self.os.is_none() {
+            return self.panneau_os_scene(cx, b);
+        }
+        cx.section(b, "ARMATURES");
+        let ouverte = self.os.as_ref().and_then(|e| e.objet);
+        let liste: Vec<(usize, String)> = self.affiches().into_iter().filter(|k| self.projet.objets[*k].armature.is_some()).map(|k| (k, self.projet.objets[k].nom.clone())).collect();
+        for (k, nom) in liste {
+            if cx.row(b, sub_id(id("os-armature"), k), &nom, None, ouverte == Some(k)) && ouverte != Some(k) {
+                self.ouvrir_armature(k);
+            }
+        }
+        // En pose, on pose : les ajouts restent au repos et en Scène
+        let pose = self.os.as_ref().is_some_and(|e| e.pose);
+        if !pose && cx.bouton(b, id("os-nouvelle"), "Nouvelle armature", true) {
+            self.agir(A::AjouterArmature);
+        }
+        if !pose && cx.bouton(b, id("os-humanoide"), "Nouvel humanoïde", true) {
+            self.agir(A::AjouterHumanoide);
+        }
+        let Some((e, o, a)) = self.armature_os() else {
+            return cx.paragraph(b, "Ajoutez une armature sur le curseur 3D, ou touchez-en une, ici ou dans la vue.");
+        };
+        let (e, a, echelle) = (e.clone(), a.clone(), o.echelle[0]);
+        if e.pose {
+            let n = a.os.iter().filter(|x| a.pose.get(&x.id).is_some()).count();
+            cx.paragraph(b, &match n { 0 => "Au repos : touchez un os, puis tournez-le.".to_string(), 1 => "1 os posé.".to_string(), n => format!("{n} os posés.") });
+        }
+        cx.toggle(b, id("os-poids"), "Poids de l'os actif", &mut self.voir_poids);
+        if self.voir_poids {
+            cx.paragraph(b, if self.calcul_peau.is_some() { "Calcul des poids…" } else if e.actif.is_some() { "Bleu : aucun effet · rouge : plein effet de l'os actif." } else { "Touchez un os pour voir ses poids." });
+        }
+        cx.section(b, "OS ACTIF");
+        let actif = e.actif.as_ref().and_then(|i| a.trouver(i));
+        if let Some(x) = actif {
+            if e.pose {
+                cx.paragraph(b, &x.nom);
+            } else if cx.champ(b, id("os-nom"), "Nom", coul(C::Texte), &x.nom) {
+                self.saisir(Champ::OsNom);
+            }
+            let parent = x.parent.as_ref().and_then(|p| a.trouver(p)).map_or(AUCUN_PARENT, |p| p.nom.as_str());
+            if !e.pose && cx.champ(b, id("os-parent"), "Parent", coul(C::Texte), parent) {
+                self.parents_ouverts = !self.parents_ouverts;
+            }
+            if self.parents_ouverts && !e.pose {
+                let exclus = a.descendants(&x.id);
+                if cx.row(b, id("os-sans-parent"), AUCUN_PARENT, None, x.parent.is_none()) {
+                    self.changer_parent_os(&x.id, None);
+                }
+                for (k, p) in a.os.iter().enumerate().filter(|(_, p)| p.id != x.id && !exclus.contains(&p.id)) {
+                    if cx.row(b, sub_id(id("os-parent-de"), k), &p.nom, None, x.parent.as_ref() == Some(&p.id)) {
+                        self.changer_parent_os(&x.id, Some(&p.id));
+                    }
+                }
+            }
+            if !e.pose && cx.champ(b, id("os-longueur"), "Longueur", coul(C::Texte), &chiffres(x.longueur * echelle)) {
+                self.saisir(Champ::OsLongueur);
+            }
+        } else {
+            cx.paragraph(b, "Touchez un os, ici ou dans la vue, pour le régler.");
+        }
+        // Chaque mode ne montre que ses opérations : le repos les os, la pose leur retour au repos
+        self.operations_si(cx, b, Menu::Os, |a| actions::du_mode_pose(a).is_none_or(|p| p == e.pose));
+        cx.section(b, "ARBRE DES OS");
+        for (k, x) in a.ordre().into_iter().enumerate() {
+            let nom = format!("{}{}", "    ".repeat(a.profondeur(&x.id)), x.nom);
+            if cx.row(b, sub_id(id("os-rang"), k), &nom, None, e.actif.as_ref() == Some(&x.id)) {
+                if let Some(s) = &mut self.os {
+                    s.actif = Some(x.id.clone());
+                    s.selectionner(&a, std::slice::from_ref(&x.id), false);
+                }
+            }
+        }
+    }
+
+    /// Panneau Os en mode Scène : l'armature active, sa pose, ses poids et ses os.
+    fn panneau_os_scene(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        cx.section(b, "ARMATURES");
+        let actif = self.projet.actif.filter(|k| self.projet.objets.get(*k).is_some_and(|o| o.armature.is_some()));
+        let liste: Vec<(usize, String)> = self.affiches().into_iter().filter(|k| self.projet.objets[*k].armature.is_some()).map(|k| (k, self.projet.objets[k].nom.clone())).collect();
+        for (k, nom) in liste {
+            if cx.row(b, sub_id(id("os-armature"), k), &nom, None, actif == Some(k)) && actif != Some(k) {
+                self.projet.actif = Some(k);
+                self.choix = vec![k];
+            }
+        }
+        if cx.bouton(b, id("os-nouvelle"), "Nouvelle armature", true) {
+            self.agir(A::AjouterArmature);
+        }
+        if cx.bouton(b, id("os-humanoide"), "Nouvel humanoïde", true) {
+            self.agir(A::AjouterHumanoide);
+        }
+        let Some(k) = actif else {
+            return cx.paragraph(b, "Touchez une armature, ici ou dans la vue, pour voir ses réglages.");
+        };
+        let o = &self.projet.objets[k];
+        let Some(a) = o.armature.clone() else { return };
+        let (nom, id_a) = (o.nom.clone(), o.id.clone());
+        cx.section(b, &nom.to_uppercase());
+        let lies = self.projet.objets.iter().filter(|x| x.liaison.as_ref().is_some_and(|l| l.armature == id_a)).count();
+        let poses = a.os.iter().filter(|x| a.pose.get(&x.id).is_some()).count();
+        cx.paragraph(b, &format!(
+            "{} os · {} · {}",
+            a.os.len(),
+            match lies { 0 => "aucun objet lié".to_string(), 1 => "1 objet lié".to_string(), n => format!("{n} objets liés") },
+            match poses { 0 => "au repos".to_string(), 1 => "1 os posé".to_string(), n => format!("{n} os posés") },
+        ));
+        if cx.champ(b, id("os-armature-nom"), "Nom", coul(C::Texte), &nom) {
+            self.choix = vec![k];
+            self.saisir(Champ::Nom);
+        }
+        match cx.rangee(b, id("os-scene-actions"), &[("Éditer les os", true), ("Tout au repos", poses > 0)]) {
+            Some(0) => {
+                self.choix = vec![k];
+                self.entrer_geometrie();
+                return;
+            }
+            Some(1) => self.repos_armature(k),
+            _ => {}
+        }
+        cx.toggle(b, id("os-poids"), "Poids de l'os actif", &mut self.voir_poids);
+        let os_actif = self.os_scene.as_ref().filter(|(x, _)| *x == id_a).map(|(_, x)| x.clone()).filter(|x| a.trouver(x).is_some());
+        if self.voir_poids {
+            cx.paragraph(b, if self.calcul_peau.is_some() { "Calcul des poids…" } else if os_actif.is_some() { "Bleu : aucun effet · rouge : plein effet de l'os actif." } else { "Touchez un os de l'arbre pour voir ses poids." });
+        }
+        cx.section(b, "ARBRE DES OS");
+        for (r, x) in a.ordre().into_iter().enumerate() {
+            let nom = format!("{}{}", "    ".repeat(a.profondeur(&x.id)), x.nom);
+            if cx.row(b, sub_id(id("os-rang"), r), &nom, None, os_actif.as_ref() == Some(&x.id)) {
+                self.os_scene = Some((id_a.clone(), x.id.clone()));
+            }
+        }
+    }
+
     /// Fiche de la sélection en mode Géométrie : les opérations par type d'élément.
     fn fiche_geo(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
         let Some(t) = &self.travail else { return };
@@ -4196,6 +5434,78 @@ impl App {
     }
 
     /// Fiche de la sélection.
+    /// Page « Lier à une armature » : l'armature, puis ses os à cocher.
+    fn page_liaison(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        let l = self.cibles_liaison();
+        let (Some(mut page), false) = (self.liaison.clone(), l.is_empty()) else {
+            self.liaison = None;
+            return self.fiche(cx, b);
+        };
+        let p = &self.projet;
+        let titre = if let [k] = l[..] { p.objets[k].nom.clone() } else { format!("{} objets", l.len()) };
+        cx.section(b, &format!("LIER {}", titre.to_uppercase()));
+        let armatures: Vec<(&Objet, &Armature)> = p.objets.iter().filter_map(|o| Some((o, o.armature.as_ref()?))).collect();
+        for (k, (o, a)) in armatures.iter().enumerate() {
+            let choisie = page.armature.as_ref() == Some(&o.id);
+            if cx.row(b, sub_id(id("liaison-armature"), k), &o.nom, None, choisie) && !choisie {
+                page.armature = Some(o.id.clone());
+                page.os = a.os.iter().map(|x| x.id.clone()).collect();
+            }
+        }
+        let armature = page.armature.as_ref().and_then(|i| armatures.iter().find(|(o, _)| o.id == *i)).map(|(_, a)| *a);
+        // Au-dessus de l'arbre : un humanoïde a 19 os
+        let pret = armature.is_some_and(|a| page.os.iter().any(|i| a.trouver(i).is_some()));
+        let fin = cx.rangee(b, id("liaison-fin"), &[("Lier", pret), ("Annuler", true)]);
+        if let Some(a) = armature {
+            page.os.retain(|i| a.trouver(i).is_some());
+            cx.paragraph(b, &match page.os.len() {
+                0 => "Touchez les os à lier.".to_string(),
+                1 => "Lié à cet os seul, l'objet le suivra rigidement.".to_string(),
+                n => format!("Les sommets se répartiront entre ces {n} os."),
+            });
+            cx.section(b, "OS");
+            match cx.rangee(b, id("liaison-tous"), &[("Tous les os", page.os.len() < a.os.len()), ("Aucun", !page.os.is_empty())]) {
+                Some(0) => page.os = a.os.iter().map(|x| x.id.clone()).collect(),
+                Some(1) => page.os.clear(),
+                _ => {}
+            }
+            for (k, x) in a.ordre().into_iter().enumerate() {
+                let coche = page.os.contains(&x.id);
+                let nom = format!("{}{}", "    ".repeat(a.profondeur(&x.id)), x.nom);
+                if cx.row(b, sub_id(id("liaison-os"), k), &nom, None, coche) {
+                    if coche {
+                        page.os.retain(|i| *i != x.id);
+                    } else {
+                        page.os.push(x.id.clone());
+                    }
+                }
+            }
+        } else {
+            cx.paragraph(b, "Choisissez une armature.");
+        }
+        self.liaison = Some(page);
+        match fin {
+            Some(0) => self.lier(),
+            Some(1) => self.liaison = None,
+            _ => {}
+        }
+    }
+
+    /// Ce qui relie un objet à une armature, pour sa fiche.
+    fn texte_liaison(&self, o: &Objet) -> Option<String> {
+        let p = &self.projet;
+        if o.armature.is_some() {
+            let n = p.objets.iter().filter(|x| x.liaison.as_ref().is_some_and(|l| l.armature == o.id)).count();
+            return (n > 0).then(|| format!("{n} objet{} lié{}.", if n > 1 { "s" } else { "" }, if n > 1 { "s" } else { "" }));
+        }
+        let l = o.liaison.as_ref()?;
+        let x = p.objet_id(&l.armature)?;
+        Some(match (&l.os[..], &x.armature) {
+            ([i], Some(a)) => format!("Lié à « {} », os {}.", x.nom, a.trouver(i)?.nom),
+            _ => format!("Lié à « {} », {} os.", x.nom, l.os.len()),
+        })
+    }
+
     fn fiche(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
         let pts = self.points();
         if pts.is_empty() {
@@ -4207,7 +5517,13 @@ impl App {
             if let Some(k) = self.seul() {
                 let o = &self.projet.objets[k];
                 let (s, f, mat, nom) = (o.maillage.sommets.len(), o.maillage.faces.len(), o.materiau.clone(), o.nom.clone());
-                cx.paragraph(b, &format!("{s} sommets · {f} faces · matériau {mat}"));
+                match &o.armature {
+                    Some(a) => cx.paragraph(b, &format!("Armature de {} os. Un double appui l'édite.", a.os.len())),
+                    None => cx.paragraph(b, &format!("{s} sommets · {f} faces · matériau {mat}")),
+                }
+                if let Some(t) = self.texte_liaison(&self.projet.objets[k]) {
+                    cx.paragraph(b, &t);
+                }
                 if cx.champ(b, id("c-nom"), "Nom", coul(C::Texte), &nom) {
                     self.saisir(Champ::Nom);
                 }
@@ -4219,9 +5535,17 @@ impl App {
                 let base = self.base(k);
                 self.champs(cx, b, "Rotation", id("c-rot"), rot, Champ::Rotation);
                 self.champs(cx, b, "Dimensions", id("c-dim"), [0, 1, 2].map(|c| base[c] * ech[c]), Champ::Dimension);
-                let o = &self.projet.objets[k];
-                if o.armature.is_some() {
-                    cx.paragraph(b, "Armature conservée, pas encore affichée.");
+                if let Some(a) = &self.projet.objets[k].armature {
+                    let mut d = a.devant();
+                    cx.toggle(b, id("armature-devant"), "Au premier plan", &mut d);
+                    if d != a.devant() {
+                        self.memoriser();
+                        if let Some(a) = &mut self.projet.objets[k].armature {
+                            a.regler_devant(d);
+                        }
+                        self.a_sauver = true;
+                        self.dire(if d { "Armature vue à travers les objets, en mode Scène" } else { "Armature cachée par les objets placés devant" }.into());
+                    }
                 }
                 let mut v = self.projet.objets[k].visible;
                 cx.toggle(b, id("objet-visible"), "Visible", &mut v);
@@ -4260,17 +5584,20 @@ impl App {
     }
 
     fn couleurs(&self, k: usize, o: &Objet) -> ([f32; 3], [f32; 3], f32) {
-        if self.travail.is_some() {
+        if self.os.as_ref().is_some_and(|e| e.objet == Some(k) || (e.objet.is_none() && o.armature.is_some())) {
+            return (lin_octets(coul(C::Armature)), [0.0; 3], 1.0);
+        }
+        if self.travail.is_some() || self.os.is_some() {
             return (lin_octets(coul(C::Face)), [0.0; 3], OPACITE_PASSIF);
         }
-        if self.rendu == Rendu::Jeu {
+        if self.rendu == Rendu::Jeu && o.armature.is_none() {
             let defaut = Materiau::neuf(None);
             let m = self.projet.materiau(&o.materiau).unwrap_or(&defaut);
             // Illumination 0 : couleur plate, sans lumière.
             return if m.illumination == 0.0 { ([0.0; 3], lin_hex(&m.couleur), m.opacite as f32) } else { (lin_hex(&m.couleur), lin_hex(&m.emission), m.opacite as f32) };
         }
         let c = if !self.choix.contains(&k) {
-            coul(C::Objet)
+            coul(if o.armature.is_some() { C::Armature } else { C::Objet })
         } else if self.projet.actif == Some(k) {
             coul(C::ObjetActif)
         } else {
@@ -4298,6 +5625,10 @@ impl App {
                 images.push((id, texture::damier()));
                 continue;
             }
+            if id == texture::RAMPE {
+                images.push((id, texture::rampe()));
+                continue;
+            }
             let t = &self.projet.textures[&id];
             let nom = t.nom.clone();
             match texture::decoder(&t.octets) {
@@ -4308,7 +5639,7 @@ impl App {
                 Err(e) => self.dire(format!("Texture illisible : {nom} ({e})")),
             }
         }
-        let retraits: Vec<String> = self.images_vues.iter().filter(|id| *id != texture::DAMIER && !self.projet.textures.contains_key(*id)).cloned().collect();
+        let retraits: Vec<String> = self.images_vues.iter().filter(|id| *id != texture::DAMIER && *id != texture::RAMPE && !self.projet.textures.contains_key(*id)).cloned().collect();
         for id in &retraits {
             self.images_vues.remove(id);
         }
@@ -4318,6 +5649,7 @@ impl App {
     fn scene(&mut self, dp: f32, w: Rect) -> Scene {
         self.avancer_calculs();
         self.avancer_ajout();
+        self.avancer_peaux();
         let (v, p) = self.matrices(w);
         let (oeil, droite, haut, dos) = self.repere();
         let l = if self.rendu == Rendu::Jeu { SOLEIL } else { [0, 1, 2].map(|k| droite[k] * LAMPE[0] + haut[k] * LAMPE[1] + dos[k] * LAMPE[2]) };
@@ -4326,32 +5658,45 @@ impl App {
         let (mut ajouts, mut vus) = (Vec::new(), HashSet::new());
         let mut besoin = HashSet::new();
         let cibles = modifs::cibles(&self.projet);
+        let mut poids_vus = HashSet::new();
         for k in self.affiches() {
             if self.travail.as_ref().is_some_and(|t| t.edites.contains(&k)) {
                 continue;
             }
-            let o = &self.projet.objets[k];
-            let m = o.matrice();
-            let (albedo, emission, opacite) = self.couleurs(k, o);
+            let m = self.objet_vu(k).matrice();
             let vu = self.maillage_vu(k);
+            let poids = self.vue_poids(k, &vu);
+            let o = &self.projet.objets[k];
+            let (albedo, emission, opacite) = if poids.is_some() { ([1.0; 3], [0.0; 3], 1.0) } else { self.couleurs(k, o) };
+            let colore = poids.is_some();
+            let vu = poids.unwrap_or(vu);
             let cle = Arc::as_ptr(&vu) as usize;
-            let contour = self.travail.is_none() && self.choix.contains(&k);
+            let contour = self.travail.is_none() && self.os.is_none() && self.choix.contains(&k);
             // Comme la couleur des matériaux : en rendu En jeu seulement
-            let texture = if self.rendu == Rendu::Jeu && self.travail.is_none() { self.projet.texture_de(o).cloned() } else { None };
+            let texture = if colore {
+                poids_vus.insert(o.id.clone());
+                Some(texture::RAMPE.to_string())
+            } else if self.rendu == Rendu::Jeu && self.travail.is_none() && self.os.is_none() {
+                self.projet.texture_de(o).cloned()
+            } else {
+                None
+            };
             besoin.extend(texture.clone());
-            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&m), normale: vue::mat_normale(&m), albedo, emission, opacite, contour, filaire: cibles.contains(&k), texture, envers: None });
+            let devant = self.devant(k);
+            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&m), normale: vue::mat_normale(&m), albedo, emission, opacite, contour, filaire: cibles.contains(&k), texture, envers: None, devant });
             vus.insert(cle);
             if !self.connus.contains_key(&cle) {
                 ajouts.push((cle, vue::tampons(&vu)));
                 self.connus.insert(cle, vu);
             }
         }
+        self.vues_poids.retain(|i, _| poids_vus.contains(i));
         // Aperçu de la primitive en cours d'ajout : comme un objet choisi, sur le curseur
         if let Some(m) = self.ajout.as_ref().and_then(|a| a.apercu.clone()) {
             let cle = Arc::as_ptr(&m) as usize;
             let c = self.projet.curseur;
             let mx = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, c[0], c[1], c[2], 1.0];
-            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&mx), normale: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], albedo: lin_octets(coul(C::ObjetActif)), emission: [0.0; 3], opacite: 1.0, contour: true, filaire: false, texture: None, envers: None });
+            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&mx), normale: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], albedo: lin_octets(coul(C::ObjetActif)), emission: [0.0; 3], opacite: 1.0, contour: true, filaire: false, texture: None, envers: None, devant: false });
             vus.insert(cle);
             if !self.connus.contains_key(&cle) {
                 ajouts.push((cle, vue::tampons(&m)));
@@ -4398,6 +5743,13 @@ impl App {
 
     /// Copie de travail vers le rendu : faces, fil et points, seulement s'ils ont changé.
     fn vue_geo(&mut self, objets: &mut Vec<ObjetVue>, ajouts: &mut Vec<(usize, Tampons)>, retraits: &mut Vec<usize>) -> Option<GeoVue> {
+        if self.os.is_some() {
+            let g = self.vue_os();
+            if g.is_none() {
+                self.version_geo = None;
+            }
+            return g;
+        }
         let Some(t) = &self.travail else {
             if self.version_geo.take().is_some() {
                 retraits.extend([CLE_FACES, CLE_CHOISIES]);
@@ -4415,7 +5767,7 @@ impl App {
                 (Some(_), false) => [1.0; 3],
                 (Some(_), true) => lin_octets(c).map(|x| 0.7 + 0.3 * x),
             };
-            objets.push(ObjetVue { tampon: cle, modele, normale: id3, albedo, emission: [0.0; 3], opacite, contour: false, filaire: false, texture: image.clone(), envers: Some(lin_octets(coul(C::Envers))) });
+            objets.push(ObjetVue { tampon: cle, modele, normale: id3, albedo, emission: [0.0; 3], opacite, contour: false, filaire: false, texture: image.clone(), envers: Some(lin_octets(coul(C::Envers))), devant: false });
         }
         if self.version_geo == Some(t.version) {
             return Some(GeoVue { maj: None, rayons: self.rayons });
@@ -4470,6 +5822,38 @@ impl App {
         }
         Some(GeoVue { maj: Some(g), rayons: self.rayons })
     }
+}
+
+/// Pose de l'armature d'un objet : ses os de départ, avec ces bouts transformés au monde.
+/// Les os tels qu'on les voit et les touche.
+fn segments_os(e: &EditionOs, a: &Armature) -> Segments {
+    if e.pose { a.segments_pose() } else { a.segments() }
+}
+
+/// Tourne les os choisis depuis `depart`, chacun autour de sa tête.
+fn poser_os(o: &mut Objet, e: &EditionOs, depart: &Pose, v: Transfo) {
+    let Transfo::Rotation { q, .. } = v else { return };
+    let (r, ri) = (o.rotation, ed::qinv(ed::qnorm(o.rotation)));
+    let Some(a) = &mut o.armature else { return };
+    a.pose = depart.clone();
+    let l = e.racines(a);
+    a.tourner(&l, ed::qnorm(ed::qmul(ri, ed::qmul(q, r))));
+    o.maillage = Arc::new(a.enveloppe_pose());
+}
+
+fn poser_bouts(o: &mut Objet, bouts: &[Bout], depart: &Segments, v: Transfo) {
+    let mx = o.matrice();
+    let mut table = depart.clone();
+    for b in bouts {
+        if let Some(s) = table.get_mut(&b.os) {
+            let p = if b.queue { &mut s.queue } else { &mut s.tete };
+            *p = geo::vers_local(o, ed::transformer(vue::appliquer(&mx, *p), v));
+        }
+    }
+    let Some(mut a) = o.armature.take() else { return };
+    a.appliquer_segments(&table);
+    o.maillage = Arc::new(a.enveloppe());
+    o.armature = Some(a);
 }
 
 /// Nombre pour un champ : trois décimales au plus, sans zéros inutiles.
@@ -5323,7 +6707,7 @@ mod tests {
     fn la_pastille_fichier_ouvre_son_panneau_puis_le_ferme() {
         let mut b = Banc::pret();
         let w = b.app.espace;
-        let (x, y) = (w.x + (14.0 + 4.0 * (52.0 + 10.0) + 26.0) * 1.5, w.y + (14.0 + 26.0) * 1.5);
+        let (x, y) = (w.x + (14.0 + 5.0 * (52.0 + 10.0) + 26.0) * 1.5, w.y + (14.0 + 26.0) * 1.5);
         b.appui(x, y);
         assert!(b.app.shell.end.open && b.app.contenu == Contenu::Fichier);
         b.images(30);
@@ -6371,6 +7755,175 @@ mod tests {
         b.app.travail.as_ref().unwrap().m.faces.iter().map(|f| f.uv.clone()).collect()
     }
 
+    /// Trois objets, deux sets, la liste ouverte.
+    fn banc_sets() -> Banc {
+        let mut b = Banc::pret();
+        let mut p = Projet::neuf();
+        let o = p.objets[0].clone();
+        for n in ["b", "c"] {
+            let mut x = o.clone();
+            x.nom = n.into();
+            p.objets.push(x);
+        }
+        p.objets[0].nom = "a".into();
+        p.objets[2].set = "décor".into();
+        p.sets.push(crate::projet::Set { nom: "décor".into(), visible: true, replie: false });
+        b.app.remplacer(p, "");
+        b.app.shell.start.open = true;
+        b.images(40);
+        b
+    }
+
+    fn tenir(b: &mut Banc, z: Rect) {
+        b.ui.event(Event::Down { id: 0, x: z.cx(), y: z.cy() }, 0.0);
+        b.images(1);
+        b.image(0.6);
+        b.images(2);
+        b.ui.event(Event::Up { id: 0 }, 0.7);
+        b.images(2);
+    }
+
+    fn sets_de(b: &Banc) -> Vec<String> {
+        b.app.projet.objets.iter().map(|o| o.set.clone()).collect()
+    }
+
+    fn touche(b: &mut Banc, z: Id) {
+        let r = b.ui.zone(z).expect("zone");
+        b.appui(r.cx(), r.cy());
+        b.images(3);
+    }
+
+    #[test]
+    fn un_appui_long_deplace_l_objet_vers_un_set_et_s_annule() {
+        let mut b = banc_sets();
+        let r = b.ui.zone(sub_id(id("liste-objets"), 0)).unwrap();
+        tenir(&mut b, r);
+        assert_eq!(b.app.page_liste, PageListe::Deplacer(vec![0]));
+        assert!(b.app.choix.is_empty(), "l'appui long ne choisit pas");
+        touche(&mut b, sub_id(id("set-vers"), 1));
+        assert_eq!(sets_de(&b)[0], "décor");
+        assert_eq!(b.app.page_liste, PageListe::Objets);
+        b.app.annuler();
+        assert_eq!(sets_de(&b)[0], crate::projet::SET_DEFAUT);
+    }
+
+    #[test]
+    fn la_selection_se_deplace_ensemble_et_son_propre_set_ne_fait_rien() {
+        let mut b = banc_sets();
+        b.app.choix = vec![0, 1];
+        b.images(2);
+        let r = b.ui.zone(sub_id(id("liste-objets"), 1)).unwrap();
+        tenir(&mut b, r);
+        assert_eq!(b.app.page_liste, PageListe::Deplacer(vec![0, 1]));
+        let n = b.app.histoire.annuler.len();
+        touche(&mut b, sub_id(id("set-vers"), 0));
+        assert_eq!(b.app.histoire.annuler.len(), n);
+        b.app.agir(crate::actions::Action::DeplacerSet);
+        b.images(30);
+        touche(&mut b, sub_id(id("set-vers"), 1));
+        assert_eq!(sets_de(&b), ["décor"; 3]);
+    }
+
+    #[test]
+    fn vers_un_nouveau_set_ouvre_sa_page_et_le_nom_se_regle() {
+        let mut b = banc_sets();
+        let r = b.ui.zone(sub_id(id("liste-objets"), 0)).unwrap();
+        tenir(&mut b, r);
+        touche(&mut b, id("set-vers-nouveau"));
+        assert_eq!(sets_de(&b)[0], "set");
+        assert_eq!(b.app.page_liste, PageListe::Set("set".into()));
+        b.app.saisir(Champ::SetNom);
+        b.app.pave.as_mut().unwrap().texte = "décor".into();
+        b.app.valider_pave();
+        assert_eq!(sets_de(&b)[0], "set", "nom déjà pris");
+        b.app.pave = None;
+        b.app.saisir(Champ::SetNom);
+        b.app.pave.as_mut().unwrap().texte = " props ".into();
+        b.app.valider_pave();
+        assert_eq!(sets_de(&b)[0], "props");
+        assert!(b.app.projet.set("props").is_some() && b.app.projet.set("set").is_none());
+    }
+
+    #[test]
+    fn fusionner_supprimer_et_garder_le_premier_set() {
+        let mut b = banc_sets();
+        let n0 = b.app.projet.objets.len();
+        touche(&mut b, sub_id(sub_id(id("set"), 1), 2));
+        assert_eq!(b.app.page_liste, PageListe::Set("décor".into()));
+        touche(&mut b, id("set-seul"));
+        assert_eq!(b.app.projet.sets.len(), 1);
+        assert!(sets_de(&b).iter().all(|s| s == crate::projet::SET_DEFAUT));
+        b.app.annuler();
+        b.images(3);
+        assert_eq!(b.app.projet.sets.len(), 2);
+        b.app.choix = vec![0, 2];
+        b.app.projet.actif = Some(2);
+        b.app.page_liste = PageListe::Set("décor".into());
+        b.images(3);
+        touche(&mut b, id("set-tout"));
+        assert_eq!(b.app.projet.objets.len(), n0 - 1);
+        assert_eq!(b.app.choix, [0]);
+        assert_eq!(b.app.projet.actif, None);
+        b.app.annuler();
+        assert_eq!(b.app.projet.objets.len(), n0);
+        // Le premier set n'a ni fusion ni suppression
+        b.app.page_liste = PageListe::Set(crate::projet::SET_DEFAUT.into());
+        b.images(3);
+        assert!(b.ui.zone(id("set-tout")).is_none());
+    }
+
+    #[test]
+    fn supprimer_un_set_garde_l_actif_sur_son_objet() {
+        let mut b = banc_sets();
+        b.app.projet.objets.swap(0, 2);
+        b.app.projet.actif = Some(2);
+        b.app.choix = vec![2];
+        b.app.supprimer_set("décor");
+        assert_eq!(b.app.projet.actif, Some(1));
+        assert_eq!(b.app.choix, [1]);
+        assert_eq!(b.app.projet.objets[1].nom, "a");
+    }
+
+    #[test]
+    fn plier_masquer_et_ranger_dans_un_set_masque() {
+        let mut b = banc_sets();
+        touche(&mut b, sub_id(sub_id(id("set"), 0), 0));
+        assert!(b.app.projet.sets[0].replie);
+        assert!(b.ui.zone(sub_id(id("liste-objets"), 0)).is_none());
+        b.app.annuler();
+        touche(&mut b, sub_id(sub_id(id("set"), 1), 1));
+        assert!(!b.app.projet.sets[1].visible);
+        b.app.choix = vec![1];
+        b.app.deplacer_objets(&[1], "décor");
+        assert!(b.app.choix.is_empty());
+        assert_eq!(b.app.projet.ecrire().matches("décor").count() >= 2, true);
+        let p = Projet::lire(&b.app.projet.ecrire()).unwrap();
+        assert_eq!(p.objets[1].set, "décor");
+    }
+
+    #[test]
+    fn une_annulation_qui_retire_le_set_ramene_a_la_liste() {
+        let mut b = banc_sets();
+        touche(&mut b, id("set-nouveau"));
+        assert_eq!(b.app.page_liste, PageListe::Set("set".into()));
+        b.app.annuler();
+        b.images(2);
+        assert_eq!(b.app.page_liste, PageListe::Objets);
+    }
+
+    #[test]
+    fn deplacer_en_geometrie_garde_la_copie_de_travail() {
+        let mut b = banc_sets();
+        b.app.choisir(Some(0));
+        b.app.entrer_geometrie();
+        b.images(3);
+        b.app.deplacer_objets(&[0], "décor");
+        assert!(b.app.travail.is_some());
+        assert_eq!(sets_de(&b)[0], "décor");
+        b.app.supprimer_set("décor");
+        assert!(b.app.travail.is_none());
+    }
+
     /// Une boîte, ses arêtes verticales et le tour du dessus marqués par le panneau.
     fn banc_boite() -> Banc {
         let mut b = Banc::pret();
@@ -6882,5 +8435,1090 @@ mod tests {
         assert!(matches!(c.app.primitives[&Prim::Vis].get("longueur"), Some(V::N(x)) if *x == 33.0));
         // Entrée d'une version plus ancienne : ignorée
         c.app.reprendre_reglages("primitive.vis.inconnu\tn3\nprimitive.inconnue.x\tn3");
+    }
+
+    // ----- Armatures ---------------------------------------------------------
+
+    fn armature(b: &Banc) -> &Armature {
+        b.app.projet.objets[b.app.os.as_ref().unwrap().objet.unwrap()].armature.as_ref().unwrap()
+    }
+
+    /// Une armature à l'écran, en mode Armature, cadrée.
+    fn en_os(humain: bool) -> Banc {
+        let mut b = Banc::pret();
+        b.app.agir(if humain { A::AjouterHumanoide } else { A::AjouterArmature });
+        b.app.entrer_geometrie();
+        assert!(!b.app.shell.end.open, "le panneau Os ne s'ouvre pas de lui-même");
+        b.app.contenu = Contenu::Os;
+        b.app.shell.end.open = true;
+        b.app.recadrer();
+        b.images(40);
+        // Assez loin pour qu'aucun bout ne passe sous les barres
+        b.app.cam.distance *= 2.0;
+        b.images(1);
+        assert!(b.app.os.is_some());
+        b
+    }
+
+    /// Position à l'écran d'un bout d'os.
+    fn point_os(b: &Banc, id: &str, queue: bool) -> (f32, f32) {
+        let w = b.app.espace;
+        let v = b.app.vue_ecran(w);
+        let o = &b.app.projet.objets[b.app.os.as_ref().unwrap().objet.unwrap()];
+        let s = o.armature.as_ref().unwrap().segments();
+        let p = vue::appliquer(&o.matrice(), if queue { s[id].queue } else { s[id].tete });
+        let e = v.ecran(p).unwrap();
+        (w.x + e[0] as f32, w.y + e[1] as f32)
+    }
+
+    fn milieu_os(b: &Banc, id: &str) -> (f32, f32) {
+        let (t, q) = (point_os(b, id, false), point_os(b, id, true));
+        ((t.0 + q.0) / 2.0, (t.1 + q.1) / 2.0)
+    }
+
+    #[test]
+    fn on_ajoute_une_armature_ou_un_humanoide_sur_le_curseur() {
+        let mut b = Banc::pret();
+        b.app.projet.curseur = [1.0, 2.0, 3.0];
+        let n = b.app.projet.objets.len();
+        b.app.agir(A::AjouterArmature);
+        let o = &b.app.projet.objets[n];
+        assert_eq!((o.nom.as_str(), o.position), ("armature", [1.0, 2.0, 3.0]));
+        assert_eq!(o.maillage.faces.len(), 8);
+        assert_eq!(b.app.choix, [n]);
+        // La géométrie d'une armature, ce sont ses os
+        assert!(b.app.contexte().possible(A::EditerGeometrie));
+        b.app.agir(A::EditerGeometrie);
+        assert!(b.app.os.as_ref().is_some_and(|e| e.objet == Some(n)) && b.app.travail.is_none());
+        assert!(!b.app.contexte().possible(A::EditerGeometrie));
+        b.app.sortir_geometrie();
+        b.app.agir(A::AjouterHumanoide);
+        assert_eq!(b.app.projet.objets[n + 1].armature.as_ref().unwrap().os.len(), 19);
+        assert_eq!(b.app.projet.objets[n + 1].nom, "humanoide");
+        b.images(2);
+        b.app.annuler();
+        b.app.annuler();
+        assert_eq!(b.app.projet.objets.len(), n);
+    }
+
+    #[test]
+    fn un_double_appui_sur_une_armature_entre_en_mode_armature() {
+        let mut b = Banc::pret();
+        b.app.agir(A::AjouterArmature);
+        b.app.recadrer();
+        b.images(40);
+        let k = b.app.choix[0];
+        b.app.projet.objets[0].visible = false;
+        b.images(1);
+        b.app.os = Some(EditionOs { objet: Some(k), ..Default::default() });
+        let c = milieu_os(&b, "o1");
+        b.app.os = None;
+        b.appui(c.0, c.1);
+        b.appui(c.0, c.1);
+        assert_eq!(b.app.os.as_ref().and_then(|e| e.objet), Some(k));
+        assert!(b.app.travail.is_none());
+        b.app.sortir_geometrie();
+        assert!(b.app.os.is_none());
+    }
+
+    #[test]
+    fn toucher_un_bout_prend_le_soudure_et_glisser_le_deplace_puis_s_annule() {
+        let mut b = en_os(false);
+        b.app.os.as_mut().unwrap().bouts = vec![Bout::queue("o1")];
+        b.app.agir(A::ExtruderOs);
+        assert_eq!(armature(&b).os.len(), 2);
+        let f = armature(&b).os[1].id.clone();
+        b.app.tous_os(false);
+        b.images(1);
+        b.app.recadrer();
+        b.images(40);
+        let e = point_os(&b, "o1", true);
+        b.appui(e.0, e.1);
+        assert_eq!(b.app.os.as_ref().unwrap().bouts, [Bout::queue("o1"), Bout::tete(&f)]);
+        let avant = armature(&b).segments();
+        assert_eq!(b.glisser(e, (e.0 + 150.0, e.1)), 1);
+        let apres = armature(&b).segments();
+        assert_ne!(apres["o1"].queue, avant["o1"].queue);
+        assert!((0..3).all(|k| (apres["o1"].queue[k] - apres[&f].tete[k]).abs() < 1e-9), "soudure");
+        assert!((0..3).all(|k| (apres[&f].queue[k] - avant[&f].queue[k]).abs() < 1e-9), "la queue de l'enfant reste");
+        assert_eq!(b.app.projet.objets[b.app.os.as_ref().unwrap().objet.unwrap()].maillage.faces.len(), 16);
+        b.app.annuler();
+        assert_eq!(armature(&b).segments()["o1"].queue, avant["o1"].queue);
+    }
+
+    #[test]
+    fn le_corps_prend_les_deux_bouts_et_l_appui_long_seul() {
+        let mut b = en_os(true);
+        let id = armature(&b).os.iter().find(|x| x.nom == "cuisse.G").unwrap().id.clone();
+        let c = milieu_os(&b, &id);
+        b.appui(c.0, c.1);
+        let e = b.app.os.as_ref().unwrap();
+        assert_eq!(e.os_choisis(armature(&b)), [id.clone()]);
+        assert_eq!(e.actif.as_ref(), Some(&id));
+        // Double appui dans le vide : recadre, sans rien choisir
+        let w = b.app.espace;
+        let n = b.app.os.as_ref().unwrap().bouts.len();
+        let vide = (w.x + 0.12 * w.w, w.y + 0.5 * w.h);
+        b.app.cam.distance *= 3.0;
+        b.appui(vide.0, vide.1);
+        b.appui(vide.0, vide.1);
+        assert!(b.app.vol.is_some());
+        assert_eq!(b.app.os.as_ref().unwrap().bouts.len(), n);
+    }
+
+    #[test]
+    fn extruder_supprimer_parenter_detacher() {
+        let mut b = en_os(false);
+        assert!(!b.app.contexte().possible(A::ExtruderOs));
+        b.app.tous_os(true);
+        assert!(b.app.contexte().possible(A::ExtruderOs));
+        // Le dernier os reste
+        b.app.supprimer_os();
+        assert_eq!(armature(&b).os.len(), 1);
+        assert!(b.app.message.as_ref().unwrap().0.contains("au moins un os"));
+        b.app.agir(A::ExtruderOs);
+        let f = armature(&b).os[1].id.clone();
+        assert_eq!(armature(&b).os[1].parent.as_deref(), Some("o1"));
+        assert_eq!(b.app.os.as_ref().unwrap().actif.as_ref(), Some(&f));
+        // Boucle refusée : l'actif descend de l'os choisi
+        b.app.tous_os(true);
+        b.app.agir(A::ParenterOs);
+        assert!(b.app.message.as_ref().unwrap().0.contains("1 os refusé"));
+        assert_eq!(armature(&b).trouver("o1").unwrap().parent, None);
+        b.app.agir(A::DetacherOs);
+        assert_eq!(armature(&b).os[1].parent, None);
+        b.app.agir(A::ParenterOs);
+        assert_eq!(armature(&b).trouver("o1").unwrap().parent.as_deref(), Some(f.as_str()));
+        b.app.os.as_mut().unwrap().actif = Some("o1".into());
+        b.app.tous_os(false);
+        b.app.os.as_mut().unwrap().actif = Some(f.clone());
+        b.app.agir(A::DescendantsOs);
+        assert_eq!(b.app.os.as_ref().unwrap().os_choisis(armature(&b)), ["o1"]);
+        b.app.agir(A::SupprimerOs);
+        assert_eq!(armature(&b).os.len(), 1);
+        assert_eq!(b.app.os.as_ref().unwrap().actif, None);
+        b.app.annuler();
+        assert_eq!(armature(&b).os.len(), 2);
+    }
+
+    #[test]
+    fn ajouter_un_os_le_pose_sur_le_curseur_de_la_longueur_de_l_actif() {
+        let mut b = en_os(false);
+        let k = b.app.os.as_ref().unwrap().objet.unwrap();
+        b.app.projet.objets[k].position = [1.0, 0.0, 0.0];
+        b.app.projet.objets[k].echelle = [2.0; 3];
+        b.app.projet.curseur = [3.0, 0.0, 0.0];
+        b.app.os.as_mut().unwrap().actif = Some("o1".into());
+        b.app.agir(A::AjouterOs);
+        let n = &armature(&b).os[1];
+        assert_eq!((n.position, n.longueur, n.parent.clone()), ([1.0, 0.0, 0.0], 1.0, None));
+        assert_eq!(b.app.os.as_ref().unwrap().os_choisis(armature(&b)), [n.id.clone()]);
+    }
+
+    #[test]
+    fn nom_longueur_et_parent_se_reglent_dans_la_fiche() {
+        let mut b = en_os(false);
+        let k = b.app.os.as_ref().unwrap().objet.unwrap();
+        b.app.projet.objets[k].echelle = [2.0; 3];
+        b.app.tous_os(true);
+        b.app.agir(A::ExtruderOs);
+        let f = armature(&b).os[1].id.clone();
+        b.app.os.as_mut().unwrap().actif = Some("o1".into());
+        assert_eq!(b.app.valeur_champ(Champ::OsLongueur).unwrap(), "2");
+        b.app.saisir(Champ::OsLongueur);
+        b.app.appliquer_champ(Champ::OsLongueur, 3.0);
+        b.app.pave = None;
+        // Longueur au monde : l'enfant soudé suit sa tête, sa queue reste
+        assert!((armature(&b).trouver("o1").unwrap().longueur - 1.5).abs() < 1e-9);
+        let s = armature(&b).segments();
+        assert!((s[&f].tete[1] - 1.5).abs() < 1e-9 && (s[&f].queue[1] - 2.0).abs() < 1e-9);
+        b.app.annuler();
+        assert_eq!(armature(&b).trouver("o1").unwrap().longueur, 1.0);
+        b.app.renommer_os("  bras ");
+        assert_eq!(armature(&b).trouver("o1").unwrap().nom, "bras");
+        b.app.os.as_mut().unwrap().actif = Some(f.clone());
+        b.app.renommer_os("bras");
+        assert_eq!(b.app.message.as_ref().unwrap().0, "Ce nom est déjà pris");
+        b.app.renommer_os(" ");
+        assert_eq!(b.app.message.as_ref().unwrap().0, "Nom vide");
+        b.app.changer_parent_os(&f, None);
+        assert_eq!(armature(&b).trouver(&f).unwrap().parent, None);
+        b.app.changer_parent_os("o1", Some(&f));
+        b.app.changer_parent_os(&f, Some("o1"));
+        assert_eq!(b.app.message.as_ref().unwrap().0, "Cet os descend de celui-ci");
+    }
+
+    #[test]
+    fn la_fiche_touche_les_os_et_la_translation_passe_par_le_panneau() {
+        let mut b = en_os(true);
+        // L'arbre est en bas du panneau : on y descend au doigt
+        let bord = b.ui.zone(id("corps-os")).unwrap();
+        for _ in 0..6 {
+            if b.ui.zone(sub_id(id("os-rang"), 0)).unwrap().bottom() < bord.bottom() {
+                break;
+            }
+            b.glisser((bord.cx(), bord.bottom() - 40.0), (bord.cx(), bord.y + 40.0));
+            b.images(10);
+        }
+        let z = b.ui.zone(sub_id(id("os-rang"), 0)).unwrap();
+        assert!(z.bottom() < bord.bottom());
+        b.appui(z.cx(), z.cy());
+        assert_eq!(b.app.os.as_ref().unwrap().actif.as_deref(), Some(armature(&b).ordre()[0].id.as_str()));
+        assert_eq!(b.app.os.as_ref().unwrap().os_choisis(armature(&b)).len(), 1);
+        b.images(2);
+        assert!(b.ui.zone(id("os-nom")).is_some());
+        let y = ed::centre(&b.app.points())[1];
+        b.app.appliquer_champ(Champ::Position(1), y + 1.0);
+        assert!((ed::centre(&b.app.points())[1] - y - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn en_mode_armature_le_reste_de_la_scene_est_inerte() {
+        let mut b = en_os(false);
+        let c = b.app.contexte();
+        assert!(c.os && !c.possible(A::Dupliquer) && !c.possible(A::AjouterCube) && !c.possible(A::ModifBooleen) && !c.possible(A::EditerGeometrie));
+        assert!(c.possible(A::Enregistrer) && c.possible(A::Recadrer) && c.possible(A::AjouterOs));
+        let g: Vec<Groupe> = actions::barre(&c, &Choix::new()).iter().map(|x| x.0).collect();
+        assert_eq!(g, [Groupe::Os]);
+        let (armature, cube) = (b.app.os.as_ref().unwrap().objet.unwrap(), 0);
+        assert!(armature != cube);
+        let (_, _, o) = b.app.couleurs(cube, &b.app.projet.objets[cube]);
+        assert_eq!(o, OPACITE_PASSIF);
+        assert_eq!(b.app.couleurs(armature, &b.app.projet.objets[armature]).2, 1.0);
+        // Hors de l'armature, un appui ne choisit rien
+        let w = b.app.espace;
+        b.appui(w.x + 30.0, w.y + 30.0);
+        assert_eq!(b.app.choix, [armature]);
+        // Ajouter un objet ressort du mode, comme en Géométrie ; le panneau Os reste, en Scène
+        b.app.ajouter("x", Maillage::cube(1.0));
+        assert!(b.app.os.is_none());
+        b.images(2);
+        assert!(b.app.contenu == Contenu::Os && b.app.shell.end.open);
+        assert!(b.ui.zone(id("os-armature-nom")).is_none(), "le cube est actif");
+    }
+
+    /// Pilule d'un mode, par sa place dans la barre : Scène, Géométrie.
+    fn mode(b: &mut Banc, cle: usize) {
+        let z = b.ui.zone(sub_id(id("barre-haute"), cle)).unwrap();
+        b.appui(z.cx(), z.cy());
+        b.images(2);
+    }
+
+    #[test]
+    fn la_geometrie_d_une_armature_ce_sont_ses_os() {
+        let mut b = Banc::pret();
+        let n = b.app.projet.objets.len();
+        b.app.agir(A::AjouterArmature);
+        b.images(2);
+        // Géométrie ouvre les os de l'armature active ; la pilule Pose est là aussi
+        assert!(b.ui.zone(sub_id(id("barre-haute"), 5)).is_some());
+        mode(&mut b, 1);
+        assert_eq!(b.app.os.as_ref().unwrap().objet, Some(n));
+        assert!(b.app.travail.is_none() && !b.app.shell.end.open, "le panneau Os ne s'ouvre pas de lui-même");
+        // Un nouvel appui reste dans les os, Scène en sort
+        mode(&mut b, 1);
+        assert!(b.app.os.is_some() && b.app.travail.is_none());
+        mode(&mut b, 0);
+        assert!(b.app.os.is_none());
+        // L'actif décide : sur un cube, la géométrie du cube
+        b.app.choix = vec![0, n];
+        b.app.projet.actif = Some(0);
+        b.images(1);
+        mode(&mut b, 1);
+        assert!(b.app.travail.is_some() && b.app.os.is_none());
+        mode(&mut b, 0);
+        b.app.choix = vec![0, n];
+        b.app.projet.actif = Some(n);
+        b.images(1);
+        mode(&mut b, 1);
+        assert!(b.app.travail.is_none() && b.app.os.as_ref().unwrap().objet == Some(n));
+    }
+
+    #[test]
+    fn le_panneau_et_la_vue_changent_d_armature() {
+        let mut b = Banc::pret();
+        let n = b.app.projet.objets.len();
+        b.app.agir(A::AjouterArmature);
+        b.app.projet.curseur = [3.0, 0.0, 0.0];
+        b.app.agir(A::AjouterArmature);
+        b.app.entrer_armature();
+        b.app.contenu = Contenu::Os;
+        b.app.shell.end.open = true;
+        b.app.recadrer();
+        b.images(40);
+        assert_eq!(b.app.os.as_ref().unwrap().objet, Some(n + 1));
+        let z = b.ui.zone(sub_id(id("os-armature"), n)).unwrap();
+        b.appui(z.cx(), z.cy());
+        assert_eq!(b.app.os.as_ref().unwrap().objet, Some(n));
+        assert_eq!(b.app.choix, [n]);
+        // Rien d'ouvert : un appui dans la vue prend l'armature touchée
+        b.app.os = Some(EditionOs::default());
+        b.app.version_geo = None;
+        b.images(2);
+        b.app.os = Some(EditionOs { objet: Some(n + 1), ..Default::default() });
+        let c = milieu_os(&b, "o1");
+        b.app.os = Some(EditionOs::default());
+        b.appui(c.0, c.1);
+        assert_eq!(b.app.os.as_ref().unwrap().objet, Some(n + 1));
+    }
+
+    #[test]
+    fn la_pilule_pose_apparait_avec_une_armature_active() {
+        let mut b = Banc::pret();
+        b.images(2);
+        assert!(b.ui.zone(sub_id(id("barre-haute"), 5)).is_none(), "pas d'armature active");
+        let n = b.app.projet.objets.len();
+        b.app.agir(A::AjouterArmature);
+        b.images(2);
+        // Scène → Pose
+        mode(&mut b, 5);
+        assert!(b.app.os.as_ref().is_some_and(|e| e.pose && e.objet == Some(n)));
+        assert!(b.app.contexte().possible(A::TousOs) && !b.app.contexte().possible(A::AjouterOs));
+        let a = b.app.projet.objets[n].armature.as_mut().unwrap();
+        let o1 = a.os[0].id.clone();
+        a.tourner(&[o1], ed::qaxe([0.0, 0.0, 1.0], 0.5));
+        b.app.contenu = Contenu::Os;
+        b.app.shell.end.open = true;
+        b.images(2);
+        assert!(b.ui.zone(sub_id(id("operation"), A::AjouterOs as usize)).is_none(), "le panneau de pose n'ajoute pas d'os");
+        assert!(b.ui.zone(sub_id(id("operation"), A::ReposOs as usize)).is_some());
+        assert!(b.ui.zone(id("os-pose")).is_none() && b.ui.zone(id("os-nom")).is_none() && b.ui.zone(id("os-nouvelle")).is_none());
+        // Pose → Géométrie : les os au repos, mêmes armature et panneau
+        mode(&mut b, 1);
+        assert!(b.app.os.as_ref().is_some_and(|e| !e.pose && e.objet == Some(n)));
+        assert!(b.ui.zone(sub_id(id("operation"), A::AjouterOs as usize)).is_some());
+        assert!(b.ui.zone(sub_id(id("operation"), A::ReposOs as usize)).is_none());
+        // Géométrie → Pose → Scène
+        mode(&mut b, 5);
+        assert!(b.app.os.as_ref().is_some_and(|e| e.pose));
+        mode(&mut b, 0);
+        assert!(b.app.os.is_none());
+        // Sur un maillage actif, pas de pilule Pose
+        b.app.choisir(Some(0));
+        b.images(2);
+        assert!(b.ui.zone(sub_id(id("barre-haute"), 5)).is_none());
+    }
+
+    #[test]
+    fn une_armature_au_premier_plan_se_voit_et_se_touche_a_travers_les_objets() {
+        let mut b = Banc::pret();
+        let n = b.app.projet.objets.len();
+        b.app.agir(A::AjouterArmature);
+        b.app.projet.objets[0].echelle = [0.1; 3];
+        b.app.recadrer();
+        b.images(40);
+        // Le cube enferme l'armature, l'œil reste dehors
+        b.app.projet.objets[0].position = [0.0, 0.5, 0.0];
+        b.app.projet.objets[0].echelle = [1.4 / Maillage::cube(1.0).boite_englobante().unwrap().max[1] / 2.0; 3];
+        b.images(1);
+        b.app.os = Some(EditionOs { objet: Some(n), ..Default::default() });
+        let c = milieu_os(&b, "o1");
+        b.app.os = None;
+        b.app.choix.clear();
+        b.app.projet.actif = None;
+        b.appui(c.0, c.1);
+        assert_eq!(b.app.choix, [0], "caché par le cube");
+        // L'interrupteur de Contexte › Objet
+        b.app.choix = vec![n];
+        b.app.projet.actif = Some(n);
+        b.app.contenu = Contenu::Contexte;
+        b.app.onglet_contexte = 0;
+        b.app.shell.end.open = true;
+        b.images(30);
+        let z = b.ui.zone(id("armature-devant")).unwrap();
+        b.appui(z.cx(), z.cy());
+        assert!(b.app.projet.objets[n].armature.as_ref().unwrap().devant());
+        let s = b.images(1);
+        assert_eq!(s.objets.iter().filter(|o| o.devant).count(), 1);
+        b.app.choix.clear();
+        b.app.projet.actif = None;
+        b.app.shell.end.open = false;
+        b.images(30);
+        b.appui(c.0, c.1);
+        assert_eq!(b.app.choix, [n], "touchée à travers le cube");
+        // Gardé dans le fichier ; en Géométrie, l'armature redevient ordinaire
+        let relu = Projet::lire(&b.app.projet.ecrire()).unwrap();
+        assert!(relu.objets[n].armature.as_ref().unwrap().devant());
+        b.app.entrer_geometrie();
+        assert!(b.images(1).objets.iter().all(|o| !o.devant));
+        b.app.sortir_geometrie();
+        b.app.annuler();
+        assert!(!b.app.projet.objets[n].armature.as_ref().unwrap().devant());
+    }
+
+    #[test]
+    fn une_armature_cachee_ne_s_ouvre_pas() {
+        let mut b = Banc::pret();
+        b.app.agir(A::AjouterArmature);
+        let k = b.app.choix[0];
+        b.app.projet.objets[k].visible = false;
+        b.app.entrer_armature();
+        assert!(b.app.os.is_none());
+        assert_eq!(b.app.message.as_ref().unwrap().0, "Objet caché");
+    }
+
+    #[test]
+    fn la_pastille_os_ouvre_son_panneau_et_s_eteint_hors_du_mode() {
+        // En Scène, le panneau Os s'ouvre ; sur la géométrie d'un maillage, non
+        let mut b = Banc::pret();
+        let r = b.ui.zone(OS).unwrap();
+        b.appui(r.cx(), r.cy());
+        assert!(b.app.contenu == Contenu::Os && b.app.shell.end.open);
+        b.images(2);
+        assert!(b.ui.zone(id("os-nouvelle")).is_some());
+        b.app.shell.end.open = false;
+        b.app.choisir(Some(0));
+        b.app.entrer_geometrie();
+        b.images(2);
+        b.appui(r.cx(), r.cy());
+        assert!(b.app.contenu != Contenu::Os);
+        let mut b = en_os(false);
+        let r = b.ui.zone(OS).unwrap();
+        b.appui(r.cx(), r.cy());
+        assert!(!b.app.shell.end.open, "refermé");
+        b.appui(r.cx(), r.cy());
+        assert!(b.app.contenu == Contenu::Os && b.app.shell.end.open);
+        assert!(b.ui.zone(sub_id(id("operation"), A::AjouterOs as usize)).is_some());
+        // Contexte reste celui de la sélection, sans les opérations
+        b.app.contenu = Contenu::Contexte;
+        b.app.onglet_contexte = 0;
+        b.images(30);
+        assert!(b.ui.zone(sub_id(id("operation"), A::AjouterOs as usize)).is_none());
+    }
+
+    #[test]
+    fn le_rendu_montre_les_bouts_et_suit_la_selection() {
+        let mut b = en_os(false);
+        b.app.version_geo = None;
+        let s = b.image(0.05);
+        let g = s.geo.as_ref().unwrap();
+        assert!(g.rayons);
+        let m = g.maj.as_ref().unwrap();
+        assert_eq!((m.points.len(), m.choisis.len(), m.bandes.len()), (6, 0, 0));
+        assert!(b.image(0.05).geo.unwrap().maj.is_none());
+        b.app.tous_os(true);
+        let s = b.image(0.05);
+        let m = s.geo.as_ref().unwrap().maj.as_ref().unwrap();
+        assert_eq!((m.choisis.len(), m.bandes.len()), (6, 6 * 7));
+        b.app.sortir_geometrie();
+        assert!(b.image(0.05).geo.is_none());
+    }
+
+    #[test]
+    fn une_boite_prend_des_bouts_et_les_retire() {
+        let mut b = en_os(false);
+        let w = b.app.espace;
+        b.app.selection = Selection::Boite;
+        let e = point_os(&b, "o1", true);
+        let ((x, y), bas) = ((e.0 - 30.0, e.1 - 30.0), (e.0 + 30.0, e.1 + 30.0));
+        assert!(w.contains(x, y));
+        b.glisser((x, y), bas);
+        assert_eq!(b.app.os.as_ref().unwrap().bouts, [Bout::queue("o1")]);
+        // La poignée est là : le tracé passe directement
+        b.app.boite_retire = true;
+        b.app.boite = Some([x, y, bas.0, bas.1]);
+        b.app.tracer_boite(w);
+        assert!(b.app.os.as_ref().unwrap().bouts.is_empty());
+    }
+
+    #[test]
+    fn la_derniere_translation_se_refait_sur_les_os() {
+        let mut b = en_os(false);
+        let e = point_os(&b, "o1", true);
+        b.appui(e.0, e.1);
+        let q = armature(&b).segments()["o1"].queue;
+        b.glisser(e, (e.0 + 100.0, e.1));
+        assert!(matches!(b.app.derniere, Some(Derniere::Translation { .. })));
+        b.app.rejouer(Derniere::Translation { d: [0.0, 1.0, 0.0] });
+        assert_eq!(b.app.os.as_ref().unwrap().bouts, [Bout::queue("o1")]);
+        let r = armature(&b).segments()["o1"].queue;
+        assert!((r[1] - q[1] - 1.0).abs() < 1e-9 && (r[0] - q[0]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn un_projet_garde_les_armatures_et_n_ecrit_pas_leur_dessin() {
+        let t = r##"{"format":"gda","version":9,"scene":{"objets":[{"nom":"s","position":[1,0,0],"armature":{"os":[
+          {"id":"a","nom":"a","parent":null,"position":[0,0,0],"rotation":[0,0,0,1],"longueur":2,"contraintes":{"r":[{"etat":"bloque"},{"etat":"libre"},{"etat":"libre"}],"t":[]},"couleur":"#ff0000"},
+          {"id":"b","nom":"b","parent":"a","position":[0,2,0],"rotation":[0,0,0,1],"longueur":1}],"pose":{"b":{"r":[0,0,0,1],"t":[0,0,0]}},"poses":[],"ancre":"a"},
+          "maillage":{"v":[],"f":[]}}]},"materiaux":{}}"##;
+        let mut b = Banc::pret();
+        b.app.remplacer(Projet::lire(t).unwrap(), "");
+        b.images(2);
+        let o = &b.app.projet.objets[0];
+        assert_eq!(o.maillage.faces.len(), 16);
+        b.app.choisir(Some(0));
+        b.app.entrer_geometrie();
+        b.app.tous_os(true);
+        b.app.poser_selection(Transfo::Translation([0.0, 1.0, 0.0]));
+        b.app.sortir_geometrie();
+        let ecrit = crate::json::lire(&b.app.projet.ecrire()).unwrap();
+        let o = &ecrit.get("scene").unwrap().get("objets").unwrap().liste().unwrap()[0];
+        assert_eq!(o.get("maillage").unwrap().get("f").unwrap().liste().unwrap().len(), 0);
+        let a = o.get("armature").unwrap();
+        assert_eq!(a.get("ancre").unwrap().txt(), Some("a"));
+        assert!(a.get("pose").unwrap().get("b").is_some());
+        let os = &a.get("os").unwrap().liste().unwrap()[0];
+        assert_eq!(os.get("couleur").unwrap().txt(), Some("#ff0000"));
+        assert!(os.get("contraintes").is_some());
+        assert_eq!(os.get("position").unwrap().nombres::<3>(), Some([0.0, 1.0, 0.0]));
+        let relu = Projet::lire(&b.app.projet.ecrire()).unwrap();
+        assert_eq!(relu.objets[0].armature, b.app.projet.objets[0].armature);
+        assert_eq!(relu.objets[0].maillage.faces.len(), 16);
+    }
+
+    #[test]
+    fn un_export_ne_contient_pas_les_armatures() {
+        let mut b = Banc::pret();
+        let f = b.app.liste_export(false).len();
+        b.app.agir(A::AjouterHumanoide);
+        assert_eq!(b.app.liste_export(false).len(), f);
+    }
+
+    /// Un cube choisi et un humanoïde.
+    fn banc_lie() -> Banc {
+        let mut b = Banc::pret();
+        b.app.ajouter_armature("corps", Armature::humanoide());
+        b.app.choisir(Some(0));
+        b
+    }
+
+    fn liaison_de(b: &Banc, k: usize) -> Option<crate::projet::Liaison> {
+        b.app.projet.objets[k].liaison.clone()
+    }
+
+    #[test]
+    fn la_page_propose_la_seule_armature_et_tous_ses_os() {
+        let mut b = banc_lie();
+        let n = b.app.projet.objets[1].armature.as_ref().unwrap().os.len();
+        assert!(b.app.contexte().possible(A::LierArmature) && !b.app.contexte().possible(A::Delier));
+        b.app.agir(A::LierArmature);
+        b.images(2);
+        assert!(b.app.shell.end.open && b.app.contenu == Contenu::Contexte);
+        let page = b.app.liaison.clone().unwrap();
+        assert_eq!(page.armature.as_ref(), Some(&b.app.projet.objets[1].id));
+        assert_eq!(page.os.len(), n);
+        b.app.lier();
+        assert!(b.app.liaison.is_none());
+        assert_eq!(liaison_de(&b, 0).unwrap().os.len(), n);
+        assert!(b.app.contexte().possible(A::Delier));
+        // Refaire l'opération reprend le groupe en place
+        let un = b.app.projet.objets[1].armature.as_ref().unwrap().os[3].id.clone();
+        b.app.projet.objets[0].liaison.as_mut().unwrap().os = vec![un.clone()];
+        b.app.agir(A::LierArmature);
+        assert_eq!(b.app.liaison.as_ref().unwrap().os, [un]);
+    }
+
+    #[test]
+    fn lier_et_delier_s_annulent() {
+        let mut b = banc_lie();
+        b.app.agir(A::LierArmature);
+        b.app.lier();
+        assert!(liaison_de(&b, 0).is_some());
+        b.app.annuler();
+        assert!(liaison_de(&b, 0).is_none());
+        b.app.retablir();
+        assert!(liaison_de(&b, 0).is_some());
+        b.app.agir(A::Delier);
+        assert!(liaison_de(&b, 0).is_none());
+        b.app.annuler();
+        assert!(liaison_de(&b, 0).is_some());
+    }
+
+    #[test]
+    fn sans_armature_ni_objet_a_lier_l_operation_s_efface() {
+        let mut b = Banc::pret();
+        b.app.choisir(Some(0));
+        assert!(!b.app.contexte().possible(A::LierArmature));
+        let mut b = banc_lie();
+        b.app.choisir(Some(1));
+        assert!(!b.app.contexte().possible(A::LierArmature));
+        b.app.entrer_armature();
+        assert!(!b.app.contexte().possible(A::LierArmature));
+    }
+
+    #[test]
+    fn la_selection_decide_de_ce_qui_est_lie() {
+        let mut b = banc_lie();
+        let c = b.app.projet.objets[0].clone();
+        b.app.projet.objets.push(c);
+        b.app.projet.objets[2].id = "deux".into();
+        b.app.choix = vec![0, 1, 2];
+        b.app.agir(A::LierArmature);
+        // L'armature choisie est retenue, et elle-même n'est pas liée
+        assert_eq!(b.app.liaison.as_ref().unwrap().armature.as_ref(), Some(&b.app.projet.objets[1].id));
+        b.app.lier();
+        assert!(liaison_de(&b, 0).is_some() && liaison_de(&b, 2).is_some() && liaison_de(&b, 1).is_none());
+    }
+
+    #[test]
+    fn supprimer_un_os_ou_l_armature_rend_la_liaison_coherente() {
+        let mut b = banc_lie();
+        let a = b.app.projet.objets[1].clone();
+        let (i, j) = (a.armature.as_ref().unwrap().os[1].id.clone(), a.armature.as_ref().unwrap().os[2].id.clone());
+        b.app.projet.objets[0].liaison = Some(crate::projet::Liaison { armature: a.id.clone(), os: vec![i.clone(), j.clone()] });
+        b.app.choisir(Some(1));
+        b.app.entrer_armature();
+        let (x, y) = (Bout::tete(&i), Bout::queue(&i));
+        b.app.os.as_mut().unwrap().bouts = vec![x, y].into_iter().collect();
+        b.app.supprimer_os();
+        assert_eq!(liaison_de(&b, 0).unwrap().os, [j.clone()]);
+        b.app.annuler();
+        assert_eq!(liaison_de(&b, 0).unwrap().os.len(), 2);
+        b.app.sortir_geometrie();
+        b.app.choisir(Some(1));
+        b.app.agir(A::Supprimer);
+        assert!(liaison_de(&b, 0).is_none());
+        b.app.annuler();
+        assert!(liaison_de(&b, 0).is_some());
+    }
+
+    #[test]
+    fn l_armature_emporte_ses_objets() {
+        let mut b = banc_lie();
+        b.app.agir(A::LierArmature);
+        b.app.lier();
+        b.app.projet.objets[0].position = [2.0, 1.0, 0.0];
+        let p = b.app.projet.objets[1].position;
+        let rel = [2.0 - p[0], 1.0 - p[1], 0.0 - p[2]];
+        b.app.choisir(Some(1));
+        b.app.poser_selection(Transfo::Translation([1.0, 0.0, 0.0]));
+        assert_eq!(b.app.projet.objets[0].position, [3.0, 1.0, 0.0]);
+        // Un quart de tour autour de l'armature, puis une échelle double
+        let c = b.app.projet.objets[1].position;
+        let q = ed::qaxe([0.0, 1.0, 0.0], std::f64::consts::FRAC_PI_2);
+        b.app.poser_selection(Transfo::Rotation { q, c });
+        b.app.poser_selection(Transfo::Echelle { s: [2.0; 3], c });
+        let o = &b.app.projet.objets[0];
+        let attendu = ed::qappliquer(q, rel.map(|v| v * 2.0));
+        for k in 0..3 {
+            assert!((o.position[k] - c[k] - attendu[k]).abs() < 1e-9, "{:?}", o.position);
+        }
+        assert_eq!(o.echelle, [2.0; 3]);
+        assert!(o.rotation.iter().zip(q).all(|(a, b)| (a - b).abs() < 1e-9));
+    }
+
+    #[test]
+    fn un_objet_choisi_avec_son_armature_ne_bouge_qu_une_fois() {
+        let mut b = banc_lie();
+        b.app.agir(A::LierArmature);
+        b.app.lier();
+        b.app.choix = vec![0, 1];
+        let p = b.app.projet.objets[0].position;
+        b.app.poser_selection(Transfo::Translation([1.0, 0.0, 0.0]));
+        assert_eq!(b.app.projet.objets[0].position[0], p[0] + 1.0);
+        // Un objet déplacé seul n'emporte pas son armature
+        let a = b.app.projet.objets[1].position;
+        b.app.choisir(Some(0));
+        b.app.poser_selection(Transfo::Translation([1.0, 0.0, 0.0]));
+        assert_eq!(b.app.projet.objets[1].position, a);
+    }
+
+    #[test]
+    fn une_saisie_chiffree_emporte_aussi_les_objets() {
+        let mut b = banc_lie();
+        b.app.agir(A::LierArmature);
+        b.app.lier();
+        b.app.choisir(Some(1));
+        let d = b.app.base(1)[0];
+        b.app.appliquer_champ(Champ::Dimension(0), d * 3.0);
+        assert!(b.app.projet.objets[0].echelle.iter().all(|e| (e - 3.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn dupliquer_donne_un_nouvel_identifiant_et_suit_l_armature_copiee() {
+        let mut b = banc_lie();
+        b.app.agir(A::LierArmature);
+        b.app.lier();
+        // L'objet seul reste sur l'originale
+        b.app.agir(A::Dupliquer);
+        let p = &b.app.projet;
+        assert_ne!(p.objets[2].id, p.objets[0].id);
+        assert_eq!(p.objets[2].liaison.as_ref().unwrap().armature, p.objets[1].id);
+        // Copiés ensemble, ils restent ensemble
+        b.app.choix = vec![0, 1];
+        b.app.agir(A::Dupliquer);
+        let p = &b.app.projet;
+        assert_eq!(p.objets[3].liaison.as_ref().unwrap().armature, p.objets[4].id);
+        assert_eq!(p.objets[0].liaison.as_ref().unwrap().armature, p.objets[1].id);
+    }
+
+    /// Un cube lié au seul bras gauche d'un humanoïde, ce dernier ouvert en pose et choisi.
+    fn banc_pose() -> (Banc, String) {
+        let mut b = banc_lie();
+        let a = b.app.projet.objets[1].clone();
+        let bras = a.armature.as_ref().unwrap().os.iter().find(|x| x.nom == "bras.G").unwrap().id.clone();
+        b.app.projet.objets[0].liaison = Some(crate::projet::Liaison { armature: a.id, os: vec![bras.clone()] });
+        b.app.projet.objets[0].position = [1.0, 1.4, 0.0];
+        b.app.choisir(Some(1));
+        b.app.entrer_armature();
+        b.app.basculer_pose();
+        let e = b.app.os.as_mut().unwrap();
+        let x = b.app.projet.objets[1].armature.as_ref().unwrap();
+        e.selectionner(x, std::slice::from_ref(&bras), false);
+        (b, bras)
+    }
+
+    fn tourner_bras(b: &mut Banc, q: ed::Q) {
+        b.app.memoriser();
+        b.app.poser_selection(Transfo::Rotation { q, c: [0.0; 3] });
+    }
+
+    #[test]
+    fn le_panneau_os_regle_l_armature_en_mode_scene() {
+        let (mut b, bras) = banc_pose();
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 0.8));
+        b.app.os.as_mut().unwrap().actif = Some(bras.clone());
+        b.app.sortir_geometrie();
+        assert!(b.app.os.is_none() && b.app.projet.actif == Some(1));
+        b.app.contenu = Contenu::Os;
+        b.app.shell.end.open = true;
+        b.images(2);
+        // L'os actif de l'édition reste choisi dans l'arbre
+        assert_eq!(b.app.os_scene.as_ref().map(|x| x.1.as_str()), Some(bras.as_str()));
+        assert!(b.ui.zone(id("os-armature-nom")).is_some());
+        // Un autre os de l'arbre devient l'os actif de la vue des poids
+        let z = b.ui.zone(sub_id(id("os-rang"), 0)).unwrap();
+        b.appui(z.cx(), z.cy());
+        let racine = b.app.projet.objets[1].armature.as_ref().unwrap().ordre()[0].id.clone();
+        assert_eq!(b.app.os_vu().unwrap().1, Some(racine.clone()));
+        // Tout au repos, puis annulation
+        assert!(!b.app.projet.objets[1].armature.as_ref().unwrap().pose.is_empty());
+        let z = b.ui.zone(sub_id(id("os-scene-actions"), 1)).unwrap();
+        b.appui(z.cx(), z.cy());
+        assert!(b.app.projet.objets[1].armature.as_ref().unwrap().pose.is_empty());
+        b.app.annuler();
+        assert!(!b.app.projet.objets[1].armature.as_ref().unwrap().pose.is_empty());
+        // Éditer les os : retour à l'édition, sur l'os choisi en Scène
+        b.images(2);
+        let z = b.ui.zone(sub_id(id("os-scene-actions"), 0)).unwrap();
+        b.appui(z.cx(), z.cy());
+        assert_eq!(b.app.os.as_ref().unwrap().actif, Some(racine));
+        // En Géométrie sur un maillage, la pastille Os s'éteint
+        b.app.sortir_geometrie();
+        b.app.choisir(Some(0));
+        b.app.entrer_geometrie();
+        b.images(2);
+        assert!(b.app.travail.is_some() && b.app.contenu != Contenu::Os);
+    }
+
+    #[test]
+    fn un_objet_lie_a_un_os_le_suit_sans_changer_ses_donnees() {
+        let (mut b, bras) = banc_pose();
+        let q = ed::qaxe([0.0, 0.0, 1.0], 0.8);
+        let tete = b.app.projet.objets[1].armature.as_ref().unwrap().segments()[&bras].tete;
+        tourner_bras(&mut b, q);
+        // Tourne autour de la tête du bras
+        let (position, rotation) = b.app.place_posee(0).unwrap();
+        let r = ed::qappliquer(q, [1.0 - tete[0], 1.4 - tete[1], -tete[2]]);
+        for k in 0..3 {
+            assert!((position[k] - tete[k] - r[k]).abs() < 1e-9, "{position:?}");
+        }
+        assert!(rotation.iter().zip(q).all(|(a, b)| (a - b).abs() < 1e-9));
+        assert_eq!(b.app.projet.objets[0].position, [1.0, 1.4, 0.0]);
+    }
+
+    #[test]
+    fn le_suivi_tient_compte_de_la_pose_de_l_armature_dans_la_scene() {
+        let (mut b, bras) = banc_pose();
+        let q = ed::qaxe([0.0, 0.0, 1.0], 0.8);
+        tourner_bras(&mut b, q);
+        b.app.sortir_geometrie();
+        let avant = b.app.place_posee(0).unwrap();
+        // Armature déplacée et tournée : l'objet suit, comme un point de l'os
+        b.app.choisir(Some(1));
+        let (t, r) = ([1.0, 2.0, 3.0], ed::qaxe([0.0, 1.0, 0.0], 1.1));
+        b.app.poser_selection(Transfo::Translation(t));
+        let c = b.app.projet.objets[1].position;
+        b.app.poser_selection(Transfo::Rotation { q: r, c });
+        b.app.poser_selection(Transfo::Echelle { s: [2.0; 3], c });
+        let (p, q2) = b.app.place_posee(0).unwrap();
+        let p0 = [0, 1, 2].map(|k| avant.0[k] + t[k] - c[k]);
+        let attendu = ed::qappliquer(r, p0.map(|v| v * 2.0));
+        for k in 0..3 {
+            assert!((p[k] - c[k] - attendu[k]).abs() < 1e-9, "{p:?}");
+        }
+        let voulu = ed::qmul(r, avant.1);
+        assert!(q2.iter().zip(voulu).all(|(a, b)| (a - b).abs() < 1e-9));
+        let _ = bras;
+    }
+
+    #[test]
+    fn plusieurs_os_laissent_l_objet_au_repos_pour_l_instant() {
+        let (mut b, bras) = banc_pose();
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 0.8));
+        let autre = b.app.projet.objets[1].armature.as_ref().unwrap().os[0].id.clone();
+        b.app.projet.objets[0].liaison.as_mut().unwrap().os = vec![bras, autre];
+        assert!(b.app.place_posee(0).is_none());
+    }
+
+    #[test]
+    fn au_repos_l_armature_ouverte_et_ses_objets_reviennent_puis_repartent() {
+        let (mut b, _) = banc_pose();
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 0.8));
+        let enveloppe = |b: &Banc| b.app.projet.objets[1].maillage.sommets.clone();
+        let posee = enveloppe(&b);
+        assert!(b.app.place_posee(0).is_some());
+        b.app.basculer_pose();
+        assert_ne!(enveloppe(&b), posee);
+        assert!(b.app.place_posee(0).is_none());
+        b.app.basculer_pose();
+        assert_eq!(enveloppe(&b), posee);
+        // Hors du mode, la pose se voit
+        b.app.basculer_pose();
+        b.app.sortir_geometrie();
+        assert_eq!(enveloppe(&b), posee);
+        assert!(b.app.place_posee(0).is_some());
+    }
+
+    #[test]
+    fn la_pose_s_annule_et_reste_dans_le_fichier() {
+        let (mut b, bras) = banc_pose();
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 0.8));
+        let t = b.app.projet.ecrire();
+        b.app.annuler();
+        assert!(b.app.projet.objets[1].armature.as_ref().unwrap().pose.is_empty());
+        assert!(b.app.place_posee(0).is_none());
+        assert!(b.app.os.as_ref().unwrap().pose, "on reste en pose");
+        b.app.retablir();
+        assert!(b.app.place_posee(0).is_some());
+        let p = Projet::lire(&t).unwrap();
+        assert!(p.objets[1].armature.as_ref().unwrap().pose.contains_key(&bras));
+        assert!(p.place_posee(&p.objets[0]).is_some());
+        assert_eq!(*p.objets[1].maillage, p.objets[1].armature.as_ref().unwrap().enveloppe_pose());
+    }
+
+    #[test]
+    fn remettre_au_repos_les_os_choisis_ou_tous() {
+        let (mut b, _) = banc_pose();
+        let q = ed::qaxe([0.0, 0.0, 1.0], 0.8);
+        tourner_bras(&mut b, q);
+        assert!(b.app.contexte().possible(A::ReposOs));
+        b.app.agir(A::ReposOs);
+        assert!(b.app.projet.objets[1].armature.as_ref().unwrap().pose.is_empty());
+        assert!(!b.app.contexte().possible(A::ReposOs));
+        assert_eq!(*b.app.projet.objets[1].maillage, b.app.projet.objets[1].armature.as_ref().unwrap().enveloppe());
+        b.app.annuler();
+        b.app.tous_os(false);
+        b.app.agir(A::ReposOs);
+        assert!(b.app.place_posee(0).is_none(), "aucun choisi : tous");
+    }
+
+    #[test]
+    fn en_pose_on_ne_change_ni_la_hierarchie_ni_le_mode() {
+        let (mut b, _) = banc_pose();
+        let c = b.app.contexte();
+        assert!(c.pose && !c.possible(A::AjouterOs) && !c.possible(A::SupprimerOs) && !c.possible(A::ExtruderOs) && !c.possible(A::ParenterOs) && !c.possible(A::SelectionCurseur));
+        assert!(c.possible(A::TousOs) && c.possible(A::AucunOs));
+        b.app.mode = Mode::Translation;
+        b.images(1);
+        assert!(b.app.mode == Mode::Rotation);
+        b.app.contenu = Contenu::Contexte;
+        b.images(2);
+        b.app.contenu = Contenu::Os;
+        b.images(2);
+    }
+
+    #[test]
+    fn en_pose_une_translation_ne_fait_rien_et_les_points_sont_les_tetes() {
+        let (mut b, bras) = banc_pose();
+        let p = b.app.projet.objets[1].armature.as_ref().unwrap().pose.clone();
+        b.app.poser_selection(Transfo::Translation([1.0, 0.0, 0.0]));
+        assert_eq!(b.app.projet.objets[1].armature.as_ref().unwrap().pose, p);
+        let t = b.app.projet.objets[1].armature.as_ref().unwrap().segments()[&bras].tete;
+        let o = b.app.projet.objets[1].matrice();
+        assert_eq!(b.app.points(), vec![vue::appliquer(&o, t)]);
+    }
+
+    #[test]
+    fn un_objet_pose_ne_se_deplace_pas() {
+        let (mut b, _) = banc_pose();
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 0.8));
+        b.app.sortir_geometrie();
+        b.app.choisir(Some(0));
+        b.app.appliquer_champ(Champ::Position(0), 9.0);
+        assert_eq!(b.app.projet.objets[0].position, [1.0, 1.4, 0.0]);
+        // La boîte et le centre de l'objet suivent la pose
+        let (p, _) = b.app.place_posee(0).unwrap();
+        assert_eq!(b.app.points(), vec![p]);
+    }
+
+    #[test]
+    fn toucher_un_os_en_pose_puis_glisser_le_tourne_et_le_lacher_garde() {
+        let mut b = en_os(true);
+        b.app.basculer_pose();
+        b.images(1);
+        let id = armature(&b).os.iter().find(|x| x.nom == "cuisse.G").unwrap().id.clone();
+        let c = milieu_os(&b, &id);
+        b.appui(c.0, c.1);
+        assert_eq!(b.app.os.as_ref().unwrap().os_choisis(armature(&b)), [id.clone()]);
+        let repos = armature(&b).segments();
+        assert_eq!(b.glisser(c, (c.0 + 120.0, c.1 + 40.0)), 1);
+        let a = armature(&b);
+        let p = a.segments_pose();
+        assert!(a.pose.contains_key(&id));
+        assert!((0..3).all(|k| (p[&id].tete[k] - repos[&id].tete[k]).abs() < 1e-9), "la tête reste");
+        assert!((0..3).any(|k| (p[&id].queue[k] - repos[&id].queue[k]).abs() > 1e-3), "la queue tourne");
+        assert_eq!(a.segments(), repos, "le repos ne change pas");
+        b.app.annuler();
+        assert!(armature(&b).pose.is_empty());
+    }
+
+    /// Un tube de l'épaule à la main, lié au bras et à l'avant-bras gauches, armature en pose.
+    fn banc_peau() -> (Banc, String, String) {
+        let mut b = banc_lie();
+        let x = b.app.projet.objets[1].clone();
+        let a = x.armature.as_ref().unwrap();
+        let i = |n: &str| a.os.iter().find(|o| o.nom == n).unwrap().id.clone();
+        let (bras, avant) = (i("bras.G"), i("avant-bras.G"));
+        let s = a.segments();
+        let (d, f) = (s[&bras].tete, s[&avant].queue);
+        let (anneaux, cotes) = (24, 8);
+        let mut sommets = Vec::new();
+        for r in 0..=anneaux {
+            let t = r as f64 / anneaux as f64;
+            for c in 0..cotes {
+                let an = c as f64 / cotes as f64 * std::f64::consts::TAU;
+                sommets.push([d[0] + (f[0] - d[0]) * t, d[1] + (f[1] - d[1]) * t + 0.05 * an.cos(), d[2] + (f[2] - d[2]) * t + 0.05 * an.sin()]);
+            }
+        }
+        let mut faces = Vec::new();
+        for r in 0..anneaux {
+            for c in 0..cotes {
+                let n = (c + 1) % cotes;
+                faces.push(maillage::Face { s: vec![r * cotes + c, r * cotes + n, (r + 1) * cotes + n, (r + 1) * cotes + c], m: maillage::defaut(), uv: Vec::new() });
+            }
+        }
+        b.app.projet.objets[0].maillage = Arc::new(Maillage::new(sommets, faces, Vec::new()));
+        b.app.projet.objets[0].liaison = Some(crate::projet::Liaison { armature: x.id.clone(), os: vec![bras.clone(), avant.clone()] });
+        b.app.choisir(Some(1));
+        b.app.entrer_armature();
+        b.app.basculer_pose();
+        let e = b.app.os.as_mut().unwrap();
+        let a = b.app.projet.objets[1].armature.as_ref().unwrap();
+        e.actif = Some(avant.clone());
+        e.selectionner(a, std::slice::from_ref(&avant), false);
+        (b, bras, avant)
+    }
+
+    fn pret(b: &mut Banc) {
+        b.images(1);
+        b.app.attendre_calculs();
+        b.images(1);
+    }
+
+    #[test]
+    fn un_groupe_deforme_l_objet_sans_toucher_ses_donnees() {
+        let (mut b, _, _) = banc_peau();
+        let base = b.app.projet.objets[0].maillage.clone();
+        pret(&mut b);
+        assert!(Arc::ptr_eq(&b.app.maillage_vu(0), &base), "sans pose, le maillage de base");
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 1.2));
+        pret(&mut b);
+        let vu = b.app.maillage_vu(0);
+        assert!(!Arc::ptr_eq(&vu, &base));
+        let bouge = |i: usize| (0..3).map(|c| (vu.sommets[i][c] - base.sommets[i][c]).abs()).fold(0.0, f64::max);
+        let n = base.sommets.len();
+        assert!(bouge(0) < 1e-6, "l'épaule reste : {}", bouge(0));
+        assert!(bouge(n - 1) > 0.1, "la main suit : {}", bouge(n - 1));
+        assert_eq!(vu.faces.len(), base.faces.len());
+        assert!(Arc::ptr_eq(&b.app.projet.objets[0].maillage, &base), "le maillage enregistré ne change pas");
+        // Au repos pour l'édition, puis de nouveau en pose
+        b.app.basculer_pose();
+        pret(&mut b);
+        assert!(Arc::ptr_eq(&b.app.maillage_vu(0), &base));
+        b.app.basculer_pose();
+        pret(&mut b);
+        assert!(!Arc::ptr_eq(&b.app.maillage_vu(0), &base));
+    }
+
+    #[test]
+    fn la_peau_ne_se_recalcule_que_si_le_maillage_ou_les_os_changent() {
+        let (mut b, _, _) = banc_peau();
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 1.2));
+        pret(&mut b);
+        let l = b.app.peaux[&b.app.projet.objets[0].id].clone();
+        // Une autre pose, ou l'armature emportant son objet : même peau
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 0.3));
+        b.app.sortir_geometrie();
+        b.app.choisir(Some(1));
+        b.app.poser_selection(Transfo::Translation([1.0, 2.0, 0.0]));
+        pret(&mut b);
+        assert!(Arc::ptr_eq(&l, &b.app.peaux[&b.app.projet.objets[0].id]));
+        // Le maillage change : nouvelle peau
+        let mut m = (*b.app.projet.objets[0].maillage).clone();
+        m.sommets[0][1] += 0.01;
+        b.app.projet.objets[0].maillage = Arc::new(m);
+        pret(&mut b);
+        assert!(!Arc::ptr_eq(&l, &b.app.peaux[&b.app.projet.objets[0].id]));
+    }
+
+    #[test]
+    fn un_objet_deforme_ne_se_deplace_pas_et_s_exporte_au_repos() {
+        let (mut b, _, _) = banc_peau();
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 1.2));
+        pret(&mut b);
+        b.app.sortir_geometrie();
+        pret(&mut b);
+        b.app.choisir(Some(0));
+        let p = b.app.projet.objets[0].position;
+        b.app.appliquer_champ(Champ::Position(0), 9.0);
+        assert_eq!(b.app.projet.objets[0].position, p);
+        let l = b.app.liste_export(true);
+        assert_eq!(l[0].1.sommets, b.app.projet.objets[0].maillage.sommets);
+    }
+
+    #[test]
+    fn annuler_la_pose_rend_le_maillage_de_base() {
+        let (mut b, _, _) = banc_peau();
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], 1.2));
+        pret(&mut b);
+        b.app.annuler();
+        pret(&mut b);
+        assert!(Arc::ptr_eq(&b.app.maillage_vu(0), &b.app.projet.objets[0].maillage));
+    }
+
+    #[test]
+    fn les_poids_de_l_os_actif_se_lisent_en_couleur() {
+        let (mut b, bras, avant) = banc_peau();
+        b.app.voir_poids = true;
+        pret(&mut b);
+        let vu = b.app.maillage_vu(0);
+        let v = b.app.vue_poids(0, &vu).unwrap();
+        let u = |m: &Maillage, f: usize| m.faces[f].uv[0][0];
+        assert!(v.faces[0].uv.len() == 4 && u(&v, 0) < 0.1, "l'épaule ne dépend pas de l'avant-bras");
+        assert!(u(&v, v.faces.len() - 1) > 0.9, "la main en dépend entièrement");
+        // Même résultat tant que rien ne change ; l'os actif change la vue
+        assert!(Arc::ptr_eq(&v, &b.app.vue_poids(0, &vu).unwrap()));
+        b.app.os.as_mut().unwrap().actif = Some(bras);
+        let w = b.app.vue_poids(0, &vu).unwrap();
+        assert!(u(&w, 0) > 0.9 && u(&w, w.faces.len() - 1) < 0.1);
+        // Les deux poids se complètent
+        let (p, q) = (&v.faces[40].uv[0][0], &w.faces[40].uv[0][0]);
+        assert!((p + q - 1.0).abs() < 0.03, "{p} + {q}");
+        let s = b.images(1);
+        assert!(s.objets.iter().any(|o| o.texture.as_deref() == Some(texture::RAMPE)));
+        let _ = avant;
+        // En Scène, l'armature active garde la vue des poids et son os actif
+        let actif = b.app.os.as_ref().unwrap().actif.clone().unwrap();
+        b.app.sortir_geometrie();
+        assert!(b.app.voir_poids);
+        let a = b.app.projet.actif.unwrap();
+        assert!(b.app.projet.objets[a].armature.is_some());
+        assert_eq!(b.app.os_vu().unwrap().1, Some(actif));
+        assert!(b.app.vue_poids(0, &vu).is_some());
+        // Sur un autre objet actif, plus rien
+        b.app.projet.actif = Some(0);
+        assert!(b.app.vue_poids(0, &vu).is_none());
+    }
+
+    #[test]
+    fn un_objet_lie_a_un_seul_os_prend_tout_ou_rien() {
+        let (mut b, bras) = banc_pose();
+        b.app.voir_poids = true;
+        let vu = b.app.maillage_vu(0);
+        b.app.os.as_mut().unwrap().actif = Some(bras);
+        assert!(b.app.vue_poids(0, &vu).unwrap().faces[0].uv[0][0] > 0.9);
+        b.app.os.as_mut().unwrap().actif = Some("autre".into());
+        assert!(b.app.vue_poids(0, &vu).unwrap().faces[0].uv[0][0] < 0.1);
     }
 }

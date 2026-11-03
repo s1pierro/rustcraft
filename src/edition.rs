@@ -91,11 +91,64 @@ pub fn depart(objets: &[Objet], indices: &[usize]) -> Vec<Depart> {
     indices.iter().map(|&k| { let o = &objets[k]; Depart { p: o.position, q: o.rotation, e: o.echelle, m: o.maillage.clone() } }).collect()
 }
 
+/// Un objet lié, emporté par son armature choisie : leurs états de départ.
+#[derive(Clone, Copy, Debug)]
+pub struct Suivi {
+    objet: usize,
+    armature: usize,
+    o: (P3, Q, P3),
+    a: (P3, Q, f64),
+}
+
+/// Objets emportés par les armatures de `choix` ; ceux qui sont choisis bougent déjà.
+pub fn suivis(objets: &[Objet], choix: &[usize]) -> Vec<Suivi> {
+    let mut l = Vec::new();
+    for &armature in choix {
+        let a = &objets[armature];
+        if a.armature.is_none() {
+            continue;
+        }
+        for (objet, o) in objets.iter().enumerate() {
+            if !choix.contains(&objet) && o.liaison.as_ref().is_some_and(|x| x.armature == a.id) {
+                l.push(Suivi { objet, armature, o: (o.position, o.rotation, o.echelle), a: (a.position, a.rotation, a.echelle[0]) });
+            }
+        }
+    }
+    l
+}
+
+/// Replace les objets suivis : leur place par rapport à l'armature ne change pas.
+pub fn suivre(objets: &mut [Objet], l: &[Suivi]) {
+    for s in l {
+        let a = &objets[s.armature];
+        let (p, q, e) = (a.position, a.rotation, a.echelle[0]);
+        let ((op, oq, oe), (dp, dq, de)) = (s.o, s.a);
+        let ri = qinv(qnorm(dq));
+        let r = qappliquer(q, qappliquer(ri, [0, 1, 2].map(|k| (op[k] - dp[k]) / de)));
+        let o = &mut objets[s.objet];
+        o.position = [0, 1, 2].map(|k| p[k] + e * r[k]);
+        o.rotation = qnorm(qmul(q, qmul(ri, oq)));
+        o.echelle = oe.map(|x| x * e / de);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Transfo {
     Translation(P3),
     Rotation { q: Q, c: P3 },
     Echelle { s: P3, c: P3 },
+}
+
+/// Un point, transformé.
+pub fn transformer(v: P3, t: Transfo) -> P3 {
+    match t {
+        Transfo::Translation(d) => [v[0] + d[0], v[1] + d[1], v[2] + d[2]],
+        Transfo::Rotation { q, c } => {
+            let r = qappliquer(q, [v[0] - c[0], v[1] - c[1], v[2] - c[2]]);
+            [r[0] + c[0], r[1] + c[1], r[2] + c[2]]
+        }
+        Transfo::Echelle { s, c } => [0, 1, 2].map(|k| (v[k] - c[k]) * s[k] + c[k]),
+    }
 }
 
 /// Place les objets `indices` : leur état de départ, transformé.
@@ -353,7 +406,7 @@ fn cercle(o: P3, u: P3, v: P3, r: f64, n: usize) -> Vec<P3> {
         .collect()
 }
 
-fn distance_segment(a: [f64; 2], b: [f64; 2], x: f64, y: f64) -> f64 {
+pub fn distance_segment(a: [f64; 2], b: [f64; 2], x: f64, y: f64) -> f64 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let l2 = dx * dx + dy * dy;
     let t = if l2 > 0.0 { (((x - a[0]) * dx + (y - a[1]) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
@@ -639,6 +692,7 @@ pub struct Etape {
     pub choix: Vec<usize>,
     /// Copie de travail : l'étape garde aussi le mode.
     pub travail: Option<crate::geometrie::Travail>,
+    pub os: Option<crate::armature::EditionOs>,
 }
 
 #[derive(Default)]
@@ -721,7 +775,7 @@ mod tests {
     #[test]
     fn l_histoire_est_bornee() {
         let mut h = Historique::default();
-        let e = Etape { objets: vec![], sets: vec![], materiaux: vec![], actif: None, choix: vec![], travail: None };
+        let e = Etape { objets: vec![], sets: vec![], materiaux: vec![], actif: None, choix: vec![], travail: None, os: None };
         for _ in 0..HISTOIRE + 5 {
             h.memoriser(e.clone());
         }

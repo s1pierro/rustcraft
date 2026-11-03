@@ -20,8 +20,10 @@ fn vrais_projets() {
         for (b, x) in l.iter().zip(&p.objets) {
             let b = b.liste().unwrap();
             assert_eq!(b[0].txt().unwrap(), x.nom);
-            assert_eq!(b[1].num().unwrap() as usize, x.maillage.sommets.len());
-            assert_eq!(b[2].num().unwrap() as usize, x.maillage.faces.len());
+            // Le fichier ne garde pas le dessin d'une armature : il se déduit de ses os
+            let (s, f) = if x.armature.is_some() { (0, 0) } else { (x.maillage.sommets.len(), x.maillage.faces.len()) };
+            assert_eq!(b[1].num().unwrap() as usize, s);
+            assert_eq!(b[2].num().unwrap() as usize, f);
             assert_eq!(b[4], J::Bool(x.armature.is_some()));
         }
         let r = Projet::lire(&p.ecrire()).unwrap();

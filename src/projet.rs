@@ -1,17 +1,20 @@
-//! Projet GDA (`.gda`, JSON) : lecture avec migrations, écriture au même format,
-//! pour que Rustcraft et GDA ouvrent les fichiers l'un de l'autre.
+//! Projet GDA (`.gda`, JSON) : lecture des formats de GDA avec migrations, écriture au
+//! format 10, propre à Rustcraft : GDA n'ouvre pas ces fichiers.
 //!
-//! Ce que Rustcraft n'interprète pas encore (armatures, modifieurs) est gardé tel
+//! Ce que Rustcraft n'interprète pas encore (poses d'armature, modifieurs) est gardé tel
 //! quel et réécrit sans changement.
 
+use crate::armature::Armature;
+use crate::edition::{qappliquer, qinv, qmul, qnorm};
 use crate::json::{self, J};
 use crate::maillage::{extension, Maillage, MatMtl, SIGNATURE};
 use crate::texture::{self, Texture};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-/// Format écrit ; toute évolution suit `ED_FORMAT` de GDA.
-pub const FORMAT: f64 = 9.0;
+/// Format écrit. Le format 10, propre à Rustcraft, ajoute `id` et `liaison` aux objets ;
+/// GDA s'arrête au format 9.
+pub const FORMAT: f64 = 10.0;
 pub const DEFAUT: &str = "defaut";
 pub const SET_DEFAUT: &str = "main set";
 
@@ -120,8 +123,41 @@ fn hexa(v: Option<&str>) -> Option<String> {
     ok.then(|| v.to_lowercase())
 }
 
+/// Identifiant d'objet : un nom change, celui-ci reste, d'un lancement à l'autre.
+pub fn nouvel_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SUITE: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    format!("o{t:x}-{:x}", SUITE.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Attache d'un objet à une armature : un os, il le suit rigidement ; plusieurs, ses
+/// sommets se répartissent entre eux. La pose de liaison est la pose relative présente :
+/// l'armature emporte ses objets, et déplacer un objet seul redéfinit sa place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Liaison {
+    /// Identifiant de l'objet armature.
+    pub armature: String,
+    /// Identifiants des os.
+    pub os: Vec<String>,
+}
+
+impl Liaison {
+    fn lire(j: &J) -> Option<Liaison> {
+        let armature = j.get("armature").and_then(J::txt)?.to_string();
+        let os = j.get("os").and_then(J::liste)?.iter().filter_map(J::txt).map(str::to_string).collect();
+        Some(Liaison { armature, os })
+    }
+
+    fn vers_donnees(&self) -> J {
+        let os = self.os.iter().map(|i| J::Txt(i.clone())).collect();
+        J::Objet(vec![("armature".to_string(), J::Txt(self.armature.clone())), ("os".to_string(), J::Liste(os))])
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Objet {
+    pub id: String,
     pub nom: String,
     /// Partagé entre les étapes d'annulation et avec le rendu tant qu'il ne change pas.
     pub maillage: Arc<Maillage>,
@@ -134,7 +170,9 @@ pub struct Objet {
     /// Modifieurs, gardés tels quels jusqu'à leur portage.
     pub modifs: J,
     /// Armature, gardée telle quelle : son maillage reste vide.
-    pub armature: Option<J>,
+    pub armature: Option<Armature>,
+    /// Attache à une armature du projet ; jamais sur une armature.
+    pub liaison: Option<Liaison>,
     /// Sélection en mode Géométrie, hors du fichier, comme dans GDA.
     pub sel: crate::geometrie::Donnees,
 }
@@ -142,6 +180,7 @@ pub struct Objet {
 impl Objet {
     pub fn neuf(nom: &str, maillage: Maillage) -> Objet {
         Objet {
+            id: nouvel_id(),
             nom: nom.to_string(),
             maillage: Arc::new(maillage),
             position: [0.0; 3],
@@ -152,6 +191,7 @@ impl Objet {
             materiau: DEFAUT.to_string(),
             modifs: J::Liste(vec![]),
             armature: None,
+            liaison: None,
             sel: Default::default(),
         }
     }
@@ -222,6 +262,22 @@ impl Projet {
             }
             o.nom = n;
             pris.push(o.clone());
+        }
+
+        // Identifiants : le même fichier importé deux fois ne les reprend pas
+        let mut ids: HashSet<String> = self.objets.iter().map(|o| o.id.clone()).collect();
+        let mut suivis: Vec<(String, String)> = Vec::new();
+        for o in &mut objets {
+            if !ids.insert(o.id.clone()) {
+                let n = nouvel_id();
+                suivis.push((std::mem::replace(&mut o.id, n.clone()), n.clone()));
+                ids.insert(n);
+            }
+        }
+        for l in objets.iter_mut().filter_map(|o| o.liaison.as_mut()) {
+            if let Some((_, n)) = suivis.iter().find(|(a, _)| *a == l.armature) {
+                l.armature = n.clone();
+            }
         }
 
         // Matériaux utilisés seulement
@@ -297,8 +353,12 @@ impl Projet {
             let premiere = m.get("f").and_then(J::liste).and_then(|l| l.first()).and_then(J::liste).and_then(|f| f.first()).and_then(J::txt);
             let materiau = o.get("materiau").and_then(J::txt).filter(|s| !s.is_empty()).or(premiere).unwrap_or(DEFAUT);
             let e = echelle(o.get("echelle"));
-            let armature = o.get("armature").filter(|a| !matches!(a, J::Nul)).cloned();
+            let armature = o.get("armature").filter(|a| !matches!(a, J::Nul)).map(Armature::depuis_donnees);
+            // Une armature n'a pas de maillage propre : son dessin se déduit de ses os
+            let maillage = armature.as_ref().map_or(maillage, Armature::enveloppe_pose);
             objets.push(Objet {
+                id: o.get("id").and_then(J::txt).filter(|s| !s.is_empty()).map_or_else(nouvel_id, str::to_string),
+                liaison: o.get("liaison").and_then(Liaison::lire),
                 nom: nom.unwrap_or("objet").to_string(),
                 maillage: Arc::new(maillage),
                 position: o.get("position").and_then(J::nombres::<3>).unwrap_or([0.0; 3]),
@@ -349,6 +409,14 @@ impl Projet {
 
     /// `_verifierSets` et `_verifierMateriaux` : chaque objet a son set et son matériau.
     pub fn verifier(&mut self) {
+        let mut ids = HashSet::new();
+        for o in &mut self.objets {
+            if !ids.insert(o.id.clone()) {
+                o.id = nouvel_id();
+                ids.insert(o.id.clone());
+            }
+        }
+        self.verifier_liaisons();
         if self.sets.is_empty() {
             self.sets.push(Set { nom: SET_DEFAUT.into(), visible: true, replie: false });
         }
@@ -371,6 +439,56 @@ impl Projet {
                 self.materiaux.push((nom, Materiau::neuf(Some(t))));
             }
         }
+    }
+
+    /// Une liaison ne désigne que ce qui existe : un os disparu sort du groupe, et un
+    /// groupe vide délie l'objet.
+    pub fn verifier_liaisons(&mut self) {
+        let armatures: HashMap<String, Armature> = self.objets.iter().filter_map(|o| Some((o.id.clone(), o.armature.clone()?))).collect();
+        for o in &mut self.objets {
+            let Some(l) = &mut o.liaison else { continue };
+            match armatures.get(&l.armature).filter(|_| o.armature.is_none()) {
+                Some(a) => l.os.retain(|i| a.trouver(i).is_some()),
+                None => l.os.clear(),
+            }
+            if l.os.is_empty() {
+                o.liaison = None;
+            }
+        }
+    }
+
+    /// Place d'un objet lié à un seul os que la pose déplace : ce mouvement est rigide,
+    /// l'objet garde donc une position et une rotation, et ses données ne changent pas.
+    pub fn place_posee(&self, o: &Objet) -> Option<([f64; 3], [f64; 4])> {
+        let l = o.liaison.as_ref()?;
+        let [i] = &l.os[..] else { return None };
+        let x = self.objet_id(&l.armature)?;
+        let (pr, pp, q) = x.armature.as_ref()?.ecart_os(i)?;
+        let (s, ri) = (x.echelle[0], qinv(qnorm(x.rotation)));
+        let r = qappliquer(ri, [0, 1, 2].map(|k| (o.position[k] - x.position[k]) / s));
+        let r = qappliquer(q, [0, 1, 2].map(|k| r[k] - pr[k]));
+        let m = qappliquer(x.rotation, [0, 1, 2].map(|k| (r[k] + pp[k]) * s));
+        let position = [0, 1, 2].map(|k| x.position[k] + m[k]);
+        Some((position, qnorm(qmul(x.rotation, qmul(q, qmul(ri, o.rotation))))))
+    }
+
+    pub fn objet_id(&self, id: &str) -> Option<&Objet> {
+        self.objets.iter().find(|o| o.id == id)
+    }
+
+    pub fn set(&self, nom: &str) -> Option<&Set> {
+        self.sets.iter().find(|e| e.nom == nom)
+    }
+
+    /// `base`, ou `base 2`, `base 3`… s'il est pris.
+    pub fn nom_set_libre(&self, base: &str) -> String {
+        let mut n = base.to_string();
+        let mut k = 2;
+        while self.set(&n).is_some() {
+            n = format!("{base} {k}");
+            k += 1;
+        }
+        n
     }
 
     /// Teinte du prochain matériau, tour à tour.
@@ -407,11 +525,12 @@ impl Projet {
             .objets
             .iter()
             .map(|o| {
-                let mut d = (*o.maillage).clone();
+                let mut d = if o.armature.is_some() { Maillage::default() } else { (*o.maillage).clone() };
                 for f in &mut d.faces {
                     f.m = std::sync::Arc::from(o.materiau.as_str());
                 }
                 let mut l = vec![
+                    c("id", t(&o.id)),
                     c("nom", t(&o.nom)),
                     c("position", nums(&o.position)),
                     c("rotation", nums(&o.rotation)),
@@ -422,7 +541,10 @@ impl Projet {
                     c("materiau", t(&o.materiau)),
                 ];
                 if let Some(a) = &o.armature {
-                    l.push(c("armature", a.clone()));
+                    l.push(c("armature", a.vers_donnees()));
+                }
+                if let Some(x) = &o.liaison {
+                    l.push(c("liaison", x.vers_donnees()));
                 }
                 l.push(c("maillage", d.vers_donnees()));
                 J::Objet(l)
@@ -750,5 +872,65 @@ mod tests {
         let p = Projet::lire(t).unwrap();
         let noms: Vec<&str> = p.sets.iter().map(|e| e.nom.as_str()).collect();
         assert_eq!(noms, ["b", "a"]);
+    }
+
+    #[test]
+    fn la_liaison_et_l_identifiant_reviennent_du_fichier() {
+        let mut p = Projet::neuf();
+        let mut a = Objet::neuf("a", Maillage::default());
+        a.armature = Some(Armature::humanoide());
+        let os: Vec<String> = a.armature.as_ref().unwrap().os.iter().take(2).map(|b| b.id.clone()).collect();
+        p.objets[0].liaison = Some(Liaison { armature: a.id.clone(), os });
+        p.objets.push(a);
+        p.verifier();
+        let t = p.ecrire();
+        assert!(t.contains("\"version\": 10"));
+        let r = Projet::lire(&t).unwrap();
+        assert_eq!(r.objets[0].id, p.objets[0].id);
+        assert_eq!(r.objets[0].liaison, p.objets[0].liaison);
+    }
+
+    #[test]
+    fn un_ancien_projet_recoit_des_identifiants_distincts() {
+        let t = r#"{"format":"gda","version":9,"scene":{"objets":[{"maillage":{"v":[],"f":[]}},{"id":"x","maillage":{"v":[],"f":[]}},{"id":"x","maillage":{"v":[],"f":[]}}]}}"#;
+        let p = Projet::lire(t).unwrap();
+        let ids: HashSet<&String> = p.objets.iter().map(|o| &o.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(p.objets[1].id, "x");
+    }
+
+    #[test]
+    fn une_liaison_ne_garde_que_ce_qui_existe() {
+        let mut p = Projet::neuf();
+        let mut a = Objet::neuf("a", Maillage::default());
+        a.armature = Some(Armature::humanoide());
+        let i = a.armature.as_ref().unwrap().os[0].id.clone();
+        p.objets[0].liaison = Some(Liaison { armature: a.id.clone(), os: vec![i.clone(), "absent".into()] });
+        let mut orphelin = Objet::neuf("o", Maillage::default());
+        orphelin.liaison = Some(Liaison { armature: "absente".into(), os: vec![i.clone()] });
+        let mut plus = a.clone();
+        plus.id = "autre".into();
+        plus.liaison = Some(Liaison { armature: a.id.clone(), os: vec![i.clone()] });
+        p.objets.extend([a, orphelin, plus]);
+        p.verifier();
+        assert_eq!(p.objets[0].liaison.as_ref().unwrap().os, [i]);
+        assert!(p.objets[2].liaison.is_none() && p.objets[3].liaison.is_none(), "orpheline, ou sur une armature");
+    }
+
+    #[test]
+    fn importer_deux_fois_garde_chaque_objet_sur_son_armature() {
+        let mut f = Projet::neuf();
+        let mut a = Objet::neuf("a", Maillage::default());
+        a.armature = Some(Armature::humanoide());
+        f.objets[0].liaison = Some(Liaison { armature: a.id.clone(), os: vec![a.armature.as_ref().unwrap().os[0].id.clone()] });
+        f.objets.push(a);
+        let mut p = Projet::neuf();
+        p.fusionner(f.clone(), SET_DEFAUT);
+        let l = p.fusionner(f, SET_DEFAUT);
+        let ids: HashSet<&String> = p.objets.iter().map(|o| &o.id).collect();
+        assert_eq!(ids.len(), 5);
+        let (o, a) = (&p.objets[l[0]], &p.objets[l[1]]);
+        assert_eq!(o.liaison.as_ref().unwrap().armature, a.id);
+        assert_ne!(p.objets[1].liaison.as_ref().unwrap().armature, a.id);
     }
 }

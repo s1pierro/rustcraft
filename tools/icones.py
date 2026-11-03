@@ -289,6 +289,7 @@ def main():
         ('PIVOT_ORIGINE', fichier(racine, 'lucide--move-3d')),
         ('MODIFS', fichier(racine, 'lucide--wrench')),
         ('GLOBE', fichier(racine, 'scene')),
+        ('OS', fichier(racine, 'os')),
         ('SCENE', fichier(racine, 'iconoir--3d-select-solid')),
         ('ARETES', fichier(racine, 'iconoir--select-edge-3d')),
         ('FACES', fichier(racine, 'iconoir--select-face-3d')),
