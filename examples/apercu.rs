@@ -1,7 +1,10 @@
 //! Dessine l'application sur le vrai processeur graphique, hors écran, et écrit
-//! des images PPM. Sert à valider nuanceurs et mise en page sans installer l'APK.
+//! des images PNG. Sert à valider nuanceurs et mise en page sans installer l'APK.
 //!
-//!   cargo run --example apercu -- <dossier> [projet.gda]
+//!   cargo run --example apercu -- <dossier> [projet.gda] [vue…]
+//!
+//! Sans nom de vue, toutes sont dessinées ; `pose*` prend celles qui commencent par
+//! `pose`. Un argument qui est un fichier existant est le projet à ouvrir.
 
 use rustcraft::draw::{DrawList, Rect};
 use rustcraft::edition::Mode;
@@ -38,7 +41,9 @@ struct Vue {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).expect("dossier de sortie");
-    let fichier = args.get(2).map(|f| (f.rsplit('/').next().unwrap().to_string(), std::fs::read(f).expect("projet")));
+    let (fichiers, noms): (Vec<&String>, Vec<&String>) = args.iter().skip(2).partition(|a| std::path::Path::new(a.as_str()).is_file());
+    let fichier = fichiers.first().map(|f| (f.rsplit('/').next().unwrap().to_string(), std::fs::read(f).expect("projet")));
+    let voulue = |n: &str| noms.is_empty() || noms.iter().any(|v| v.strip_suffix('*').map_or(v.as_str() == n, |p| n.starts_with(p)));
     let vues = [
         Vue { nom: "tablette", w: 1920, h: 1200, dp: 1.5, debut: true, fin: false, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "tablette-jeu", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Jeu, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
@@ -93,7 +98,13 @@ fn main() {
     println!("nuanceurs compilés et liés");
     let mut text = Text::new();
 
-    for s in vues {
+    let inconnues: Vec<&&String> = noms.iter().filter(|v| !vues.iter().any(|s| v.strip_suffix('*').map_or(v.as_str() == s.nom, |p| s.nom.starts_with(p)))).collect();
+    if !inconnues.is_empty() {
+        let toutes: Vec<&str> = vues.iter().map(|s| s.nom).collect();
+        eprintln!("vue inconnue : {inconnues:?}\nvues : {}", toutes.join(" "));
+        std::process::exit(2);
+    }
+    for s in vues.into_iter().filter(|s| voulue(s.nom)) {
         let (w, h) = (s.w as f32, s.h as f32);
         let ecran = Rect::new(0.0, 0.0, w, h);
         let mut app = App::new(s.dp);
@@ -418,12 +429,17 @@ fn main() {
             let e = (gl.glGetError)();
             println!("{} : {} objets, ouvrir {ms_ouvrir:.0} ms, tampons {ms_tampons:.0} ms, dessin {:.1} ms, erreur GL {e:#x}", s.nom, sc.objets.len(), t0.elapsed().as_secs_f64() * 1e3);
         }
-        let mut out = format!("P6\n{} {}\n255\n", s.w, s.h).into_bytes();
+        // OpenGL lit de bas en haut ; le PNG va de haut en bas, sans alpha
+        let mut rgb = Vec::with_capacity((s.w * s.h * 3) as usize);
         for y in (0..s.h as usize).rev() {
             for x in 0..s.w as usize {
-                out.extend_from_slice(&px[(y * s.w as usize + x) * 4..][..3]);
+                rgb.extend_from_slice(&px[(y * s.w as usize + x) * 4..][..3]);
             }
         }
-        std::fs::write(format!("{dir}/{}.ppm", s.nom), out).unwrap();
+        let f = std::io::BufWriter::new(std::fs::File::create(format!("{dir}/{}.png", s.nom)).unwrap());
+        let mut e = png::Encoder::new(f, s.w as u32, s.h as u32);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&rgb).unwrap();
     }
 }

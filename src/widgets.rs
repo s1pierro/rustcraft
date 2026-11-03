@@ -174,7 +174,8 @@ impl Cx<'_> {
         let pressed = self.ui.pressed(id);
         self.dl.shadow(Rect::new(r.x, r.y + 2.0 * self.dp, r.w, r.h), r.h / 2.0, 6.0 * self.dp, SHADOW);
         self.dl.rrect(r, r.h / 2.0, if active { couleur } else if pressed { coul(C::Fond) } else { coul(C::Surface) });
-        let c = 26.0 * self.dp;
+        // Le pictogramme suit la pilule quand elle rétrécit
+        let c = (26.0 * self.dp).min(r.h * 0.6);
         let encre = if active { BLANC } else { coul(C::Texte) };
         let x = if label.is_some() { r.x + 14.0 * self.dp } else { r.cx() - c / 2.0 };
         self.icone(Rect::new(x, r.cy() - c / 2.0, c, c), icone, encre);

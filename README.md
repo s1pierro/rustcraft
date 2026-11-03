@@ -12,7 +12,7 @@ ouvrez la page, puis touchez le fichier `.apk`.
 
 ## État
 
-Version 0.39 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
+Version 0.41 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
 
 - Projets `.gda` des formats 1 à 10, fichiers OBJ, STL, glTF et GLB ; Rustcraft écrit
   le format 10, que GDA n'ouvre pas
@@ -71,7 +71,7 @@ Version 0.39 : **édition en modes Scène, Géométrie et Pose, armatures, modif
   ou à un seul ; l'armature emporte ses objets ; enregistrée dans le `.gda`
 - Mode Pose, dont la pilule apparaît quand une armature est active : les os tournent
   autour de leur tête, selon les axes de l'os actif posé, à la poignée comme aux trois
-  curseurs d'angle de l'os actif (plier en X et Z, vriller en Y), dans ses limites, que
+  curseurs d'angle de l'os actif, qui tournent comme ses anneaux (plier en X et Z, vriller en Y), dans ses limites, que
   ses anneaux montrent en secteurs, sans anneau pour un axe bloqué ; en manipulation
   Tirer, au bouton de la barre du bas, on saisit directement un os et la chaîne qui le
   relie à l'ancre se plie pour le suivre, dans les limites, comme la marionnette de GDA ;

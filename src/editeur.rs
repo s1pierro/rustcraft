@@ -762,6 +762,8 @@ pub struct App {
     /// glissé pour que les autres ne sautent pas ; l'annulation est déjà mémorisée.
     angles_tenus: Option<(String, [f64; 3])>,
     angle_saisie: bool,
+    /// Curseur d'angle tenu : l'os, l'axe, sa rotation et la valeur du curseur au début.
+    angle_depart: Option<(String, usize, ed::Q, f64)>,
     /// En pose, la manipulation Tirer : on saisit un os, la chaîne suit jusqu'à l'ancre.
     pub tirer: bool,
     /// Saisie directe en cours : l'os tenu, et le point du monde par où passe le plan du doigt.
@@ -856,6 +858,7 @@ impl App {
             os_scene: None,
             angles_tenus: None,
             angle_saisie: false,
+            angle_depart: None,
             tirer: false,
             saisie: None,
             os_plies: HashSet::new(),
@@ -4374,6 +4377,12 @@ impl App {
     /// largeur `l`, centrées ou non. Rend celle qui est touchée et celle tenue longtemps.
     fn rangees(cx: &mut Cx, items: &[Pilule], x: f32, y: f32, l: f32, centre: bool) -> (Option<usize>, Option<usize>) {
         let (h, ecart) = (44.0 * cx.dp, 8.0 * cx.dp);
+        Self::rangees_de(cx, items, x, y, l, centre, h, ecart)
+    }
+
+    /// Rangées de pilules de hauteur `h`, séparées de `ecart`.
+    #[allow(clippy::too_many_arguments)]
+    fn rangees_de(cx: &mut Cx, items: &[Pilule], x: f32, y: f32, l: f32, centre: bool, h: f32, ecart: f32) -> (Option<usize>, Option<usize>) {
         let (mut appui, mut long) = (None, None);
         for (n, (a, b, largeur)) in Self::coupes(items, l, ecart).into_iter().enumerate() {
             let mut px = if centre { x + (l - largeur) / 2.0 } else { x };
@@ -4521,9 +4530,18 @@ impl App {
         }
         let outils = l.len();
         l.extend(self.pilules_selection(cx));
-        let n = Self::coupes(&l, w.w - 2.0 * m, ecart).len() as f32;
-        let haut = w.bottom() - m - n * h - (n - 1.0) * ecart;
-        let (appui, long) = Self::rangees(cx, &l, w.x + m, haut, w.w - 2.0 * m, true);
+        // Comme les pastilles du haut, la barre tient sur une ligne : l'écart cède
+        // d'abord, puis les pilules rétrécissent
+        let (large, somme) = (w.w - 2.0 * m, l.iter().map(|p| p.l).sum::<f32>());
+        let vides = l.len().saturating_sub(1) as f32;
+        let ecart = ((large - somme) / vides.max(1.0)).clamp(3.0 * d, ecart);
+        let k = ((large - ecart * vides) / somme).min(1.0);
+        for p in &mut l {
+            p.l *= k;
+        }
+        let h = h * k;
+        let haut = w.bottom() - m - h;
+        let (appui, long) = Self::rangees_de(cx, &l, w.x + m, haut, large, true, h, ecart);
         if let Some(i) = long.filter(|i| *i >= outils) {
             self.appui_selection(i - outils, true);
         }
@@ -5887,14 +5905,14 @@ impl App {
         }
     }
 
-    /// Trois curseurs : la rotation de l'os actif depuis son repos, en degrés, autour
-    /// des axes X, Y puis Z de l'os.
+    /// Trois curseurs : les angles de l'os actif depuis son repos, en degrés. Glisser
+    /// l'un d'eux tourne l'os autour de cet axe de l'os posé, comme son anneau.
     fn angles_os(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, os: &str, r: ed::Q, l: [Limite; 3]) {
         let base = match &self.angles_tenus {
             Some((i, v)) if i == os => *v,
             _ => angles_os(r),
         };
-        let (mut nouveau, mut tenu) = (base, false);
+        let (mut tourne, mut tenu) = (None, false);
         for k in 0..3 {
             let z = sub_id(id("os-angle"), k);
             let mut v = base[k] as f32;
@@ -5908,16 +5926,52 @@ impl App {
             cx.slider_borne(b, z, nom, &montre, &mut v, -180.0, 180.0, plage, libre);
             tenu |= cx.ui.pressed(z);
             if v != base[k] as f32 {
-                nouveau[k] = (v as f64).round();
+                tourne = Some((k, v as f64));
             }
         }
-        if nouveau != base {
-            self.regler_angles(os, nouveau);
+        if let Some((k, v)) = tourne {
+            // Le départ : la rotation de l'os et la valeur du curseur quand on l'a pris
+            let depart = match &self.angle_depart {
+                Some((i, j, r0, v0)) if i == os && *j == k => (*r0, *v0),
+                _ => (r, base[k]),
+            };
+            self.angle_depart = Some((os.to_string(), k, depart.0, depart.1));
+            self.tourner_axe_os(os, k, v - depart.1, depart.0, base, v);
         }
         if !tenu {
             self.angles_tenus = None;
+            self.angle_depart = None;
             self.angle_saisie = false;
         }
+    }
+
+    /// Un curseur d'angle tourne l'os comme son anneau : de `degres` autour de l'axe `k`
+    /// de l'os posé, depuis la rotation `r0` qu'il avait quand on a pris le curseur.
+    /// Les autres curseurs gardent leur valeur pendant le geste, puis suivent l'os.
+    pub fn tourner_axe_os(&mut self, id: &str, k: usize, degres: f64, r0: ed::Q, montres: [f64; 3], v: f64) {
+        if !self.angle_saisie {
+            self.memoriser();
+            self.angle_saisie = true;
+        }
+        let Some(e) = &mut self.os else { return };
+        let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
+        let Some(a) = &mut o.armature else { return };
+        let mut u = [0.0; 3];
+        u[k] = 1.0;
+        let r = ed::qnorm(ed::qmul(r0, ed::qaxe(u, degres.to_radians())));
+        let rb = a.trouver(id).map_or(r, |x| x.borner(r, r0));
+        let mut montres = montres;
+        montres[k] = if rb == r { v } else { angles_os(rb)[k] };
+        self.angles_tenus = Some((id.to_string(), montres));
+        let t = a.pose.get(id).map_or([0.0; 3], |p| p.t);
+        if angles_os(rb).iter().all(|x| x.abs() < 1e-9) && t == [0.0; 3] {
+            a.pose.remove(id);
+        } else {
+            a.pose.insert(id.to_string(), Ecart { r: rb, t });
+        }
+        o.maillage = Arc::new(a.enveloppe_pose());
+        e.version += 1;
+        self.a_sauver = true;
     }
 
     /// Donne à l'os `id` la rotation de ces angles, depuis son repos.
@@ -8015,12 +8069,18 @@ mod tests {
     }
 
     #[test]
-    fn la_barre_passe_a_la_ligne_sur_un_ecran_etroit() {
+    fn la_barre_tient_sur_une_ligne_meme_sur_un_ecran_etroit() {
         let mut large = Banc::pret();
         let mut cx = Cx { ui: &mut large.ui, text: &mut large.text, dl: &mut large.dl, dp: 1.5 };
-        let (w, e) = (Rect::new(0.0, 0.0, 1900.0, 1200.0), Rect::new(0.0, 0.0, 500.0, 1200.0));
-        let (un, deux) = (large.app.barre(&mut cx, w), large.app.barre(&mut cx, e));
-        assert!(deux < un);
+        let (w, e) = (Rect::new(0.0, 0.0, 1900.0, 1200.0), Rect::new(0.0, 0.0, 400.0, 1200.0));
+        let un = large.app.barre(&mut cx, w);
+        let mut etroit = Banc::pret();
+        let mut cx = Cx { ui: &mut etroit.ui, text: &mut etroit.text, dl: &mut etroit.dl, dp: 1.5 };
+        let deux = etroit.app.barre(&mut cx, e);
+        // Plus basse, car plus fine : ses pilules rétrécissent sur une seule ligne
+        assert!(deux > un);
+        // Une seule ligne : pas plus haute qu'une pilule
+        assert!(e.bottom() - 14.0 * 1.5 - deux <= 44.0 * 1.5 + 1e-3);
     }
 
     #[test]
@@ -9962,6 +10022,42 @@ mod tests {
         tourner_bras(&mut b, ed::qaxe(z, 1.0));
         let v = angles_os(b.app.projet.objets[1].armature.as_ref().unwrap().pose[&bras].r);
         assert!((v[2] - 30.0).abs() < 1e-6 && v[0].abs() < 1e-6, "{v:?}");
+    }
+
+    #[test]
+    fn un_curseur_d_angle_tourne_l_os_comme_son_anneau() {
+        let (mut b, bras) = banc_pose();
+        b.app.os.as_mut().unwrap().actif = Some(bras.clone());
+        b.app.regler_angles(&bras, [0.0, 0.0, 70.0]);
+        b.app.angle_saisie = false;
+        let r0 = b.app.projet.objets[1].armature.as_ref().unwrap().pose[&bras].r;
+        b.app.contenu = Contenu::Os;
+        b.app.shell.end.open = true;
+        b.app.os_plies.insert(format!("a:{}", b.app.projet.objets[1].id));
+        b.images(2);
+        // Glisser le curseur X vers la droite
+        let z = b.ui.zone(sub_id(id("os-angle"), 0)).unwrap();
+        assert_eq!(b.glisser((z.cx(), z.bottom() - 20.0), (z.cx() + 60.0, z.bottom() - 20.0)), 1);
+        let r = b.app.projet.objets[1].armature.as_ref().unwrap().pose[&bras].r;
+        // L'écart depuis le départ est une rotation autour de l'axe X de l'os posé
+        let d = ed::qnorm(ed::qmul(ed::qinv(r0), r));
+        assert!(d[1].abs() < 1e-9 && d[2].abs() < 1e-9 && d[0].abs() > 0.05, "{d:?}");
+        // Comme l'anneau X de la poignée, dans le monde
+        let o = &b.app.projet.objets[1];
+        let s = |b: &Banc| b.app.projet.objets[1].armature.as_ref().unwrap().matrices_pose()[&bras].1;
+        let w0 = ed::qmul(o.rotation, b.app.projet.objets[1].armature.as_ref().map(|a| {
+            let mut a = a.clone();
+            a.pose.insert(bras.clone(), crate::armature::Ecart { r: r0, t: [0.0; 3] });
+            a.matrices_pose()[&bras].1
+        }).unwrap());
+        let axe = ed::qappliquer(w0, [1.0, 0.0, 0.0]);
+        let angle = 2.0 * d[0].atan2(d[3]);
+        let attendu = ed::qmul(ed::qaxe(axe, angle), w0);
+        let obtenu = ed::qmul(o.rotation, s(&b));
+        let pres = (0..4).all(|k| (attendu[k] - obtenu[k]).abs() < 1e-9) || (0..4).all(|k| (attendu[k] + obtenu[k]).abs() < 1e-9);
+        assert!(pres, "{attendu:?} / {obtenu:?}");
+        b.app.annuler();
+        assert_eq!(b.app.projet.objets[1].armature.as_ref().unwrap().pose[&bras].r, r0);
     }
 
     #[test]
