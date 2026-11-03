@@ -17,6 +17,7 @@ pub mod editeur;
 pub mod gles;
 pub mod json;
 pub mod maillage;
+pub mod marionnette;
 pub mod math;
 pub mod projet;
 pub mod renderer;

@@ -62,6 +62,7 @@ fn main() {
         Vue { nom: "pose", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-limites", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-limites-geo", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "pose-tirer", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-scene", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "devant", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "peau", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
@@ -217,6 +218,19 @@ fn main() {
                 e.selectionner(&a, &[os("avant-bras.G")], false);
                 app.contenu = Contenu::Os;
             }
+            if s.nom == "pose-tirer" {
+                app.entrer_armature();
+                app.basculer_pose();
+                app.tirer = true;
+                let x = app.projet.objets[k].armature.as_mut().unwrap();
+                x.regler_ancre(Some(&os("pied.G")));
+                let e = app.os.as_mut().unwrap();
+                e.actif = Some(os("jambe.G"));
+                e.selectionner(&a, &[os("jambe.G")], false);
+                app.os_plies.insert(os("colonne"));
+                app.os_plies.insert(os("cuisse.D"));
+                app.contenu = Contenu::Os;
+            }
             if s.nom == "pose" || s.nom == "pose-limites" {
                 app.entrer_armature();
                 app.basculer_pose();
@@ -366,7 +380,7 @@ fn main() {
                 _ => app.ouvrir_uv(),
             }
         }
-        if s.nom.starts_with("armature") || s.nom == "pose" || s.nom.starts_with("pose-limites") || s.nom.starts_with("sets") || s.nom == "modifieurs" || s.nom.starts_with("vis") || s.nom.starts_with("uv") || s.nom.starts_with("materiaux") {
+        if s.nom.starts_with("armature") || s.nom == "pose" || s.nom.starts_with("pose-limites") || s.nom == "pose-tirer" || s.nom.starts_with("sets") || s.nom == "modifieurs" || s.nom.starts_with("vis") || s.nom.starts_with("uv") || s.nom.starts_with("materiaux") {
             let t0 = std::time::Instant::now();
             let sc = etape(&mut app, &mut ui, &mut text, &mut dl);
             render.draw(w, h, &sc, &dl, &mut text);

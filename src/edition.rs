@@ -296,7 +296,7 @@ impl Vue {
     }
 
     /// Point du plan (normale `n`, passant par `p`) sous le pixel ; `None` s'il est rasant.
-    fn sur_plan(&self, x: f64, y: f64, n: P3, p: P3) -> Option<P3> {
+    pub fn sur_plan(&self, x: f64, y: f64, n: P3, p: P3) -> Option<P3> {
         let d = self.rayon(x, y);
         let den = scal(d, n);
         if den.abs() < 0.12 {

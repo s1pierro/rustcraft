@@ -12,7 +12,7 @@ ouvrez la page, puis touchez le fichier `.apk`.
 
 ## État
 
-Version 0.38 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
+Version 0.39 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
 
 - Projets `.gda` des formats 1 à 10, fichiers OBJ, STL, glTF et GLB ; Rustcraft écrit
   le format 10, que GDA n'ouvre pas
@@ -72,7 +72,10 @@ Version 0.38 : **édition en modes Scène, Géométrie et Pose, armatures, modif
 - Mode Pose, dont la pilule apparaît quand une armature est active : les os tournent
   autour de leur tête, selon les axes de l'os actif posé, à la poignée comme aux trois
   curseurs d'angle de l'os actif (plier en X et Z, vriller en Y), dans ses limites, que
-  ses anneaux montrent en secteurs, sans anneau pour un axe bloqué ; le panneau Os ne garde
+  ses anneaux montrent en secteurs, sans anneau pour un axe bloqué ; en manipulation
+  Tirer, au bouton de la barre du bas, on saisit directement un os et la chaîne qui le
+  relie à l'ancre se plie pour le suivre, dans les limites, comme la marionnette de GDA ;
+  l'ancre reste fixe dans le monde, la racine par défaut, « Ancrer ici » sur l'os actif ; le panneau Os ne garde
   que la pose ; « Sauvegarder la pose » la garde dans l'onglet Catalogue, d'où elle se
   rappelle, se renomme, se remplace ou se supprime ; un objet lié à
   un seul os le suit, un objet lié à un groupe se déforme selon des poids automatiques
@@ -85,8 +88,8 @@ Version 0.38 : **édition en modes Scène, Géométrie et Pose, armatures, modif
   scène complète ou les seuls objets choisis, et `.mtl`, dans Téléchargements
   (Android 10 ou plus) ; sauvegarde automatique d'un lancement à l'autre
 
-Pas encore disponibles : curseur 3D à la main ; limites de translation et ancre des
-armatures, conservées dans le projet mais ni éditables ni appliquées ; poids à la main.
+Pas encore disponibles : curseur 3D à la main ; limites de translation des armatures,
+conservées dans le projet mais ni éditables ni appliquées ; poids à la main.
 Les limites de rotation suivent l'ordre des curseurs (X, puis Z, puis la vrille Y) ;
 GDA compose ses angles dans l'ordre X, Y, Z.
 Les armatures et les poids ne sont pas exportés, et les objets s'exportent au repos. En mode Géométrie, les objets sont édités sans leurs
@@ -107,6 +110,7 @@ Depuis le panneau Fichier, ou depuis un gestionnaire de fichiers : **Ouvrir avec
 - `src/booleens.rs`, `modifs.rs` : opérations booléennes et évaluation des modifieurs
 - `src/primitives.rs`, `visserie.rs` : réglages des primitives, pièces de visserie
 - `src/armature.rs` : os, hiérarchie, pose, limites, bouts soudés et sélection des os, sans interface
+- `src/marionnette.rs` : saisie directe d'une armature posée, l'ancre restant fixe, sans interface
 - `src/peau.rs` : poids automatiques et déformation des objets liés à un groupe d'os, sans interface
 - `src/uv.rs` : points, îlots et transformations des coordonnées de texture, sans interface
 - `src/vue.rs`, `editeur.rs` : du modèle à l'écran, et l'interface de l'éditeur
@@ -137,6 +141,11 @@ par le vrai `visserie.js` et le vrai Manifold de GDA :
 `tests/armature.json`, produit par le vrai `moteur/armature.js` de GDA :
 
     node tools/reference-armature.js <dossier de GDA> tests/armature.json
+
+`tests/marionnette.rs` rejoue des saisies directes et les compare à `tests/marionnette.json`,
+produit par le vrai `moteur/marionnette.js` (ancres diverses, articulations soudées) :
+
+    node tools/reference-marionnette.js <dossier de GDA> tests/marionnette.json
 
 `tests/peau.rs` compare les poids et les déformations à `tests/peau.json`, produit par le
 vrai `moteur/peau.js` :

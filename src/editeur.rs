@@ -69,6 +69,12 @@ const ONGLET_DERNIERE: usize = 1;
 
 const COUL_AXES: [C; 3] = [C::AxeX, C::AxeY, C::AxeZ];
 const NOMS_AXES: [&str; 3] = ["X", "Y", "Z"];
+
+/// Tirer : une chaîne d'os, et la main qui emmène son bout.
+const TIRER: Icone = Icone {
+    traits: &[(1.6, &[[4.0, 20.0], [9.0, 14.0], [12.0, 9.0]]), (1.6, &[[12.0, 9.0], [19.0, 4.0]]), (1.6, &[[15.0, 3.5], [19.5, 3.5], [19.5, 8.0]])],
+    disques: &[[4.0, 20.0, 2.2], [9.0, 14.0, 1.8], [12.0, 9.0, 1.8]],
+};
 const NOMS_PIVOTS: [&str; 5] = ["Médian", "Boîte", "Actif", "Curseur", "Origine"];
 const ICONES_PIVOTS: [&Icone; 5] = [&icones::PIVOT_MEDIAN, &icones::PIVOT_BOITE, &icones::PIVOT_ACTIF, &icones::PIVOT_CURSEUR, &icones::PIVOT_ORIGINE];
 const NOMS_FILTRES: [&str; 3] = ["Sommets", "Arêtes", "Faces"];
@@ -756,6 +762,10 @@ pub struct App {
     /// glissé pour que les autres ne sautent pas ; l'annulation est déjà mémorisée.
     angles_tenus: Option<(String, [f64; 3])>,
     angle_saisie: bool,
+    /// En pose, la manipulation Tirer : on saisit un os, la chaîne suit jusqu'à l'ancre.
+    pub tirer: bool,
+    /// Saisie directe en cours : l'os tenu, et le point du monde par où passe le plan du doigt.
+    saisie: Option<(crate::marionnette::Saisie, P3)>,
     /// Lignes repliées de l'arbre des armatures : `a:` et l'identifiant d'une
     /// armature, ou l'identifiant d'un os.
     pub os_plies: HashSet<String>,
@@ -846,6 +856,8 @@ impl App {
             os_scene: None,
             angles_tenus: None,
             angle_saisie: false,
+            tirer: false,
+            saisie: None,
             os_plies: HashSet::new(),
             onglet_os: 0,
             pose_choisie: None,
@@ -2320,6 +2332,7 @@ impl App {
 
     fn fin_geste(&mut self) {
         self.geste = None;
+        self.saisie = None;
         self.boite = None;
         self.derniere = None;
     }
@@ -2378,6 +2391,63 @@ impl App {
         }
         // En pose, on prend un os entier
         if e.pose { corps } else { bout.or(corps) }.map(|m| m.1)
+    }
+
+    /// En pose, la manipulation Tirer.
+    pub fn tirer_actif(&self) -> bool {
+        self.tirer && self.os.as_ref().is_some_and(|e| e.pose && e.objet.is_some())
+    }
+
+    /// Saisit l'os sous le doigt au point le plus proche de lui le long de l'os posé ;
+    /// il devient l'os actif. Faux s'il n'y a pas d'os.
+    pub fn saisir_os(&mut self, x: f64, y: f64, vue: &Vue, rayon: f64) -> bool {
+        let Some(t) = self.os_sous(x, y, vue, rayon) else { return false };
+        let Some((_, o, a)) = self.armature_os() else { return false };
+        let (s, mx) = (a.segments_pose(), o.matrice());
+        let Some(g) = s.get(&t.os) else { return false };
+        let (ea, eb) = (vue.ecran(vue::appliquer(&mx, g.tete)), vue.ecran(vue::appliquer(&mx, g.queue)));
+        let k = match (ea, eb) {
+            (Some(p), Some(q)) => {
+                let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+                let l = dx * dx + dy * dy;
+                if l > 1e-9 { (((x - p[0]) * dx + (y - p[1]) * dy) / l).clamp(0.0, 1.0) } else { 0.5 }
+            }
+            _ => 0.5,
+        };
+        let point: P3 = std::array::from_fn(|j| g.tete[j] + (g.queue[j] - g.tete[j]) * k);
+        let saisie = a.saisir(&t.os, point);
+        let monde = vue::appliquer(&mx, point);
+        let a = a.clone();
+        self.memoriser();
+        if let Some(e) = &mut self.os {
+            e.selectionner(&a, std::slice::from_ref(&t.os), false);
+            e.actif = Some(t.os.clone());
+            e.version += 1;
+        }
+        if saisie.chaine.is_empty() {
+            self.dire("Cet os ne bouge pas : c'est l'ancre, ou il fait bloc avec elle".into());
+        }
+        self.saisie = Some((saisie, monde));
+        true
+    }
+
+    /// Amène l'os saisi sous le doigt, dans le plan face à la vue où il a été pris.
+    pub fn tirer_os(&mut self, x: f64, y: f64, vue: &Vue) {
+        let Some((s, p)) = &self.saisie else { return };
+        let Some(cible) = vue.sur_plan(x, y, vue.dos, *p) else { return };
+        let Some(e) = &mut self.os else { return };
+        let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
+        let c = geo::vers_local(o, cible);
+        let Some(a) = &mut o.armature else { return };
+        a.tirer(s, c, 8);
+        o.maillage = Arc::new(a.enveloppe_pose());
+        e.version += 1;
+    }
+
+    /// L'os actif devient l'ancre de son armature.
+    pub fn ancrer_actif(&mut self) {
+        let Some(i) = self.os_actif().map(|x| x.1.id.clone()) else { return };
+        self.changer_os(|a, _| a.regler_ancre(Some(&i)));
     }
 
     /// Le doigt est sur des bouts tous sélectionnés.
@@ -2939,6 +3009,9 @@ impl App {
     }
 
     fn poignee(&self, vue: &Vue, dp: f32) -> Option<Poignee> {
+        if self.tirer_actif() {
+            return None;
+        }
         let pts = self.points();
         if pts.is_empty() {
             return None;
@@ -2997,6 +3070,13 @@ impl App {
         let vue = self.vue_ecran(w);
         let (px, py) = ((x - w.x) as f64, (y - w.y) as f64);
         let dp = cx.dp as f64;
+        if self.tirer_actif() {
+            // Tirer : le doigt part d'un os, qu'il emmène ; ailleurs, il tourne la vue
+            if self.saisir_os(px, py, &vue, self.rayon(cx.dp)) {
+                cx.ui.saisir((x, y));
+            }
+            return;
+        }
         let boite = self.selection == Selection::Boite;
         let poignee = self.poignee(&vue, cx.dp);
         let mut prise = poignee.and_then(|p| p.sous(px, py, &vue, dp));
@@ -3055,6 +3135,16 @@ impl App {
     /// Le doigt saisi pose la sélection, puis la lâche.
     fn suivre(&mut self, cx: &mut Cx, w: Rect) {
         let Some(((x, y), pose)) = cx.ui.prise() else { return };
+        if self.saisie.is_some() {
+            let vue = self.vue_ecran(w);
+            self.tirer_os((x - w.x) as f64, (y - w.y) as f64, &vue);
+            if !pose {
+                cx.ui.lacher_prise();
+                self.saisie = None;
+                self.a_sauver = true;
+            }
+            return;
+        }
         if let Some(b) = &mut self.boite {
             (b[2], b[3]) = (x, y);
             if !pose {
@@ -3911,7 +4001,7 @@ impl App {
         self.panneau_debut(cx, &l);
         self.panneau_fin(cx, &l);
         self.poignees(cx, &l, screen);
-        if self.geste.is_some() {
+        if self.geste.is_some() || self.saisie.is_some() {
             cx.ui.region_add(id("pendant-geste"), screen, Sense::Sink);
         }
         self.dessiner_pave(cx, screen);
@@ -4414,12 +4504,21 @@ impl App {
         let (h, ecart, m) = (44.0 * d, 8.0 * d, 14.0 * d);
         // Un seul bouton pour les trois modes : chaque appui passe au suivant
         let i = OUTILS.iter().position(|o| o.0 == self.mode).unwrap_or(0);
-        let mut l = vec![Pilule::icone(cx, sub_id(BARRE, 0), OUTILS[i].1, OUTILS[i].2, false)];
-        for k in 0..3 {
+        let pose = self.os.as_ref().is_some_and(|e| e.pose);
+        // En pose, ce bouton passe de Tourner à Tirer ; en Tirer, ni axes, ni pas, ni pivot
+        let mut l = vec![match (pose, self.tirer) {
+            (true, true) => Pilule::icone(cx, sub_id(BARRE, 0), "Tirer", &TIRER, true),
+            (true, false) => Pilule::icone(cx, sub_id(BARRE, 0), "Tourner", &icones::TOURNER, false),
+            _ => Pilule::icone(cx, sub_id(BARRE, 0), OUTILS[i].1, OUTILS[i].2, false),
+        }];
+        let tirer = pose && self.tirer;
+        for k in (0..3).filter(|_| !tirer) {
             l.push(Pilule { cle: sub_id(BARRE, 3 + k), nom: NOMS_AXES[k].to_string(), l: h, actif: self.axes[k], couleur: coul(COUL_AXES[k]), long: false, icone: None, nomme: false });
         }
-        l.push(Pilule::icone(cx, sub_id(BARRE, 6), "Pas", &icones::PAS, self.pas.actif));
-        l.push(Pilule::icone(cx, sub_id(BARRE, 7), NOMS_PIVOTS[self.pivot], ICONES_PIVOTS[self.pivot], false));
+        if !tirer {
+            l.push(Pilule::icone(cx, sub_id(BARRE, 6), "Pas", &icones::PAS, self.pas.actif));
+            l.push(Pilule::icone(cx, sub_id(BARRE, 7), NOMS_PIVOTS[self.pivot], ICONES_PIVOTS[self.pivot], false));
+        }
         let outils = l.len();
         l.extend(self.pilules_selection(cx));
         let n = Self::coupes(&l, w.w - 2.0 * m, ecart).len() as f32;
@@ -4430,6 +4529,11 @@ impl App {
         }
         match appui {
             Some(i) if i >= outils => self.appui_selection(i - outils, false),
+            Some(0) if pose => {
+                self.tirer = !self.tirer;
+                self.saisie = None;
+                self.dire(if self.tirer { "Tirer : saisissez un os, la chaîne suit jusqu'à l'ancre" } else { "Tourner : les os tournent autour de leur tête" }.into());
+            }
             Some(0) => {
                 let (mode, nom, _) = OUTILS[(i + 1) % OUTILS.len()];
                 self.mode = mode;
@@ -5562,6 +5666,15 @@ impl App {
                     let i = x.id.clone();
                     self.changer_os(|a, _| a.remettre(&[i]));
                 }
+                // En Tirer, l'ancre : ce qui reste fixe dans le monde
+                if self.tirer {
+                    let ancre = a.ancre();
+                    let nom = ancre.as_ref().and_then(|i| a.trouver(i)).map_or("aucune", |y| y.nom.as_str());
+                    let lien = (ancre.as_ref() != Some(&x.id)).then_some((id("os-ancrer"), "Ancrer ici"));
+                    if cx.legende_lien(b, &format!("Ancre : {nom}"), lien) {
+                        self.ancrer_actif();
+                    }
+                }
             } else if cx.champ(b, id("os-nom"), "Nom", coul(C::Texte), &x.nom) {
                 self.saisir(Champ::OsNom);
             }
@@ -5712,6 +5825,7 @@ impl App {
                 continue;
             }
             let ordre = a.ordre();
+            let ancre = if self.tirer_actif() { a.ancre() } else { None };
             let mut cache: Option<usize> = None;
             for (r, x) in ordre.iter().enumerate() {
                 let p = a.profondeur(&x.id);
@@ -5721,7 +5835,8 @@ impl App {
                 }
                 let enfants = ordre.get(r + 1).is_some_and(|y| a.profondeur(&y.id) > p);
                 let plie = self.os_plies.contains(&x.id);
-                let (ligne, chevron, _, desc) = cx.ligne_arbre(b, sub_id(id("os-rang"), r), sub_id(id("os-chevron-os"), r), &x.nom, p + 1, enfants.then_some(plie), actif_os.as_ref() == Some(&x.id), choisis.contains(&x.id), None, edition);
+                let nom = if ancre.as_ref() == Some(&x.id) { format!("{} · ancre", x.nom) } else { x.nom.clone() };
+                let (ligne, chevron, _, desc) = cx.ligne_arbre(b, sub_id(id("os-rang"), r), sub_id(id("os-chevron-os"), r), &nom, p + 1, enfants.then_some(plie), actif_os.as_ref() == Some(&x.id), choisis.contains(&x.id), None, edition);
                 if chevron && !self.os_plies.remove(&x.id) {
                     self.os_plies.insert(x.id.clone());
                 }
@@ -9743,6 +9858,55 @@ mod tests {
     fn tourner_bras(b: &mut Banc, q: ed::Q) {
         b.app.memoriser();
         b.app.poser_selection(Transfo::Rotation { q, c: [0.0; 3] });
+    }
+
+    #[test]
+    fn tirer_un_os_plie_la_chaine_jusqu_a_l_ancre() {
+        let (mut b, _) = banc_pose();
+        let x = b.app.projet.objets[1].armature.clone().unwrap();
+        let os = |n: &str| x.os.iter().find(|y| y.nom == n).unwrap().id.clone();
+        let reperes = |b: &Banc| b.app.projet.objets[1].armature.as_ref().unwrap().matrices_pose();
+        let proche = |u: (P3, ed::Q), v: (P3, ed::Q)| (0..3).all(|k| (u.0[k] - v.0[k]).abs() < 1e-9);
+        // La bascule de la barre : en Tirer, ni poignée ni axes
+        b.images(1);
+        let z = b.ui.zone(sub_id(BARRE, 0)).unwrap();
+        b.appui(z.cx(), z.cy());
+        b.images(1);
+        assert!(b.app.tirer && b.ui.zone(sub_id(BARRE, 3)).is_none());
+        let vue = b.app.vue_ecran(b.app.espace);
+        assert!(b.app.poignee(&vue, 1.0).is_none());
+        // Par défaut, la racine est l'ancre : elle ne bouge pas, la main suit le doigt
+        b.app.recadrer();
+        b.images(30);
+        let avant = reperes(&b);
+        let (m, bassin) = (os("main.G"), os("bassin"));
+        let p = milieu_os(&b, &m);
+        assert_eq!(b.glisser(p, (p.0 + 30.0, p.1 - 40.0)), 1);
+        let apres = reperes(&b);
+        assert!(proche(apres[&bassin], avant[&bassin]) && !proche(apres[&m], avant[&m]));
+        assert_eq!(b.app.os.as_ref().unwrap().actif.as_deref(), Some(m.as_str()));
+        assert!(b.app.saisie.is_none());
+        b.app.annuler();
+        assert!(b.app.projet.objets[1].armature.as_ref().unwrap().pose.is_empty());
+        // Ancré au pied gauche : le pied reste, le bassin peut bouger
+        let pied = os("pied.G");
+        b.app.os.as_mut().unwrap().actif = Some(pied.clone());
+        b.app.os.as_mut().unwrap().selectionner(&x, std::slice::from_ref(&pied), false);
+        b.app.ancrer_actif();
+        assert_eq!(b.app.projet.objets[1].armature.as_ref().unwrap().ancre(), Some(pied.clone()));
+        let avant = reperes(&b);
+        b.glisser(p, (p.0 + 60.0, p.1 + 50.0));
+        let apres = reperes(&b);
+        assert!(proche(apres[&pied], avant[&pied]) && !proche(apres[&m], avant[&m]));
+        // L'ancre se voit dans l'arbre, et se change depuis l'os actif
+        b.app.contenu = Contenu::Os;
+        b.app.shell.end.open = true;
+        b.app.os_plies.insert(format!("a:{}", b.app.projet.objets[1].id));
+        b.images(2);
+        assert!(b.ui.zone(id("os-ancrer")).is_some());
+        // Gardée dans le projet
+        let d = b.app.projet.objets[1].armature.as_ref().unwrap().vers_donnees();
+        assert_eq!(Armature::depuis_donnees(&d).ancre(), Some(pied));
     }
 
     #[test]
