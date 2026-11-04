@@ -5586,6 +5586,21 @@ impl App {
         let c = self.contexte();
         let (mut rubrique, mut choisie) = ("", None);
         for o in actions::du_menu(menu).into_iter().filter(|o| garder(o.action)) {
+            // Nettoyer : seulement ce qu'il y a à retirer, en liens ; rubrique absente sinon
+            if menu == Menu::Geometrie && o.rubrique == "Nettoyer" {
+                if !c.possible(o.action) {
+                    continue;
+                }
+                if o.rubrique != rubrique {
+                    rubrique = o.rubrique;
+                    cx.section(b, &rubrique.to_uppercase());
+                }
+                let n = c.isoles[o.action as usize - A::NettoyerSommets as usize];
+                if cx.lien(b, sub_id(id("operation"), o.action as usize), &format!("{} ({n})", o.libelle)) {
+                    choisie = Some(o.action);
+                }
+                continue;
+            }
             if o.rubrique != rubrique {
                 rubrique = o.rubrique;
                 cx.section(b, &rubrique.to_uppercase());
@@ -5657,6 +5672,8 @@ impl App {
             c.aretes = t.sel.aretes.len();
             c.faces = t.sel.faces.len();
             c.grande_face = t.sel.faces.iter().any(|f| t.m.faces[*f].s.len() > 3);
+            let i = t.isoles();
+            c.isoles = [i.sommets.len(), i.aretes.len(), i.faces.len()];
             c.anneau = t.arete_depart().and_then(|[i, j]| t.m.anneau(i, j)).is_some();
             c.dissolution = (c.aretes > 0).then(|| t.m.dissolution(&t.sel.aretes).map(|_| ()));
             c.actif = t.sel.dernier.is_some();
@@ -5962,6 +5979,9 @@ impl App {
             A::Confondus => self.lancer(Derniere::Proches { tolerance: 0.0001 }),
             A::Revolution => self.revolution(self.espace),
             A::SupprimerSommets => self.operer(Travail::supprimer_sommets),
+            A::NettoyerSommets => self.operer(Travail::nettoyer_sommets),
+            A::NettoyerAretes => self.operer(Travail::nettoyer_aretes),
+            A::NettoyerFaces => self.operer(Travail::nettoyer_faces),
             A::Lies => self.selectionner(Travail::lies),
             A::TousSommets => self.selectionner(|t| { t.tout(T::S); Ok(None) }),
             A::ToutesAretes => self.selectionner(|t| { t.tout(T::A); Ok(None) }),
@@ -7936,6 +7956,22 @@ mod tests {
         assert!(!b.app.contexte().possible(A::Inverser));
         b.app.annuler();
         assert!(b.app.contexte().possible(A::Inverser));
+    }
+
+    #[test]
+    fn nettoyer_les_sommets_laisses_par_les_faces_supprimees() {
+        let mut b = en_geometrie();
+        b.app.travail.as_mut().unwrap().tout(T::F);
+        b.app.agir(A::SupprimerFaces);
+        b.app.travail.as_mut().unwrap().tout(T::S);
+        let c = b.app.contexte();
+        assert_eq!(c.isoles, [8, 0, 0]);
+        assert!(c.possible(A::NettoyerSommets) && !c.possible(A::NettoyerFaces));
+        b.app.agir(A::NettoyerSommets);
+        assert!(b.app.travail.as_ref().unwrap().m.sommets.is_empty());
+        assert!(!b.app.contexte().possible(A::NettoyerSommets));
+        b.app.annuler();
+        assert_eq!(b.app.travail.as_ref().unwrap().m.sommets.len(), 8);
     }
 
     #[test]

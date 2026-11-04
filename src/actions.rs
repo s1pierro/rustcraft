@@ -57,6 +57,9 @@ pub enum Action {
     Confondus,
     Revolution,
     SupprimerSommets,
+    NettoyerSommets,
+    NettoyerAretes,
+    NettoyerFaces,
     Lies,
     TousSommets,
     ToutesAretes,
@@ -222,6 +225,8 @@ pub struct Contexte {
     pub anneau: bool,
     /// Bilan de la dissolution des arêtes sélectionnées, s'il y en a.
     pub dissolution: Option<Result<(), String>>,
+    /// Sommets, arêtes et faces isolés dans la sélection.
+    pub isoles: [usize; 3],
     /// Il y a un élément actif.
     pub actif: bool,
     /// Groupe du type de l'élément actif.
@@ -314,6 +319,9 @@ impl Contexte {
             Subdiviser | SupprimerAretes | AucuneArete | AretesSommets | AretesFaces => self.geo && na > 0,
             Inverser | Separer | SupprimerFaces | AucuneFace | FacesSommets | FacesAretes => self.geo && nf > 0,
             Trianguler => self.geo && self.grande_face,
+            NettoyerSommets => self.geo && self.isoles[0] > 0,
+            NettoyerAretes => self.geo && self.isoles[1] > 0,
+            NettoyerFaces => self.geo && self.isoles[2] > 0,
             Boucle => self.geo && self.anneau,
             ChoisirImage => self.actif,
             EditerUv | ProjeterVue | ProjeterCube | ProjeterCylindre | ProjeterSphere | MettreEnPage | CouturesDepuisUv | Deplier => self.geo,
@@ -771,6 +779,30 @@ pub const CATALOGUE: &[Op] = &[
         libelle: "Supprimer (et leurs faces)",
         aide: "supprimer les sommets sélectionnés et les faces qui les utilisent",
         barre: Some(Barre { groupe: Groupe::Sommets, glyphe: "✕", court: "Sommets", defaut: true }),
+    },
+    Op {
+        action: Action::NettoyerSommets,
+        menu: Menu::Geometrie,
+        rubrique: "Nettoyer",
+        libelle: "Sommets isolés",
+        aide: "supprimer, parmi les sommets sélectionnés, ceux qui n’appartiennent à aucune face ni arête",
+        barre: None,
+    },
+    Op {
+        action: Action::NettoyerAretes,
+        menu: Menu::Geometrie,
+        rubrique: "Nettoyer",
+        libelle: "Arêtes isolées",
+        aide: "supprimer, parmi les arêtes sélectionnées (ou aux deux sommets sélectionnés), les arêtes sans face dont aucune extrémité ne touche une autre arête ni une face, avec leurs sommets",
+        barre: None,
+    },
+    Op {
+        action: Action::NettoyerFaces,
+        menu: Menu::Geometrie,
+        rubrique: "Nettoyer",
+        libelle: "Faces isolées",
+        aide: "supprimer, parmi les faces sélectionnées (ou aux sommets tous sélectionnés), celles qui ne partagent aucune arête avec une autre face, même si elles touchent ses voisines par un coin, avec les sommets qui ne servaient qu’à elles",
+        barre: None,
     },
     Op {
         action: Action::Lies,

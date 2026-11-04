@@ -94,6 +94,7 @@ fn main() {
         Vue { nom: "vis-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "geo-faces", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 1, pave: false, geo: 1, fichier: false },
         Vue { nom: "geo-rayons", w: 1920, h: 1200, dp: 1.5, debut: true, fin: false, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 2, fichier: false },
+        Vue { nom: "geo-nettoyer", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 1, pave: false, geo: 4, fichier: false },
         Vue { nom: "geo-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: false, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Rotation, onglet: 1, pave: false, geo: 3, fichier: false },
     ];
     let mut egl = Egl::new(true).expect("EGL");
@@ -462,6 +463,18 @@ fn main() {
                 render.draw(w, h, &sc, &dl, &mut text);
             }
         }
+        if s.nom == "geo-nettoyer" {
+            // Des débris autour de l'objet : un sommet seul, un fil seul, un triangle seul
+            let o = &mut app.projet.objets[0];
+            let mut m = (*o.maillage).clone();
+            let n = m.sommets.len();
+            for p in [[2.0, 0.0, 0.0], [2.0, 1.0, 0.0], [2.0, 1.0, 1.0], [-2.0, 0.0, 0.0], [-2.0, 1.0, 0.0], [-2.0, 0.5, 1.0]] {
+                m.sommets.push(p);
+            }
+            m.fils.push([n + 1, n + 2]);
+            m.faces.push(rustcraft::maillage::Face { s: vec![n + 3, n + 4, n + 5], m: m.faces[0].m.clone(), uv: Vec::new() });
+            o.maillage = std::sync::Arc::new(m);
+        }
         if s.geo > 0 {
             app.entrer_geometrie();
             let t = app.travail.as_mut().unwrap();
@@ -471,6 +484,7 @@ fn main() {
                     t.tout(T::S);
                     app.rayons = true;
                 }
+                4 => t.tout(T::S),
                 _ => t.tout(T::A),
             }
         }

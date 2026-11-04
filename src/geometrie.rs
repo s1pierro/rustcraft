@@ -290,6 +290,14 @@ impl Sel {
     }
 }
 
+/// Éléments isolés de la sélection, que les nettoyages retirent.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Isoles {
+    pub sommets: Vec<usize>,
+    pub aretes: Vec<Arete>,
+    pub faces: Vec<usize>,
+}
+
 /// Réglages d'une révolution. `axe` est déjà résolu ; `angle` signé, en degrés.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RegleRevolution {
@@ -976,14 +984,115 @@ impl Travail {
         if s.is_empty() {
             return Ok(None);
         }
+        self.retirer_sommets(&s);
+        Ok(None)
+    }
+
+    /// Retire des sommets, et les faces et arêtes libres qui les utilisent.
+    fn retirer_sommets(&mut self, s: &[usize]) {
         let retires: HashSet<usize> = s.iter().copied().collect();
         let mut i = 0;
         self.proprio.retain(|_| { i += 1; !retires.contains(&(i - 1)) });
         let avant: Vec<Vec<usize>> = self.m.faces.iter().map(|f| f.s.clone()).collect();
-        let table = self.mm().supprimer_sommets(&s);
+        let table = self.mm().supprimer_sommets(s);
         self.apres_table(&avant, &table, false);
         self.maj();
-        Ok(None)
+    }
+
+    /// Éléments isolés parmi la sélection visible. Une arête ou une face compte comme
+    /// sélectionnée si elle l'est, ou si tous ses sommets le sont.
+    /// - sommets : n'appartiennent à aucune face ni arête libre ;
+    /// - arêtes : libres, et aucune de leurs extrémités ne touche autre chose ;
+    /// - faces : ne partagent aucune arête avec une autre face (un coin commun ne compte pas).
+    pub fn isoles(&self) -> Isoles {
+        let mut r = Isoles::default();
+        if self.sel.vide() {
+            return r;
+        }
+        let m = &self.m;
+        let choisis: HashSet<usize> = self.sel.sommets.iter().copied().collect();
+        let tous = |l: &[usize]| !l.is_empty() && l.iter().all(|i| choisis.contains(i));
+        let mut usage = vec![0u32; m.sommets.len()];
+        for f in &m.faces {
+            let mut l = f.s.clone();
+            l.sort();
+            l.dedup();
+            l.iter().for_each(|i| usage[*i] += 1);
+        }
+        for a in &m.fils {
+            usage[a[0]] += 1;
+            usage[a[1]] += 1;
+        }
+        r.sommets = choisis.iter().copied().filter(|i| *i < usage.len() && usage[*i] == 0).collect();
+        r.sommets.sort();
+        let sel_a: HashSet<Arete> = self.sel.aretes.iter().copied().collect();
+        for a in &m.fils {
+            let e = arete(a[0], a[1]);
+            if a[0] != a[1] && usage[a[0]] == 1 && usage[a[1]] == 1 && (sel_a.contains(&e) || tous(a)) {
+                r.aretes.push(e);
+            }
+        }
+        let sel_f: HashSet<usize> = self.sel.faces.iter().copied().collect();
+        let candidates: Vec<usize> = (0..m.faces.len()).filter(|k| sel_f.contains(k) || tous(&m.faces[*k].s)).collect();
+        if !candidates.is_empty() {
+            let mut compte: HashMap<Arete, u32> = HashMap::new();
+            for f in &m.faces {
+                let n = f.s.len();
+                let l: HashSet<Arete> = (0..n).map(|k| arete(f.s[k], f.s[(k + 1) % n])).collect();
+                l.into_iter().for_each(|e| *compte.entry(e).or_default() += 1);
+            }
+            r.faces = candidates.into_iter().filter(|k| {
+                let s = &m.faces[*k].s;
+                (0..s.len()).all(|j| compte.get(&arete(s[j], s[(j + 1) % s.len()])).is_none_or(|c| *c <= 1))
+            }).collect();
+        }
+        r
+    }
+
+    pub fn nettoyer_sommets(&mut self) -> Bilan {
+        let s = self.isoles().sommets;
+        if s.is_empty() {
+            return Err("Aucun sommet isolé dans la sélection".into());
+        }
+        self.retirer_sommets(&s);
+        Ok(Some(format!("{n} sommet{p} isolé{p} supprimé{p}", n = s.len(), p = pl(s.len()))))
+    }
+
+    /// Les arêtes isolées partent avec leurs deux sommets, qui ne servaient qu'à elles.
+    pub fn nettoyer_aretes(&mut self) -> Bilan {
+        let a = self.isoles().aretes;
+        if a.is_empty() {
+            return Err("Aucune arête isolée dans la sélection".into());
+        }
+        let mut s: Vec<usize> = a.iter().flatten().copied().collect();
+        s.sort();
+        s.dedup();
+        self.retirer_sommets(&s);
+        Ok(Some(format!("{n} arête{p} isolée{p} supprimée{p}", n = a.len(), p = pl(a.len()))))
+    }
+
+    /// Les faces isolées partent avec les sommets qui ne servaient qu'à elles.
+    pub fn nettoyer_faces(&mut self) -> Bilan {
+        let fs: HashSet<usize> = self.isoles().faces.into_iter().collect();
+        if fs.is_empty() {
+            return Err("Aucune face isolée dans la sélection".into());
+        }
+        let mut k = 0;
+        let table: Vec<Option<usize>> = (0..self.m.faces.len()).map(|f| (!fs.contains(&f)).then(|| { k += 1; k - 1 })).collect();
+        let mut leurs: Vec<usize> = fs.iter().flat_map(|f| self.m.faces[*f].s.iter().copied()).collect();
+        let mut i = 0;
+        let m = self.mm();
+        m.faces.retain(|_| { i += 1; !fs.contains(&(i - 1)) });
+        let mut gardes: HashSet<usize> = m.fils.iter().flatten().copied().collect();
+        for f in &m.faces {
+            gardes.extend(f.s.iter().copied());
+        }
+        leurs.sort();
+        leurs.dedup();
+        leurs.retain(|i| !gardes.contains(i));
+        self.sel.renumeroter_faces(&table);
+        self.retirer_sommets(&leurs);
+        Ok(Some(format!("{n} face{p} isolée{p} supprimée{p}", n = fs.len(), p = pl(fs.len()))))
     }
 
     /// Faces choisies séparées en nouveaux objets. Rend vrai s'il ne reste aucun objet
@@ -1493,6 +1602,60 @@ mod tests {
 
     fn vue() -> Vue {
         Vue { oeil: [0.0, 0.0, 10.0], droite: [1.0, 0.0, 0.0], haut: [0.0, 1.0, 0.0], dos: [0.0, 0.0, 1.0], largeur: 1000.0, hauteur: 1000.0, tan: 0.5, pres: 0.05 }
+    }
+
+    /// Cube, puis : un sommet seul (8), un fil seul (9-10), une chaîne de fils (11-12-13),
+    /// un fil qui part du cube (0-14), un triangle seul (15-17), deux triangles qui se
+    /// touchent par un coin (18-22) et deux qui partagent une arête (23-26).
+    fn debris() -> Travail {
+        let mut m = Maillage::cube(2.0);
+        for k in 0..19 {
+            m.sommets.push([10.0 + k as f64, (k % 3) as f64, (k % 2) as f64]);
+        }
+        m.fils.extend([[9, 10], [11, 12], [12, 13], [0, 14]]);
+        for s in [vec![15, 16, 17], vec![18, 19, 20], vec![20, 21, 22], vec![23, 24, 25], vec![24, 23, 26]] {
+            m.faces.push(face(&Arc::from("defaut"), s));
+        }
+        let mut t = Travail::ouvrir(&[Objet::neuf("d", m)], &[0], 0, [true; 3]);
+        for i in 0..t.m.sommets.len() {
+            t.sel.ajouter(El::S(i));
+        }
+        t
+    }
+
+    #[test]
+    fn les_nettoyages_ne_retirent_que_l_isole() {
+        let mut t = debris();
+        let i = t.isoles();
+        assert_eq!(i.sommets, [8]);
+        assert_eq!(i.aretes, [[9, 10]]);
+        assert_eq!(i.faces, [6, 7, 8]);
+        assert_eq!(t.nettoyer_sommets().unwrap().unwrap(), "1 sommet isolé supprimé");
+        assert_eq!(t.m.sommets.len(), 26);
+        t.nettoyer_aretes().unwrap();
+        assert_eq!((t.m.sommets.len(), t.m.fils.len()), (24, 3));
+        assert_eq!(t.nettoyer_faces().unwrap().unwrap(), "3 faces isolées supprimées");
+        // 8 sommets des triangles partent, le coin commun une seule fois
+        assert_eq!((t.m.sommets.len(), t.m.faces.len(), t.m.fils.len()), (16, 8, 3));
+        assert!(t.m.faces.iter().flat_map(|f| &f.s).all(|i| *i < 16));
+        assert_eq!(t.isoles(), Isoles::default());
+        assert!(t.nettoyer_faces().is_err());
+    }
+
+    #[test]
+    fn le_nettoyage_s_en_tient_a_la_selection() {
+        let mut t = debris();
+        t.sel.vider(None);
+        assert_eq!(t.isoles(), Isoles::default());
+        t.sel.ajouter(El::F(7));
+        t.sel.ajouter(El::F(9));
+        t.sel.ajouter(El::A([9, 10]));
+        let i = t.isoles();
+        assert_eq!((i.sommets.len(), i.aretes, i.faces), (0, vec![[9, 10]], vec![7]));
+        t.nettoyer_faces().unwrap();
+        // Le triangle au coin commun reste, et son coin avec lui
+        assert_eq!(t.m.faces.len(), 10);
+        assert_eq!(t.m.sommets.len(), 25);
     }
 
     #[test]
