@@ -1994,7 +1994,14 @@ impl Maillage {
     /// Un sommet par couple (position, UV), comme le veut glTF : une couture y dédouble
     /// ses sommets. Rend aussi l'UV de chaque sommet.
     fn deplie(&self) -> (Maillage, Vec<[f32; 2]>) {
+        let (m, uv, _) = self.deplie_origine();
+        (m, uv)
+    }
+
+    /// Comme `deplie`, et pour chaque sommet, celui dont il est la copie.
+    pub(crate) fn deplie_origine(&self) -> (Maillage, Vec<[f32; 2]>, Vec<usize>) {
         let mut r = self.clone();
+        let mut origine: Vec<usize> = (0..r.sommets.len()).collect();
         let mut uv = vec![[0.0; 2]; r.sommets.len()];
         let mut pris = vec![false; r.sommets.len()];
         let mut copies: HashMap<(usize, [u32; 2]), usize> = HashMap::new();
@@ -2011,12 +2018,13 @@ impl Maillage {
                         return *i;
                     }
                     r.sommets.push(r.sommets[*i]);
+                    origine.push(*i);
                     uv.push(*c);
                     r.sommets.len() - 1
                 });
             }
         }
-        (r, uv)
+        (r, uv, origine)
     }
 
     /// `uv` : un par sommet, ou vide ; alors ni UV ni image.
@@ -2041,11 +2049,6 @@ impl Maillage {
         let (mut prims, mut mats, mut vues, mut acces) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         vues.push(format!("{{\"buffer\":0,\"byteOffset\":0,\"byteLength\":{lg_pos},\"target\":34962}}"));
         acces.push(format!("{{\"bufferView\":0,\"componentType\":5126,\"count\":{nv},\"type\":\"VEC3\",\"min\":{},\"max\":{}}}", simple(b.min), simple(b.max)));
-        let lin = |v: f64| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
-        let lineaire = |h: &str| {
-            let c = rvb(h);
-            [fixe_val(lin(c[0]), 5), fixe_val(lin(c[1]), 5), fixe_val(lin(c[2]), 5)]
-        };
         let attr_uv = if uv.is_empty() { String::new() } else { format!(",\"TEXCOORD_0\":{}", groupes.len() + 1) };
         let mut o = 0;
         for (k, (m, l)) in groupes.iter().enumerate() {
@@ -2055,27 +2058,8 @@ impl Maillage {
             vues.push(format!("{{\"buffer\":0,\"byteOffset\":{},\"byteLength\":{},\"target\":34963}}", lg_pos + o, l.len() * 4));
             acces.push(format!("{{\"bufferView\":{},\"componentType\":5125,\"count\":{},\"type\":\"SCALAR\"}}", k + 1, l.len()));
             let d = materiaux.iter().find(|(n, _)| **n == **m).map(|(_, d)| d.clone()).unwrap_or_default();
-            let opacite = d.opacite.filter(|v| v.is_finite()).map_or(1.0, |v| v.clamp(0.0, 1.0));
-            let c = d.couleur.as_deref().map_or([0.8, 0.8, 0.8], lineaire);
-            let mut nom_m = String::new();
-            json::texte(m, &mut nom_m);
-            // Coupure nette à mi-opacité, comme le rendu de l'application
             let image = d.texture.as_ref().and_then(|t| images.iter().position(|(n, _)| n == t)).filter(|_| !uv.is_empty());
-            let texture_j = image.map_or(String::new(), |k| format!("\"baseColorTexture\":{{\"index\":{k}}},"));
-            let mut t = format!(
-                "{{\"name\":{nom_m},\"pbrMetallicRoughness\":{{{texture_j}\"baseColorFactor\":[{},{},{},{}],\"metallicFactor\":0,\"roughnessFactor\":0.9}}",
-                nb(c[0]), nb(c[1]), nb(c[2]), nb(opacite)
-            );
-            if opacite < 1.0 {
-                t.push_str(",\"alphaMode\":\"BLEND\"");
-            } else if image.is_some() {
-                t.push_str(",\"alphaMode\":\"MASK\"");
-            }
-            if let Some(e) = d.emission.as_deref().filter(|e| *e != "#000000") {
-                let e = lineaire(e);
-                t.push_str(&format!(",\"emissiveFactor\":[{},{},{}]", nb(e[0]), nb(e[1]), nb(e[2])));
-            }
-            t.push('}');
+            let t = materiau_gltf(m, &d, image);
             mats.push(t);
             prims.push(format!("{{\"attributes\":{{\"POSITION\":0{attr_uv}}},\"indices\":{},\"material\":{k},\"mode\":4}}", k + 1));
             o += l.len() * 4;
@@ -2105,23 +2089,60 @@ impl Maillage {
             "{{\"asset\":{{\"version\":\"2.0\",\"generator\":{sign_j}}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0,\"name\":{nom_j}}}],\"meshes\":[{{\"name\":{nom_j},\"primitives\":[{}]}}],\"materials\":[{}],\"buffers\":[{{\"byteLength\":{}}}],\"bufferViews\":[{}],\"accessors\":[{}]{suite}}}",
             prims.join(","), mats.join(","), bin.len(), vues.join(","), acces.join(",")
         );
-        let pad4 = |n: usize| (n + 3) & !3;
-        let (lj, lb) = (pad4(js.len()), pad4(bin.len()));
-        let total = 12 + 8 + lj + 8 + lb;
-        let mut d = Vec::with_capacity(total);
-        d.extend_from_slice(&0x46546C67u32.to_le_bytes());
-        d.extend_from_slice(&2u32.to_le_bytes());
-        d.extend_from_slice(&(total as u32).to_le_bytes());
-        d.extend_from_slice(&(lj as u32).to_le_bytes());
-        d.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
-        d.extend_from_slice(js.as_bytes());
-        d.resize(20 + lj, 0x20);
-        d.extend_from_slice(&(lb as u32).to_le_bytes());
-        d.extend_from_slice(&0x004E4942u32.to_le_bytes());
-        d.extend_from_slice(&bin);
-        d.resize(total, 0);
-        d
+        glb_conteneur(&js, &bin)
     }
+}
+
+/// Fichier .glb : l'en-tête, le JSON et le binaire, chacun calé sur 4 octets.
+pub(crate) fn glb_conteneur(js: &str, bin: &[u8]) -> Vec<u8> {
+    let pad4 = |n: usize| (n + 3) & !3;
+    let (lj, lb) = (pad4(js.len()), pad4(bin.len()));
+    let total = 12 + 8 + lj + 8 + lb;
+    let mut d = Vec::with_capacity(total);
+    d.extend_from_slice(&0x46546C67u32.to_le_bytes());
+    d.extend_from_slice(&2u32.to_le_bytes());
+    d.extend_from_slice(&(total as u32).to_le_bytes());
+    d.extend_from_slice(&(lj as u32).to_le_bytes());
+    d.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+    d.extend_from_slice(js.as_bytes());
+    d.resize(20 + lj, 0x20);
+    d.extend_from_slice(&(lb as u32).to_le_bytes());
+    d.extend_from_slice(&0x004E4942u32.to_le_bytes());
+    d.extend_from_slice(bin);
+    d.resize(total, 0);
+    d
+}
+
+/// Matériau glTF d'un matériau MTL : couleurs passées de sRGB au linéaire, image `image`
+/// (rang dans les textures) s'il y en a une.
+pub(crate) fn materiau_gltf(m: &str, d: &MatMtl, image: Option<usize>) -> String {
+    let nb = json::nombre;
+    let lin = |v: f64| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    let lineaire = |h: &str| {
+        let c = rvb(h);
+        [fixe_val(lin(c[0]), 5), fixe_val(lin(c[1]), 5), fixe_val(lin(c[2]), 5)]
+    };
+    let opacite = d.opacite.filter(|v| v.is_finite()).map_or(1.0, |v| v.clamp(0.0, 1.0));
+    let c = d.couleur.as_deref().map_or([0.8, 0.8, 0.8], lineaire);
+    let mut nom_m = String::new();
+    json::texte(m, &mut nom_m);
+    // Coupure nette à mi-opacité, comme le rendu de l'application
+    let texture_j = image.map_or(String::new(), |k| format!("\"baseColorTexture\":{{\"index\":{k}}},"));
+    let mut t = format!(
+        "{{\"name\":{nom_m},\"pbrMetallicRoughness\":{{{texture_j}\"baseColorFactor\":[{},{},{},{}],\"metallicFactor\":0,\"roughnessFactor\":0.9}}",
+        nb(c[0]), nb(c[1]), nb(c[2]), nb(opacite)
+    );
+    if opacite < 1.0 {
+        t.push_str(",\"alphaMode\":\"BLEND\"");
+    } else if image.is_some() {
+        t.push_str(",\"alphaMode\":\"MASK\"");
+    }
+    if let Some(e) = d.emission.as_deref().filter(|e| *e != "#000000") {
+        let e = lineaire(e);
+        t.push_str(&format!(",\"emissiveFactor\":[{},{},{}]", nb(e[0]), nb(e[1]), nb(e[2])));
+    }
+    t.push('}');
+    t
 }
 
 pub fn extension(nom: &str) -> String {

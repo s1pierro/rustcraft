@@ -67,10 +67,14 @@ fn main() {
         Vue { nom: "pose", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-limites", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-limites-geo", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "pose-deplacer", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(1), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "pose-animation", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(1), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-tirer", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-scene", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "curseur", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "devant", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "peau", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "peau-pinceau", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "peau-poids", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "armature-vide", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "armature-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(1), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
@@ -208,7 +212,7 @@ fn main() {
             let o = &mut app.projet.objets[0];
             o.position = main;
             o.echelle = [0.12, 0.12, 0.12];
-            o.liaison = Some(rustcraft::projet::Liaison { armature: id, os: vec![os("avant-bras.G")] });
+            o.liaison = Some(rustcraft::projet::Liaison { armature: id, os: vec![os("avant-bras.G")], poids: None });
             let q = rustcraft::edition::qaxe([0.0, 0.0, 1.0], 1.2);
             app.projet.objets[k].armature.as_mut().unwrap().tourner(&[os("bras.G")], q);
             app.projet.objets[k].armature.as_mut().unwrap().tourner(&[os("avant-bras.G")], q);
@@ -228,6 +232,41 @@ fn main() {
                 e.actif = Some(os("avant-bras.G"));
                 e.selectionner(&a, &[os("avant-bras.G")], false);
                 app.contenu = Contenu::Os;
+            }
+            if s.nom == "pose-limites-geo" {
+                // Une translation limitée sur l'axe de l'avant-bras
+                let x = app.projet.objets[k].armature.as_mut().unwrap();
+                let i = x.os.iter().position(|b| b.nom == "avant-bras.G").unwrap();
+                x.os[i].regler_limites_t([rustcraft::armature::Limite::Bloquee, rustcraft::armature::Limite::Bornee(-0.05, 0.1), rustcraft::armature::Limite::Bloquee]);
+            }
+            if s.nom == "pose-deplacer" {
+                // Le bassin, racine, déplacé : tout le corps suit
+                app.entrer_armature();
+                app.basculer_pose();
+                app.mode = Mode::Translation;
+                let x = app.projet.objets[k].armature.as_mut().unwrap();
+                x.deplacer(&[os("bassin")], [0.15, -0.1, 0.0]);
+                let e = app.os.as_mut().unwrap();
+                e.actif = Some(os("bassin"));
+                e.selectionner(&a, &[os("bassin")], false);
+                app.os_plies.insert(format!("a:{}", app.projet.objets[k].id));
+                app.contenu = Contenu::Os;
+                app.redessiner_armatures();
+            }
+            if s.nom == "pose-animation" {
+                // Trois clés sur 2 s : le bras se lève puis redescend ; montrée à 0,75 s
+                app.entrer_armature();
+                app.basculer_pose();
+                app.os.as_mut().unwrap().actif = Some(os("bras.G"));
+                app.nouvelle_animation();
+                for (t, z) in [(1.0, 70.0), (1.5, 20.0)] {
+                    app.aller_a(t);
+                    app.regler_angles(&os("bras.G"), [0.0, 0.0, z]);
+                    app.poser_cle();
+                }
+                app.aller_a(0.75);
+                app.contenu = Contenu::Os;
+                app.onglet_os = 2;
             }
             if s.nom == "pose-tirer" {
                 app.entrer_armature();
@@ -251,6 +290,11 @@ fn main() {
                 app.contenu = Contenu::Os;
             }
             app.recadrer();
+        }
+        if s.nom == "curseur" {
+            // Le panneau Scène, sa rubrique Curseur 3D, le curseur posé sur un objet
+            app.projet.curseur = [0.3, 0.5, 0.2];
+            app.contenu = Contenu::Scene;
         }
         if s.nom == "devant" {
             // Un humanoïde enfermé dans un bloc, montré au premier plan
@@ -295,18 +339,34 @@ fn main() {
             let o = &mut app.projet.objets[0];
             o.position = [0.0; 3];
             o.maillage = Arc::new(Maillage::new(sommets, faces, Vec::new()));
-            o.liaison = Some(rustcraft::projet::Liaison { armature: id, os: vec![os("bras.G"), os("avant-bras.G")] });
+            o.liaison = Some(rustcraft::projet::Liaison { armature: id, os: vec![os("bras.G"), os("avant-bras.G")], poids: None });
             let q = rustcraft::edition::qaxe([0.0, 0.0, 1.0], 1.3);
             app.projet.objets[k].armature.as_mut().unwrap().tourner(&[os("avant-bras.G")], q);
             app.redessiner_armatures();
             app.choisir(Some(k));
-            if s.nom == "peau-poids" {
+            if s.nom == "peau-pinceau" {
+                // Poids calculés, puis une bande peinte : le coude passe tout à l'avant-bras
+                let (o, x) = (app.projet.objets[0].clone(), app.projet.objets[k].clone());
+                let l = rustcraft::peau::lier(o.maillage.clone(), &o, &x, &[os("bras.G"), os("avant-bras.G")], String::new());
+                let mut m = rustcraft::peau::Main::depuis_peau(&l.peau, o.maillage.sommets.len());
+                m.suivre(&[os("bras.G"), os("avant-bras.G")]);
+                let bande: Vec<(usize, f32)> = (14 * cotes..20 * cotes).map(|i| (i, 1.0)).collect();
+                let j = m.colonne(&os("avant-bras.G")).unwrap();
+                m.peindre(j, &bande, rustcraft::peau::Pinceau::Ajouter, &[], None);
+                app.projet.objets[0].liaison.as_mut().unwrap().poids = Some(Arc::new(m));
+                app.peindre = true;
+            }
+            if s.nom == "peau-poids" || s.nom == "peau-pinceau" {
                 app.entrer_armature();
                 app.basculer_pose();
                 app.voir_poids = true;
                 let e = app.os.as_mut().unwrap();
                 e.actif = Some(os("avant-bras.G"));
                 e.selectionner(&a, &[os("avant-bras.G")], false);
+                if s.nom == "peau-pinceau" {
+                    app.contenu = Contenu::Os;
+                    app.os_plies.insert(format!("a:{}", app.projet.objets[k].id));
+                }
             }
             app.attendre_calculs();
             app.cadrer_cible([0.6, 1.4, 0.0], 1.6);

@@ -564,6 +564,49 @@ impl Cx<'_> {
     }
 
     /// Rangée de boutons de même largeur : (libellé, possible). Rend celui touché.
+    /// Ligne de temps : graduée en secondes, les clés en losanges, la tête de lecture.
+    /// Rend l'instant sous le doigt qui la touche ou la glisse.
+    pub fn ligne_temps(&mut self, b: &mut Body, id: Id, duree: f32, temps: f32, cles: &[f32], marque: Option<f32>) -> Option<f32> {
+        let d = self.dp;
+        let r = Rect::new(b.x, b.y, b.w, 72.0 * d);
+        let (x0, x1) = (r.x + 10.0 * d, r.right() - 10.0 * d);
+        let ax = |t: f32| x0 + (t / duree.max(1e-6)).clamp(0.0, 1.0) * (x1 - x0);
+        let mut rendu = None;
+        if let Some(p) = self.ui.drag(id, r) {
+            rendu = Some(((p.x - x0) / (x1 - x0)).clamp(0.0, 1.0) * duree);
+        }
+        let piste = Rect::new(x0, r.y + 22.0 * d, x1 - x0, 28.0 * d);
+        self.dl.rrect(piste, 8.0 * d, coul(C::Fond));
+        // Une graduation par seconde, plus fine par dixième quand la place le permet
+        let n = duree.floor() as usize;
+        let dixiemes = (x1 - x0) / duree.max(1e-6) > 60.0 * d;
+        for k in 0..=(n * 10) {
+            let t = k as f32 / 10.0;
+            if t > duree + 1e-4 || (!dixiemes && k % 10 != 0) {
+                continue;
+            }
+            let x = ax(t);
+            let haut = if k % 10 == 0 { 10.0 } else { 4.0 } * d;
+            self.dl.line([x, piste.bottom()], [x, piste.bottom() - haut], 1.0 * d, coul(C::Bordures));
+            if k % 10 == 0 {
+                self.centered(Rect::new(x - 20.0 * d, piste.bottom() + 2.0 * d, 40.0 * d, 18.0 * d), &format!("{}", k / 10), 12.0, coul(C::Secondaire));
+            }
+        }
+        for &t in cles {
+            let (x, y, e) = (ax(t), piste.cy(), 7.0 * d);
+            let c = if marque.is_some_and(|m| (m - t).abs() < 1e-4) { coul(C::Accent) } else { coul(C::Texte) };
+            self.dl.line([x - e, y], [x, y - e], 2.0 * d, c);
+            self.dl.line([x, y - e], [x + e, y], 2.0 * d, c);
+            self.dl.line([x + e, y], [x, y + e], 2.0 * d, c);
+            self.dl.line([x, y + e], [x - e, y], 2.0 * d, c);
+        }
+        let x = ax(temps);
+        self.dl.rrect(Rect::new(x - 1.5 * d, r.y + 14.0 * d, 3.0 * d, 44.0 * d), 1.5 * d, coul(C::Accent));
+        self.dl.rrect(Rect::new(x - 6.0 * d, r.y + 8.0 * d, 12.0 * d, 12.0 * d), 6.0 * d, coul(C::Accent));
+        b.y += r.h;
+        rendu
+    }
+
     pub fn rangee(&mut self, b: &mut Body, cle: Id, l: &[(&str, bool)]) -> Option<usize> {
         let (ecart, h) = (6.0 * self.dp, 44.0 * self.dp);
         let w = (b.w - ecart * (l.len() - 1) as f32) / l.len() as f32;

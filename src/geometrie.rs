@@ -1327,6 +1327,13 @@ impl Travail {
             .map(|c| [c.1, c.2])
     }
 
+    /// Point de la face sous le pixel, la plus proche de l'œil, au monde.
+    pub fn point_sous(&self, x: f64, y: f64, vue_: &Vue) -> Option<(f64, P3)> {
+        let d = vue_.rayon(x, y);
+        let (t, _) = vue::touche_faces(&self.triangles(), vue_.oeil, d)?;
+        Some((t, [0, 1, 2].map(|k| vue_.oeil[k] + d[k] * t)))
+    }
+
     pub fn face_sous(&self, x: f64, y: f64, vue_: &Vue) -> Option<usize> {
         vue::touche_faces(&self.triangles(), vue_.oeil, vue_.rayon(x, y)).map(|c| c.1)
     }

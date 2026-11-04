@@ -140,18 +140,25 @@ pub struct Liaison {
     pub armature: String,
     /// Identifiants des os.
     pub os: Vec<String>,
+    /// Poids peints à la main ; sans eux, la peau se calcule.
+    pub poids: Option<Arc<crate::peau::Main>>,
 }
 
 impl Liaison {
     fn lire(j: &J) -> Option<Liaison> {
         let armature = j.get("armature").and_then(J::txt)?.to_string();
         let os = j.get("os").and_then(J::liste)?.iter().filter_map(J::txt).map(str::to_string).collect();
-        Some(Liaison { armature, os })
+        let poids = j.get("poids").and_then(crate::peau::Main::lire).map(Arc::new);
+        Some(Liaison { armature, os, poids })
     }
 
     fn vers_donnees(&self) -> J {
         let os = self.os.iter().map(|i| J::Txt(i.clone())).collect();
-        J::Objet(vec![("armature".to_string(), J::Txt(self.armature.clone())), ("os".to_string(), J::Liste(os))])
+        let mut l = vec![("armature".to_string(), J::Txt(self.armature.clone())), ("os".to_string(), J::Liste(os))];
+        if let Some(p) = &self.poids {
+            l.push(("poids".to_string(), p.vers_donnees()));
+        }
+        J::Objet(l)
     }
 }
 
@@ -450,6 +457,9 @@ impl Projet {
             match armatures.get(&l.armature).filter(|_| o.armature.is_none()) {
                 Some(a) => l.os.retain(|i| a.trouver(i).is_some()),
                 None => l.os.clear(),
+            }
+            if let Some(p) = l.poids.as_mut().filter(|p| p.ids != l.os) {
+                Arc::make_mut(p).suivre(&l.os);
             }
             if l.os.is_empty() {
                 o.liaison = None;
@@ -880,7 +890,7 @@ mod tests {
         let mut a = Objet::neuf("a", Maillage::default());
         a.armature = Some(Armature::humanoide());
         let os: Vec<String> = a.armature.as_ref().unwrap().os.iter().take(2).map(|b| b.id.clone()).collect();
-        p.objets[0].liaison = Some(Liaison { armature: a.id.clone(), os });
+        p.objets[0].liaison = Some(Liaison { armature: a.id.clone(), os, poids: None });
         p.objets.push(a);
         p.verifier();
         let t = p.ecrire();
@@ -905,12 +915,12 @@ mod tests {
         let mut a = Objet::neuf("a", Maillage::default());
         a.armature = Some(Armature::humanoide());
         let i = a.armature.as_ref().unwrap().os[0].id.clone();
-        p.objets[0].liaison = Some(Liaison { armature: a.id.clone(), os: vec![i.clone(), "absent".into()] });
+        p.objets[0].liaison = Some(Liaison { armature: a.id.clone(), os: vec![i.clone(), "absent".into()], poids: None });
         let mut orphelin = Objet::neuf("o", Maillage::default());
-        orphelin.liaison = Some(Liaison { armature: "absente".into(), os: vec![i.clone()] });
+        orphelin.liaison = Some(Liaison { armature: "absente".into(), os: vec![i.clone()], poids: None });
         let mut plus = a.clone();
         plus.id = "autre".into();
-        plus.liaison = Some(Liaison { armature: a.id.clone(), os: vec![i.clone()] });
+        plus.liaison = Some(Liaison { armature: a.id.clone(), os: vec![i.clone()], poids: None });
         p.objets.extend([a, orphelin, plus]);
         p.verifier();
         assert_eq!(p.objets[0].liaison.as_ref().unwrap().os, [i]);
@@ -922,7 +932,7 @@ mod tests {
         let mut f = Projet::neuf();
         let mut a = Objet::neuf("a", Maillage::default());
         a.armature = Some(Armature::humanoide());
-        f.objets[0].liaison = Some(Liaison { armature: a.id.clone(), os: vec![a.armature.as_ref().unwrap().os[0].id.clone()] });
+        f.objets[0].liaison = Some(Liaison { armature: a.id.clone(), os: vec![a.armature.as_ref().unwrap().os[0].id.clone()], poids: None });
         f.objets.push(a);
         let mut p = Projet::neuf();
         p.fusionner(f.clone(), SET_DEFAUT);

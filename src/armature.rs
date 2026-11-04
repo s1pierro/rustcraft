@@ -99,6 +99,65 @@ impl Os {
         }
     }
 
+    /// Limites de translation le long des axes X, Y et Z de l'os au repos, lues dans
+    /// `contraintes.t`. Sans elles, un os racine se déplace librement, les autres non.
+    pub fn limites_t(&self) -> [Limite; 3] {
+        let t = self.extra.iter().find(|(k, _)| k == "contraintes").and_then(|(_, c)| c.get("t")).and_then(J::liste);
+        match t {
+            Some(t) => {
+                let mut l = [Limite::Bloquee; 3];
+                for (k, j) in t.iter().take(3).enumerate() {
+                    // Un état inconnu reste bloqué, comme dans GDA
+                    l[k] = if j.get("etat").and_then(J::txt).is_some_and(|e| ["libre", "limite"].contains(&e)) { Limite::lire(j) } else { Limite::Bloquee };
+                }
+                l
+            }
+            None => self.limites_t_defaut(),
+        }
+    }
+
+    fn limites_t_defaut(&self) -> [Limite; 3] {
+        [if self.parent.is_none() { Limite::Libre } else { Limite::Bloquee }; 3]
+    }
+
+    /// Écrit les limites de translation ; celles par défaut ne s'écrivent pas.
+    pub fn regler_limites_t(&mut self, l: [Limite; 3]) {
+        let defaut = self.limites_t_defaut();
+        let ancien = self.extra.iter().position(|(k, _)| k == "contraintes");
+        let mut champs = match ancien.map(|i| self.extra.remove(i).1) {
+            Some(J::Objet(c)) => c,
+            _ => Vec::new(),
+        };
+        champs.retain(|(k, _)| k != "t");
+        if l != defaut {
+            champs.push(("t".into(), J::Liste(l.iter().map(|x| x.donnees()).collect())));
+        }
+        if !champs.is_empty() {
+            self.extra.insert(ancien.unwrap_or(self.extra.len()), ("contraintes".into(), J::Objet(champs)));
+        }
+    }
+
+    /// L'écart `t` (repère du parent) le long des axes de l'os au repos.
+    pub fn t_os(&self, t: P3) -> P3 {
+        qappliquer(qinv(self.rotation), t)
+    }
+
+    /// L'inverse de `t_os`.
+    pub fn depuis_t_os(&self, t: P3) -> P3 {
+        qappliquer(self.rotation, t)
+    }
+
+    /// `t` ramené dans les limites de translation, `depart` donnant les axes bloqués.
+    pub fn borner_t(&self, t: P3, depart: P3) -> P3 {
+        let l = self.limites_t();
+        if l == [Limite::Libre; 3] {
+            return t;
+        }
+        let (a, d) = (self.t_os(t), self.t_os(depart));
+        let b = [0, 1, 2].map(|k| l[k].borner(a[k], d[k]));
+        if (0..3).all(|k| (a[k] - b[k]).abs() < 1e-12) { t } else { self.depuis_t_os(b) }
+    }
+
     /// `r` ramené dans les limites, `depart` donnant la valeur des axes bloqués.
     /// Inchangé sans limite ou s'il y est déjà.
     pub fn borner(&self, r: Q, depart: Q) -> Q {
@@ -202,7 +261,7 @@ fn moins(a: P3, b: P3) -> P3 {
 
 /// Quaternion lu : une rotation déjà unitaire n'est pas recalculée, le fichier reste exact.
 /// Écarts d'une pose lus d'un objet `{id: {r, t}}`, pour les os retenus.
-fn lire_ecarts(j: &J, garder: impl Fn(&String) -> bool) -> Pose {
+pub(crate) fn lire_ecarts(j: &J, garder: impl Fn(&String) -> bool) -> Pose {
     let mut pose = Pose::new();
     if let J::Objet(l) = j {
         for (id, e) in l.iter().filter(|x| garder(&x.0)) {
@@ -376,14 +435,16 @@ impl Armature {
         const ID: Q = [0.0, 0.0, 0.0, 1.0];
         for b in &self.os {
             let e = self.pose.get(&b.id).copied().unwrap_or(Ecart { r: ID, t: [0.0; 3] });
-            let r = b.borner(e.r, depart.get(&b.id).map_or(ID, |d| d.r));
-            if r == e.r {
+            let d = depart.get(&b.id);
+            let r = b.borner(e.r, d.map_or(ID, |d| d.r));
+            let t = b.borner_t(e.t, d.map_or([0.0; 3], |d| d.t));
+            if r == e.r && t == e.t {
                 continue;
             }
-            if angles_os(r).iter().all(|a| a.abs() < 1e-9) && e.t == [0.0; 3] {
+            if angles_os(r).iter().all(|a| a.abs() < 1e-9) && t.iter().all(|v| v.abs() < 1e-12) {
                 self.pose.remove(&b.id);
             } else {
-                self.pose.insert(b.id.clone(), Ecart { r, t: e.t });
+                self.pose.insert(b.id.clone(), Ecart { r, t });
             }
         }
     }
@@ -400,6 +461,37 @@ impl Armature {
             let e = self.pose.entry(id.clone()).or_insert(Ecart { r, t: [0.0; 3] });
             e.r = r;
         }
+    }
+
+    /// Déplace des os de `d`, dans le repère de l'armature, avec leurs enfants. Aucun
+    /// d'eux ne doit descendre d'un autre.
+    pub fn deplacer(&mut self, ids: &[String], d: P3) {
+        let m = self.matrices_pose();
+        for id in ids {
+            let Some(b) = self.trouver(id) else { continue };
+            let qp = b.parent.as_ref().and_then(|p| m.get(p)).map_or([0.0, 0.0, 0.0, 1.0], |x| x.1);
+            let dl = qappliquer(qinv(qp), d);
+            let e = self.pose.entry(id.clone()).or_insert(Ecart { r: [0.0, 0.0, 0.0, 1.0], t: [0.0; 3] });
+            e.t = plus(e.t, dl);
+        }
+    }
+
+    /// Translation de l'os depuis son repos, le long de ses axes au repos.
+    pub fn translation_os(&self, id: &str) -> P3 {
+        match (self.trouver(id), self.pose.get(id)) {
+            (Some(b), Some(e)) => b.t_os(e.t),
+            _ => [0.0; 3],
+        }
+    }
+
+    /// Règle cette translation, dans ses limites.
+    pub fn regler_translation(&mut self, id: &str, t: P3) {
+        let Some(b) = self.trouver(id) else { return };
+        let depart = self.pose.clone();
+        let t = b.depuis_t_os(t);
+        let e = self.pose.entry(id.to_string()).or_insert(Ecart { r: [0.0, 0.0, 0.0, 1.0], t: [0.0; 3] });
+        e.t = t;
+        self.borner(&depart);
     }
 
     /// Ces os reviennent à leur repos.
@@ -779,6 +871,41 @@ impl EditionOs {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deplacer_un_os_emmene_ses_enfants_et_suit_ses_limites() {
+        let mut a = Armature::humanoide();
+        let id = |a: &Armature, n: &str| a.os.iter().find(|b| b.nom == n).unwrap().id.clone();
+        let (bassin, bras, avant) = (id(&a, "bassin"), id(&a, "bras.G"), id(&a, "avant-bras.G"));
+        // La racine est libre par défaut, un os enfant bloqué
+        assert_eq!(a.trouver(&bassin).unwrap().limites_t(), [Limite::Libre; 3]);
+        assert_eq!(a.trouver(&bras).unwrap().limites_t(), [Limite::Bloquee; 3]);
+        let avant_m = a.matrices_pose();
+        a.deplacer(std::slice::from_ref(&bassin), [0.0, 0.2, 0.1]);
+        let m = a.matrices_pose();
+        for i in [&bassin, &avant] {
+            let (p, q) = (avant_m[i].0, m[i].0);
+            assert!((q[1] - p[1] - 0.2).abs() < 1e-9 && (q[2] - p[2] - 0.1).abs() < 1e-9, "{i}");
+        }
+        // Un os bloqué revient à sa place
+        let depart = a.pose.clone();
+        a.deplacer(std::slice::from_ref(&bras), [0.3, 0.0, 0.0]);
+        a.borner(&depart);
+        assert!(a.pose.get(&bras).is_none());
+        // Une borne sur l'axe Y de l'os
+        let b = a.os.iter_mut().find(|b| b.id == bras).unwrap();
+        b.regler_limites_t([Limite::Bloquee, Limite::Bornee(-0.1, 0.05), Limite::Bloquee]);
+        assert_eq!(b.limites_t(), [Limite::Bloquee, Limite::Bornee(-0.1, 0.05), Limite::Bloquee]);
+        a.regler_translation(&bras, [0.5, 0.5, 0.5]);
+        let t = a.translation_os(&bras);
+        assert!(t[0].abs() < 1e-9 && (t[1] - 0.05).abs() < 1e-9 && t[2].abs() < 1e-9, "{t:?}");
+        // Les limites par défaut ne s'écrivent pas ; celles de rotation restent
+        let b = a.os.iter_mut().find(|b| b.id == bras).unwrap();
+        b.regler_limites([Limite::Bornee(-10.0, 10.0), Limite::Libre, Limite::Libre]);
+        b.regler_limites_t([Limite::Bloquee; 3]);
+        assert!(b.extra.iter().find(|(k, _)| k == "contraintes").unwrap().1.get("t").is_none());
+        assert_eq!(b.limites()[0], Limite::Bornee(-10.0, 10.0));
+    }
+
     use super::*;
 
     fn pres(a: P3, b: P3) -> bool {

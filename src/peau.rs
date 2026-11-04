@@ -2,11 +2,13 @@
 //! de GDA, limité aux os du groupe. Poids par diffusion de chaleur sur la surface (Baran et
 //! Popović, « bone heat ») : chaque os chauffe les sommets qui lui reviennent, et sa chaleur
 //! se répand le long de la peau, sans sauter d'une jambe à l'autre. Les poids se déduisent
-//! du maillage et des os : ils ne sont pas enregistrés.
+//! du maillage et des os : ils ne sont pas enregistrés. Une fois peints à la main
+//! ([`Main`]), ils le sont, avec la liaison, et remplacent ce calcul.
 
 use crate::armature::Armature;
 use crate::edition::{qappliquer, qinv, qmul, qnorm};
 use crate::geometrie::vers_local;
+use crate::json::J;
 use crate::maillage::{Maillage, P3};
 use crate::projet::Objet;
 use crate::vue;
@@ -354,4 +356,285 @@ pub fn deforme(l: &Liee, o: &Objet, x: &Objet, a: &Armature) -> Maillage {
 /// Une liste d'os vide ou une peau échouée ne déforme rien.
 pub fn valide(l: &Liee, n: usize) -> bool {
     l.repos.len() == n && l.peau.poids.len() == n * INFLUENCES
+}
+
+
+/// Ce que fait le pinceau au poids de l'os actif.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pinceau {
+    Ajouter,
+    Retirer,
+    /// Vers la moyenne des sommets voisins.
+    Lisser,
+}
+
+/// Poids peints à la main : une colonne par os, tous les sommets du maillage de base.
+/// Chaque sommet garde une somme de 1 ; la peau en retient les quatre plus forts.
+#[derive(Clone, Debug, Default)]
+pub struct Main {
+    pub ids: Vec<String>,
+    /// Sommets du maillage peint : un autre nombre rend les poids caducs.
+    pub n: usize,
+    /// `w[i * ids.len() + j]` : poids de l'os `j` au sommet `i`.
+    pub w: Vec<f32>,
+    /// Change à chaque coup de pinceau : la peau se refait.
+    pub version: u64,
+}
+
+impl PartialEq for Main {
+    fn eq(&self, o: &Main) -> bool {
+        (&self.ids, self.n, &self.w) == (&o.ids, o.n, &o.w)
+    }
+}
+
+fn version() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SUITE: AtomicU64 = AtomicU64::new(1);
+    SUITE.fetch_add(1, Ordering::Relaxed)
+}
+
+impl Main {
+    /// Le point de départ du pinceau : les poids calculés.
+    pub fn depuis_peau(p: &Peau, n: usize) -> Main {
+        let b = p.ids.len();
+        let mut w = vec![0f32; n * b];
+        for i in 0..n.min(p.poids.len() / INFLUENCES) {
+            for k in 0..INFLUENCES {
+                let x = p.poids[i * INFLUENCES + k];
+                if x == 0.0 {
+                    break;
+                }
+                w[i * b + p.indices[i * INFLUENCES + k] as usize] += x;
+            }
+        }
+        Main { ids: p.ids.clone(), n, w, version: version() }
+    }
+
+    /// Tout le poids à un seul os : un objet sans peau calculée.
+    pub fn uniforme(ids: Vec<String>, n: usize, os: usize) -> Main {
+        let b = ids.len();
+        let mut w = vec![0f32; n * b];
+        for i in 0..n {
+            w[i * b + os.min(b.saturating_sub(1))] = 1.0;
+        }
+        Main { ids, n, w, version: version() }
+    }
+
+    /// Les colonnes suivent le groupe : un os retiré sort, un os ajouté entre à zéro,
+    /// et un sommet sans poids revient au premier os.
+    pub fn suivre(&mut self, groupe: &[String]) {
+        if self.ids == groupe {
+            return;
+        }
+        let (b, nb) = (self.ids.len(), groupe.len());
+        let mut w = vec![0f32; self.n * nb];
+        for (j, id) in groupe.iter().enumerate() {
+            if let Some(a) = self.ids.iter().position(|x| x == id) {
+                for i in 0..self.n {
+                    w[i * nb + j] = self.w[i * b + a];
+                }
+            }
+        }
+        self.ids = groupe.to_vec();
+        self.w = w;
+        for i in 0..self.n {
+            self.normaliser(i, None, None);
+        }
+        self.version = version();
+    }
+
+    pub fn colonne(&self, id: &str) -> Option<usize> {
+        self.ids.iter().position(|x| x == id)
+    }
+
+    /// Poids de l'os `id` pour chaque sommet.
+    pub fn poids_de(&self, id: &str) -> Vec<f32> {
+        let b = self.ids.len();
+        match self.colonne(id) {
+            Some(j) => (0..self.n).map(|i| self.w[i * b + j]).collect(),
+            None => vec![0.0; self.n],
+        }
+    }
+
+    /// La peau : les quatre plus forts par sommet.
+    pub fn peau(&self) -> Peau {
+        let b = self.ids.len();
+        let table: Vec<Vec<f32>> = (0..b).map(|j| (0..self.n).map(|i| self.w[i * b + j]).collect()).collect();
+        compacter(&table, self.n, self.ids.clone())
+    }
+
+    /// Ramène le sommet `i` à une somme de 1 sans toucher à la colonne `fixe` : les autres
+    /// se partagent le reste en proportion, ou, toutes nulles, il va à `repli`.
+    fn normaliser(&mut self, i: usize, fixe: Option<usize>, repli: Option<usize>) {
+        let b = self.ids.len();
+        if b == 0 {
+            return;
+        }
+        let l = &mut self.w[i * b..(i + 1) * b];
+        let garde = fixe.map_or(0.0, |j| l[j].clamp(0.0, 1.0));
+        if let Some(j) = fixe {
+            l[j] = garde;
+        }
+        let autres: f32 = l.iter().enumerate().filter(|(k, _)| Some(*k) != fixe).map(|x| x.1.max(0.0)).sum();
+        let reste = 1.0 - garde;
+        if autres > 1e-6 {
+            for (k, x) in l.iter_mut().enumerate() {
+                if Some(k) != fixe {
+                    *x = x.max(0.0) * reste / autres;
+                }
+            }
+        } else if let Some(r) = repli.filter(|r| Some(*r) != fixe).or_else(|| (0..b).find(|k| Some(*k) != fixe)) {
+            l[r] = reste;
+        } else if let Some(j) = fixe {
+            // Un seul os : il garde tout
+            l[j] = 1.0;
+        }
+    }
+
+    /// Un coup de pinceau sur la colonne `j` : chaque sommet touché, avec son intensité
+    /// (0 à 1, déjà multipliée par la force) ; `voisins` sert au lissage, `repli` reçoit
+    /// ce qu'on retire à un sommet qui n'avait que cet os.
+    pub fn peindre(&mut self, j: usize, touches: &[(usize, f32)], mode: Pinceau, voisins: &[Vec<usize>], repli: Option<usize>) {
+        let b = self.ids.len();
+        if j >= b {
+            return;
+        }
+        let avant: Vec<f32> = if mode == Pinceau::Lisser { (0..self.n).map(|i| self.w[i * b + j]).collect() } else { Vec::new() };
+        for &(i, f) in touches {
+            if i >= self.n {
+                continue;
+            }
+            let x = self.w[i * b + j];
+            let cible = match mode {
+                Pinceau::Ajouter => 1.0,
+                Pinceau::Retirer => 0.0,
+                Pinceau::Lisser => {
+                    let v = voisins.get(i).map_or(&[][..], |v| &v[..]);
+                    if v.is_empty() {
+                        continue;
+                    }
+                    v.iter().map(|k| avant[*k]).sum::<f32>() / v.len() as f32
+                }
+            };
+            self.w[i * b + j] = x + (cible - x) * f.clamp(0.0, 1.0);
+            self.normaliser(i, Some(j), repli);
+        }
+        self.version = version();
+    }
+
+    pub fn lire(j: &J) -> Option<Main> {
+        let ids: Vec<String> = j.get("os").and_then(J::liste)?.iter().filter_map(J::txt).map(str::to_string).collect();
+        let n = j.get("sommets").and_then(J::num)? as usize;
+        let b = ids.len();
+        let mut w = vec![0f32; n * b];
+        // Par os : sommet, poids, sommet, poids…
+        for (c, l) in j.get("poids").and_then(J::liste)?.iter().enumerate().take(b) {
+            let l = l.liste()?;
+            for p in l.chunks(2) {
+                if let [i, x] = p {
+                    let i = i.num()? as usize;
+                    if i < n {
+                        w[i * b + c] = x.num()? as f32;
+                    }
+                }
+            }
+        }
+        Some(Main { ids, n, w, version: version() })
+    }
+
+    pub fn vers_donnees(&self) -> J {
+        let b = self.ids.len();
+        let poids = (0..b).map(|j| {
+            let mut l = Vec::new();
+            for i in 0..self.n {
+                let x = self.w[i * b + j];
+                if x > 1e-4 {
+                    l.push(J::Num(i as f64));
+                    l.push(J::Num((x as f64 * 1e4).round() / 1e4));
+                }
+            }
+            J::Liste(l)
+        }).collect();
+        J::Objet(vec![
+            ("os".into(), J::Liste(self.ids.iter().map(|i| J::Txt(i.clone())).collect())),
+            ("sommets".into(), J::Num(self.n as f64)),
+            ("poids".into(), J::Liste(poids)),
+        ])
+    }
+}
+
+/// Sommets voisins par les arêtes des faces : pour lisser.
+pub fn voisins(m: &Maillage) -> Vec<Vec<usize>> {
+    let mut v = vec![Vec::new(); m.sommets.len()];
+    for f in &m.faces {
+        let n = f.s.len();
+        for k in 0..n {
+            let (a, b) = (f.s[k], f.s[(k + 1) % n]);
+            if a < v.len() && b < v.len() {
+                if !v[a].contains(&b) {
+                    v[a].push(b);
+                }
+                if !v[b].contains(&a) {
+                    v[b].push(a);
+                }
+            }
+        }
+    }
+    v
+}
+
+/// La peau d'un objet aux poids peints : sans calcul, tout de suite.
+pub fn lier_main(base: Arc<Maillage>, o: &Objet, x: &Objet, main: &Main, cle: String) -> Liee {
+    let m = o.matrice();
+    let repos: Vec<P3> = base.sommets.iter().map(|p| vers_local(x, vue::appliquer(&m, *p))).collect();
+    Liee { cle, peau: main.peau(), repos, base }
+}
+
+#[cfg(test)]
+mod tests_main {
+    use super::*;
+
+    fn main3() -> Main {
+        // Trois sommets, deux os : tout à a, moitié-moitié, tout à b
+        Main { ids: vec!["a".into(), "b".into()], n: 3, w: vec![1.0, 0.0, 0.5, 0.5, 0.0, 1.0], version: 0 }
+    }
+
+    #[test]
+    fn peindre_garde_une_somme_de_un() {
+        let mut m = main3();
+        m.peindre(0, &[(1, 0.5), (2, 1.0)], Pinceau::Ajouter, &[], None);
+        for i in 0..3 {
+            assert!((m.w[i * 2] + m.w[i * 2 + 1] - 1.0).abs() < 1e-6);
+        }
+        assert!((m.w[2] - 0.75).abs() < 1e-6 && m.w[4] == 1.0);
+        // Retirer tout à un sommet qui n'a que cet os : le reste va au repli
+        m.peindre(0, &[(0, 1.0)], Pinceau::Retirer, &[], Some(1));
+        assert_eq!((m.w[0], m.w[1]), (0.0, 1.0));
+    }
+
+    #[test]
+    fn lisser_tire_vers_les_voisins() {
+        let mut m = main3();
+        let v = vec![vec![1], vec![0, 2], vec![1]];
+        m.peindre(0, &[(0, 1.0)], Pinceau::Lisser, &v, None);
+        assert!((m.w[0] - 0.5).abs() < 1e-6 && (m.w[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn les_poids_peints_reviennent_des_donnees_et_suivent_le_groupe() {
+        let m = main3();
+        let r = Main::lire(&m.vers_donnees()).unwrap();
+        assert_eq!(r, m);
+        let mut g = r.clone();
+        g.suivre(&["b".into(), "c".into()]);
+        assert_eq!(g.ids, ["b", "c"]);
+        assert_eq!(g.w, [1.0, 0.0, 1.0, 0.0, 1.0, 0.0], "le sommet de a seul revient au premier os");
+    }
+
+    #[test]
+    fn la_peau_des_poids_peints_les_rend() {
+        let p = main3().peau();
+        let m = Main::depuis_peau(&p, 3);
+        assert_eq!(m, main3());
+    }
 }

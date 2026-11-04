@@ -12,7 +12,7 @@ ouvrez la page, puis touchez le fichier `.apk`.
 
 ## État
 
-Version 0.41 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
+Version 0.46 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
 
 - Projets `.gda` des formats 1 à 10, fichiers OBJ, STL, glTF et GLB ; Rustcraft écrit
   le format 10, que GDA n'ouvre pas
@@ -63,7 +63,8 @@ Version 0.41 : **édition en modes Scène, Géométrie et Pose, armatures, modif
   leur géométrie, ce sont leurs os, édités en mode Géométrie : bouts et corps des os au toucher ou en boîte,
   bouts soudés, déplacement, rotation et échelle, ajout, extrusion, suppression, parent,
   nom et longueur, limites de rotation par axe (libre, limitée en degrés depuis le repos,
-  bloquée), montrées en secteurs à la tête de l'os ; dans la pastille Os, les armatures et l'arbre de leurs os, dépliables, un appui long y choisit toute une descendance ; en mode Scène, cette pastille
+  bloquée), montrées en secteurs à la tête de l'os, et de translation le long des axes de
+  l'os au repos (racine libre, autres os bloqués par défaut) ; dans la pastille Os, les armatures et l'arbre de leurs os, dépliables, un appui long y choisit toute une descendance ; en mode Scène, cette pastille
   montre l'armature active : nom, objets liés, os posés, retour au repos, poids d'un os
   de l'arbre ; « Au premier plan », dans Contexte › Objet, les montre et les fait toucher
   à travers les autres objets en mode Scène ; gardées dans le `.gda`
@@ -73,26 +74,36 @@ Version 0.41 : **édition en modes Scène, Géométrie et Pose, armatures, modif
   autour de leur tête, selon les axes de l'os actif posé, à la poignée comme aux trois
   curseurs d'angle de l'os actif, qui tournent comme ses anneaux (plier en X et Z, vriller en Y), dans ses limites, que
   ses anneaux montrent en secteurs, sans anneau pour un axe bloqué ; en manipulation
-  Tirer, au bouton de la barre du bas, on saisit directement un os et la chaîne qui le
+  Déplacer, les os glissent avec leurs enfants dans leurs limites de translation (aussi en
+  chiffres dans Os actif) ; en manipulation Tirer, troisième état du bouton de la barre du bas, on saisit directement un os et la chaîne qui le
   relie à l'ancre se plie pour le suivre, dans les limites, comme la marionnette de GDA ;
   l'ancre reste fixe dans le monde, la racine par défaut, « Ancrer ici » sur l'os actif ; le panneau Os ne garde
   que la pose ; « Sauvegarder la pose » la garde dans l'onglet Catalogue, d'où elle se
-  rappelle, se renomme, se remplace ou se supprime ; un objet lié à
+  rappelle, se renomme, se remplace ou se supprime ; l'onglet Animation garde des
+  animations (nom, durée, boucle) faites de clés de pose sur une ligne de temps à
+  24 images par seconde, interpolées os par os, lues en boucle ou une fois ; un objet lié à
   un seul os le suit, un objet lié à un groupe se déforme selon des poids automatiques
   (diffusion de chaleur sur la surface, 4 os au plus par sommet), recalculés quand le
   maillage ou les os changent ; pose gardée dans le `.gda`, retour au repos par os ou en
-  bloc ; poids de l'os actif en couleur sur les objets
-- Curseur 3D : vers l'origine, vers la sélection, sélection vers le curseur
+  bloc ; poids de l'os actif en couleur sur les objets, et peints à la main (ajouter,
+  retirer, lisser ; rayon et force), enregistrés avec la liaison dans le `.gda`
+- Curseur 3D : pris par son anneau et glissé dans la vue, il se pose sur la surface sous
+  le doigt ou garde sa profondeur dans le vide ; position saisissable ; vers l'origine,
+  la sélection, le centre de la vue ou de la scène ; sélection et vue vers le curseur
 - Panneau Fichier à trois onglets : Projet (nom, enregistrement `.gda`, ouverture,
   nouvelle scène), Importer par le sélecteur d'Android, Exporter en OBJ, STL ou GLB la
   scène complète ou les seuls objets choisis, et `.mtl`, dans Téléchargements
   (Android 10 ou plus) ; sauvegarde automatique d'un lancement à l'autre
+- Export pour S.A.G.E. : l'armature active et ses objets liés en un seul `.glb` animé,
+  valide pour le validateur de Khronos : un nœud par os au repos, une peau (JOINTS_0,
+  WEIGHTS_0, matrices de liaison inverses) aux poids peints ou calculés, une animation
+  glTF par animation (rotation, et translation des os qui glissent) ; longueurs et limites
+  des os, ancre, poses nommées, boucle et durée dans les `extras`
 
-Pas encore disponibles : curseur 3D à la main ; limites de translation des armatures,
-conservées dans le projet mais ni éditables ni appliquées ; poids à la main.
+
 Les limites de rotation suivent l'ordre des curseurs (X, puis Z, puis la vrille Y) ;
 GDA compose ses angles dans l'ordre X, Y, Z.
-Les armatures et les poids ne sont pas exportés, et les objets s'exportent au repos. En mode Géométrie, les objets sont édités sans leurs
+Les exports OBJ, STL et GLB ordinaires sont au repos, sans armature ; le personnage pour S.A.G.E. (Fichier › Exporter) les emporte. En mode Géométrie, les objets sont édités sans leurs
 modifieurs.
 
 ## Ouvrir un fichier
@@ -110,6 +121,8 @@ Depuis le panneau Fichier, ou depuis un gestionnaire de fichiers : **Ouvrir avec
 - `src/booleens.rs`, `modifs.rs` : opérations booléennes et évaluation des modifieurs
 - `src/primitives.rs`, `visserie.rs` : réglages des primitives, pièces de visserie
 - `src/armature.rs` : os, hiérarchie, pose, limites, bouts soudés et sélection des os, sans interface
+- `src/animation.rs` : animations d'une armature, clés de pose et interpolation par os (forme glTF)
+- `src/sage.rs` : export d'un personnage (armature, peau, animations) en `.glb` pour S.A.G.E.
 - `src/marionnette.rs` : saisie directe d'une armature posée, l'ancre restant fixe, sans interface
 - `src/peau.rs` : poids automatiques et déformation des objets liés à un groupe d'os, sans interface
 - `src/uv.rs` : points, îlots et transformations des coordonnées de texture, sans interface

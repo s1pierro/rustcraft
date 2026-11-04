@@ -7,6 +7,7 @@
 //! - `editeur` : le contexte d'édition 3D.
 
 pub mod actions;
+pub mod animation;
 pub mod armature;
 pub mod android;
 pub mod draw;
@@ -21,6 +22,7 @@ pub mod marionnette;
 pub mod math;
 pub mod projet;
 pub mod renderer;
+pub mod sage;
 pub mod shell;
 pub mod text;
 pub mod texture;

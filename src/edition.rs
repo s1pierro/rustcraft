@@ -445,6 +445,8 @@ pub struct Geste {
     // Échelle
     libres: [bool; 3],
     dir: Option<[f64; 2]>,
+    /// Translation : axes de la poignée, ceux du monde ou d'un os posé.
+    repere: Q,
 }
 
 impl Geste {
@@ -470,6 +472,7 @@ impl Geste {
             cumul: 0.0, theta: 0.0,
             libres: axes,
             dir: None,
+            repere: [0.0, 0.0, 0.0, 1.0],
         };
         match mode {
             Mode::Translation => {}
@@ -504,6 +507,9 @@ impl Geste {
     /// Rotation autour des axes d'un repère tourné de `q`, ceux d'un os posé, au lieu
     /// de ceux du monde.
     pub fn orienter(&mut self, q: Q) {
+        if self.mode == Mode::Translation {
+            self.repere = q;
+        }
         if self.mode != Mode::Rotation {
             return;
         }
@@ -525,19 +531,21 @@ impl Geste {
         };
         let (sx, sy) = (x - self.x0, y - self.y0);
         let (droite, haut, pixel) = (self.vue.droite, self.vue.haut, self.pixel);
+        let ax = |k: usize| qappliquer(self.repere, axe(k));
         let mut d = [0.0; 3];
         if let [k] = libres[..] {
-            let u = axe(k);
+            let u = ax(k);
             let (ux, uy) = (scal(u, droite) / pixel, -scal(u, haut) / pixel);
             let l2 = ux * ux + uy * uy;
             if l2 > 1e-6 {
-                d[k] = (sx * ux + sy * uy) / l2;
+                let t = (sx * ux + sy * uy) / l2;
+                d = u.map(|c| c * t);
             }
         } else {
             let bloque = (0..3).find(|k| !libres.contains(k));
             let mut fait = false;
             if let Some(b) = bloque {
-                let n = axe(b);
+                let n = ax(b);
                 if let Some(p0) = self.vue.sur_plan(self.x0, self.y0, n, self.centre) {
                     if let Some(p1) = self.vue.sur_plan(x, y, n, self.centre) {
                         d = sous(p1, p0);
@@ -549,11 +557,15 @@ impl Geste {
                 d = [0, 1, 2].map(|k| droite[k] * sx * pixel - haut[k] * sy * pixel);
             }
             if let Some(b) = bloque {
-                d[b] = 0.0;
+                let n = ax(b);
+                let t = scal(d, n);
+                d = [0, 1, 2].map(|c| d[c] - n[c] * t);
             }
         }
         if pas.actif {
-            d = d.map(|v| (v / pas_t).round() * pas_t);
+            // Au pas le long de chaque axe de la poignée
+            let c = [0, 1, 2].map(|k| (scal(d, ax(k)) / pas_t).round() * pas_t);
+            d = [0, 1, 2].map(|i| (0..3).map(|k| ax(k)[i] * c[k]).sum());
         }
         d
     }

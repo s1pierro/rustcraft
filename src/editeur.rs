@@ -38,6 +38,8 @@ const OS: Id = id("pastille-os");
 const TOILE_UV: Id = id("toile-uv");
 const MODIFIEURS: Id = id("pastille-modifieurs");
 const REGLAGES: Id = id("reglages");
+/// Rayon de l'anneau du curseur 3D à l'écran, en dp.
+const RAYON_CURSEUR: f64 = 16.0;
 const AIDE: Id = id("aide");
 const ANNULER: Id = id("annuler");
 const RETABLIR: Id = id("retablir");
@@ -328,8 +330,16 @@ pub enum Champ {
     OsLongueur,
     /// Borne d'une limite de rotation de l'os actif : son axe, et vrai pour le maximum.
     OsLimite(usize, bool),
+    /// Position du curseur 3D.
+    Curseur(usize),
+    /// Translation de l'os actif posé, le long d'un de ses axes.
+    OsTranslation(usize),
     /// Nom de la pose choisie dans le catalogue.
     PoseNom,
+    /// Animation choisie : nom, durée, instant montré.
+    AnimNom,
+    AnimDuree,
+    AnimTemps,
     /// Code d'une couleur du matériau de l'objet actif.
     MatCode(usize),
     /// Champ du panneau d'ajout : son rang et son libellé.
@@ -346,6 +356,8 @@ impl Champ {
             Champ::ModifN(_) => "Nombre de copies".into(),
             Champ::ModifDecalage(_, k) => format!("Décalage {}", NOMS_AXES[k]),
             Champ::Position(k) => format!("Position {}", NOMS_AXES[k]),
+            Champ::Curseur(k) => format!("Curseur {}", NOMS_AXES[k]),
+            Champ::OsTranslation(k) => format!("Translation {}", NOMS_AXES[k]),
             Champ::Rotation(k) => format!("Rotation {}", NOMS_AXES[k]),
             Champ::Dimension(k) => format!("Dimensions {}", NOMS_AXES[k]),
             Champ::PasTranslation => "Pas : translation".into(),
@@ -365,8 +377,11 @@ impl Champ {
             Champ::SetNom => "Nom du set".into(),
             Champ::OsNom => "Nom de l'os".into(),
             Champ::PoseNom => "Nom de la pose".into(),
+            Champ::AnimNom => "Nom de l'animation".into(),
+            Champ::AnimDuree => "Durée (s)".into(),
+            Champ::AnimTemps => "Instant (s)".into(),
             Champ::OsLongueur => "Longueur de l'os".into(),
-            Champ::OsLimite(k, max) => format!("{} {}", if max { "Maximum" } else { "Minimum" }, NOMS_AXES[k]),
+            Champ::OsLimite(k, max) => format!("{} {}{}", if max { "Maximum" } else { "Minimum" }, if k >= 3 { "translation " } else { "" }, NOMS_AXES[k % 3]),
             Champ::MatCode(k) => format!("{} (#rrggbb)", COULEURS_MAT[k].0),
             Champ::Projet => "Nom du projet".into(),
         }
@@ -374,7 +389,7 @@ impl Champ {
 
     /// Champ qui accepte du texte, pas seulement un nombre.
     fn libre(self) -> bool {
-        matches!(self, Champ::Nom | Champ::Projet | Champ::Couleur(_) | Champ::MatNom | Champ::MatCode(_) | Champ::SetNom | Champ::OsNom | Champ::PoseNom)
+        matches!(self, Champ::Nom | Champ::Projet | Champ::Couleur(_) | Champ::MatNom | Champ::MatCode(_) | Champ::SetNom | Champ::OsNom | Champ::PoseNom | Champ::AnimNom)
     }
 }
 
@@ -768,11 +783,27 @@ pub struct App {
     pub tirer: bool,
     /// Saisie directe en cours : l'os tenu, et le point du monde par où passe le plan du doigt.
     saisie: Option<(crate::marionnette::Saisie, P3)>,
+    /// Curseur 3D tenu au doigt : où il était quand on l'a pris.
+    curseur_tenu: Option<P3>,
+    /// Pinceau des poids : allumé, ce qu'il fait, son rayon (dp) et sa force.
+    pub peindre: bool,
+    pub pinceau: peau::Pinceau,
+    pub pinceau_rayon: f32,
+    pub pinceau_force: f32,
+    /// Objet en cours de peinture, tant que le doigt reste posé, et le doigt à l'écran.
+    trait_poids: Option<usize>,
+    trait_ecran: (f32, f32),
+    /// Voisins des sommets par objet, pour lisser : l'adresse du maillage dont ils sortent.
+    voisins: HashMap<String, (usize, Arc<Vec<Vec<usize>>>)>,
     /// Lignes repliées de l'arbre des armatures : `a:` et l'identifiant d'une
     /// armature, ou l'identifiant d'un os.
     pub os_plies: HashSet<String>,
-    /// Mode Pose : onglet Pose ou Catalogue, et la pose nommée choisie dans celui-ci.
+    /// Mode Pose : onglet Pose, Catalogue ou Animation, et la pose nommée choisie dans le catalogue.
     pub onglet_os: usize,
+    /// Animation choisie de l'armature ouverte, l'instant montré, et la lecture.
+    pub anim_choisie: Option<usize>,
+    pub anim_temps: f64,
+    pub anim_lecture: bool,
     pose_choisie: Option<usize>,
     /// Objets liés emportés par le geste en cours.
     suivis: Vec<ed::Suivi>,
@@ -859,10 +890,21 @@ impl App {
             angles_tenus: None,
             angle_saisie: false,
             angle_depart: None,
+            curseur_tenu: None,
+            peindre: false,
+            pinceau: peau::Pinceau::Ajouter,
+            pinceau_rayon: 40.0,
+            pinceau_force: 0.3,
+            trait_poids: None,
+            trait_ecran: (0.0, 0.0),
+            voisins: HashMap::new(),
             tirer: false,
             saisie: None,
             os_plies: HashSet::new(),
             onglet_os: 0,
+            anim_choisie: None,
+            anim_temps: 0.0,
+            anim_lecture: false,
             pose_choisie: None,
             suivis: Vec::new(),
             liaison: None,
@@ -879,7 +921,7 @@ impl App {
     }
 
     pub fn animating(&self) -> bool {
-        self.shell.animating() || self.vol.is_some() || self.message.is_some() || self.calcul.is_some() || self.calcul_peau.is_some() || self.ajout.as_ref().is_some_and(|a| a.calcul.is_some())
+        self.shell.animating() || self.anim_lecture || self.vol.is_some() || self.message.is_some() || self.calcul.is_some() || self.calcul_peau.is_some() || self.ajout.as_ref().is_some_and(|a| a.calcul.is_some())
     }
 
     /// Maillage que l'objet montre : le modifié, ou son dernier résultat en attendant.
@@ -954,6 +996,7 @@ impl App {
         let voir = self.voir_poids && self.os_vu().is_some();
         let ouverte = self.os.as_ref().filter(|e| e.pose).and_then(|e| e.objet);
         let (mut lies, mut gardes, mut neufs, mut a_lancer) = (HashSet::new(), HashSet::new(), Vec::new(), None);
+        let mut prets: Vec<(String, Arc<peau::Liee>)> = Vec::new();
         for (k, o) in p.objets.iter().enumerate() {
             let Some(l) = o.liaison.as_ref().filter(|l| l.os.len() > 1) else { continue };
             let Some(x) = p.objet_id(&l.armature) else { continue };
@@ -966,11 +1009,23 @@ impl App {
                 continue;
             }
             let base = self.maillage_base(k);
-            let cle = peau::cle(&base, o, x, &l.os);
-            let e = self.peaux.get(&o.id);
-            if a_lancer.is_none() && e.is_none_or(|e| e.cle != cle) {
-                a_lancer = Some((k, base.clone(), cle.clone()));
+            let main = l.poids.as_ref().filter(|p| p.n == base.sommets.len());
+            let mut cle = peau::cle(&base, o, x, &l.os);
+            if let Some(m) = main {
+                cle = format!("main {}|{cle}", m.version);
             }
+            let e = self.peaux.get(&o.id);
+            match main {
+                // Poids peints : la peau se fait sur-le-champ
+                Some(m) if e.is_none_or(|e| e.cle != cle) => {
+                    let l = Arc::new(peau::lier_main(base.clone(), o, x, m, cle.clone()));
+                    prets.push((o.id.clone(), l));
+                }
+                Some(_) => {}
+                None if a_lancer.is_none() && e.is_none_or(|e| e.cle != cle) => a_lancer = Some((k, base.clone(), cle.clone())),
+                None => {}
+            }
+            let e = prets.iter().find(|x| x.0 == o.id).map(|x| &x.1).or(e);
             let Some(e) = e.filter(|e| !a.pose.is_empty() && !self.au_repos(&x.id) && peau::valide(e, base.sommets.len())) else { continue };
             gardes.insert(o.id.clone());
             let ecarts: Vec<_> = a.os.iter().map(|b| a.pose.get(&b.id)).collect();
@@ -982,6 +1037,7 @@ impl App {
         for (id, c, m) in neufs {
             self.deformes.insert(id, (c, m));
         }
+        self.peaux.extend(prets);
         self.deformes.retain(|i, _| gardes.contains(i));
         self.peaux.retain(|i, _| lies.contains(i));
         let (Some((k, base, cle)), None) = (a_lancer, &self.calcul_peau) else { return };
@@ -2212,6 +2268,10 @@ impl App {
         let Some(e) = &mut self.os else { return };
         e.pose = !e.pose;
         e.version += 1;
+        // La pose commence par Tourner
+        if e.pose {
+            (self.mode, self.tirer) = (Mode::Rotation, false);
+        }
         let m = if e.pose { "Pose : touchez un os, puis tournez-le" } else { "Géométrie : les os s'éditent au repos, la pose est gardée" };
         self.fin_geste();
         self.redessiner_armatures();
@@ -2622,6 +2682,30 @@ impl App {
         });
     }
 
+    /// Limites de l'os actif : rotation X, Y, Z puis translation X, Y, Z.
+    pub fn regler_limites6(&mut self, l: [Limite; 6]) {
+        let Some(id) = self.os_actif().map(|x| x.1.id.clone()) else { return };
+        if self.os_actif().is_some_and(|x| limites6(x.1) == l) {
+            return;
+        }
+        self.changer_os(|a, _| {
+            if let Some(b) = a.os.iter_mut().find(|b| b.id == id) {
+                b.regler_limites([l[0], l[1], l[2]]);
+                b.regler_limites_t([l[3], l[4], l[5]]);
+            }
+            a.borner(&a.pose.clone());
+        });
+    }
+
+    /// Translation chiffrée de l'os actif posé, le long de son axe `k`, au monde.
+    fn saisir_translation_os(&mut self, k: usize, v: f64) {
+        let Some((o, x)) = self.os_actif() else { return };
+        let (id, s) = (x.id.clone(), o.echelle[0]);
+        let Some(mut t) = o.armature.as_ref().map(|a| a.translation_os(&id)) else { return };
+        t[k] = v / s;
+        self.changer_os(|a, _| a.regler_translation(&id, t));
+    }
+
     /// Limites de rotation de l'os actif.
     pub fn regler_limites(&mut self, l: [Limite; 3]) {
         let Some(id) = self.os_actif().map(|x| x.1.id.clone()) else { return };
@@ -2639,22 +2723,24 @@ impl App {
 
     /// L'état suivant d'une limite : libre, limitée, bloquée.
     pub fn changer_etat_limite(&mut self, k: usize) {
-        let Some(mut l) = self.os_actif().map(|x| x.1.limites()) else { return };
+        let Some((mut l, longueur)) = self.os_actif().map(|x| (limites6(x.1), x.1.longueur)) else { return };
+        // Une translation limitée part d'un quart de la longueur de l'os de part et d'autre
+        let borne = if k >= 3 { ((longueur / 4.0) * 1000.0).round() / 1000.0 } else { 45.0 };
         l[k] = match l[k] {
-            Limite::Libre => Limite::Bornee(-45.0, 45.0),
+            Limite::Libre => Limite::Bornee(-borne, borne),
             Limite::Bornee(..) => Limite::Bloquee,
             Limite::Bloquee => Limite::Libre,
         };
-        self.regler_limites(l);
+        self.regler_limites6(l);
     }
 
     fn saisir_limite(&mut self, k: usize, max: bool, v: f64) {
-        let Some(mut l) = self.os_actif().map(|x| x.1.limites()) else { return };
+        let Some((mut l, s)) = self.os_actif().map(|x| (limites6(x.1), x.0.echelle[0])) else { return };
         let Limite::Bornee(a, b) = l[k] else { return };
-        let v = v.clamp(-180.0, 180.0);
+        let v = if k >= 3 { v / s } else { v.clamp(-180.0, 180.0) };
         // Une borne qui passe l'autre l'emmène
         l[k] = if max { Limite::Bornee(a.min(v), v) } else { Limite::Bornee(v, b.max(v)) };
-        self.regler_limites(l);
+        self.regler_limites6(l);
     }
 
     /// Longueur au monde de l'os actif : sa queue et ce qui y est soudé glissent le long de lui.
@@ -2844,6 +2930,193 @@ impl App {
         }
     }
 
+    /// Le doigt est sur l'anneau du curseur 3D, ou tout près.
+    fn sur_curseur(&self, x: f64, y: f64, vue: &Vue, dp: f64) -> bool {
+        vue.ecran(self.projet.curseur).is_some_and(|e| (e[0] - x).hypot(e[1] - y) <= RAYON_CURSEUR * 1.4 * dp)
+    }
+
+    /// Point de surface sous le pixel, le plus proche de l'œil : la copie de travail
+    /// en mode Géométrie, les objets affichés sinon.
+    fn surface_sous(&self, x: f64, y: f64, vue: &Vue) -> Option<P3> {
+        let d = vue.rayon(x, y);
+        let mut mieux: Option<(f64, P3)> = self.travail.as_ref().and_then(|t| t.point_sous(x, y, vue));
+        for k in self.affiches() {
+            if self.travail.as_ref().is_some_and(|t| t.edites.contains(&k)) {
+                continue;
+            }
+            if let Some(t) = vue::toucher(&self.objet_vu(k), &self.maillage_vu(k), vue.oeil, d) {
+                if mieux.is_none_or(|m| t < m.0) {
+                    mieux = Some((t, [0, 1, 2].map(|i| vue.oeil[i] + d[i] * t)));
+                }
+            }
+        }
+        mieux.map(|m| m.1)
+    }
+
+    /// Le curseur tenu suit le doigt : posé sur la surface sous lui, sinon dans le plan
+    /// face à la vue où il a été pris, au pas de translation s'il est actif.
+    pub fn placer_curseur(&mut self, x: f64, y: f64, vue: &Vue) {
+        let Some(depart) = self.curseur_tenu else { return };
+        let p = match self.surface_sous(x, y, vue) {
+            Some(p) => p,
+            None => {
+                let Some(mut p) = vue.sur_plan(x, y, vue.dos, depart) else { return };
+                if self.pas.actif {
+                    let s = self.pas_translation();
+                    if s > 0.0 {
+                        p = p.map(|v| (v / s).round() * s);
+                    }
+                }
+                p
+            }
+        };
+        self.projet.curseur = p;
+    }
+
+    /// Le pinceau des poids est prêt : poids montrés, pinceau allumé, un os actif.
+    pub fn peinture(&self) -> bool {
+        self.voir_poids && self.peindre && self.os_vu().is_some_and(|x| x.1.is_some())
+    }
+
+    /// Objet lié à plusieurs os de l'armature montrée, sous le doigt : son rang, et la
+    /// distance le long du rayon.
+    fn lie_sous(&self, x: f64, y: f64, vue: &Vue) -> Option<(usize, f64)> {
+        let (a, _) = self.os_vu()?;
+        let d = vue.rayon(x, y);
+        let mut mieux: Option<(usize, f64)> = None;
+        for k in self.affiches() {
+            let o = &self.projet.objets[k];
+            if !o.liaison.as_ref().is_some_and(|l| l.armature == a.id && l.os.len() > 1) {
+                continue;
+            }
+            if let Some(t) = vue::toucher(&self.objet_vu(k), &self.maillage_vu(k), vue.oeil, d) {
+                if mieux.is_none_or(|m| t < m.1) {
+                    mieux = Some((k, t));
+                }
+            }
+        }
+        mieux
+    }
+
+    /// Voisins des sommets du maillage de base de `k`, gardés tant qu'il ne change pas.
+    fn voisins_de(&mut self, k: usize) -> Arc<Vec<Vec<usize>>> {
+        let base = self.maillage_base(k);
+        let (id, adr) = (self.projet.objets[k].id.clone(), Arc::as_ptr(&base) as usize);
+        if let Some(v) = self.voisins.get(&id).filter(|v| v.0 == adr) {
+            return v.1.clone();
+        }
+        let v = Arc::new(peau::voisins(&base));
+        self.voisins.insert(id, (adr, v.clone()));
+        v
+    }
+
+    /// Commence un trait de pinceau : faux si le doigt n'est sur aucun objet lié.
+    pub fn commencer_trait(&mut self, x: f64, y: f64, vue: &Vue, dp: f64) -> bool {
+        let Some((k, _)) = self.lie_sous(x, y, vue) else { return false };
+        // Les poids peints partent des poids calculés
+        let o = &self.projet.objets[k];
+        let n = self.maillage_base(k).sommets.len();
+        let Some(l) = o.liaison.clone() else { return false };
+        let main = match l.poids.as_ref().filter(|p| p.n == n) {
+            Some(p) => (**p).clone(),
+            None => match self.peaux.get(&o.id).filter(|e| peau::valide(e, n) && !e.cle.starts_with("main ")) {
+                Some(e) => peau::Main::depuis_peau(&e.peau, n),
+                None => {
+                    self.dire("Les poids sont en calcul : peignez dans un instant".into());
+                    return true;
+                }
+            },
+        };
+        self.memoriser();
+        let mut main = main;
+        main.suivre(&l.os);
+        if let Some(x) = &mut self.projet.objets[k].liaison {
+            x.poids = Some(Arc::new(main));
+        }
+        self.trait_poids = Some(k);
+        self.coup_de_pinceau(x, y, vue, dp);
+        true
+    }
+
+    /// Le pinceau sous le doigt : les sommets de l'objet en cours dans son rayon,
+    /// d'autant plus que le sommet est près du centre.
+    pub fn coup_de_pinceau(&mut self, x: f64, y: f64, vue: &Vue, dp: f64) {
+        let Some(k) = self.trait_poids else { return };
+        let Some((a, Some(actif))) = self.os_vu().map(|(o, x)| (o.armature.clone(), x)) else { return };
+        let Some(a) = a else { return };
+        let d = vue.rayon(x, y);
+        let (ov, vu) = (self.objet_vu(k).into_owned(), self.maillage_vu(k));
+        let Some(t) = vue::toucher(&ov, &vu, vue.oeil, d) else { return };
+        let centre: P3 = [0, 1, 2].map(|i| vue.oeil[i] + d[i] * t);
+        // Le rayon à l'écran, rapporté à la profondeur du point touché
+        let z = -(0..3).map(|i| d[i] * t * vue.dos[i]).sum::<f64>();
+        let r = self.pinceau_rayon as f64 * dp * 2.0 * z * vue.tan / vue.hauteur.max(1.0);
+        let m = ov.matrice();
+        let force = self.pinceau_force;
+        let touches: Vec<(usize, f32)> = vu.sommets.iter().enumerate().filter_map(|(i, p)| {
+            let q = vue::appliquer(&m, *p);
+            let e = ((0..3).map(|c| (q[c] - centre[c]).powi(2)).sum::<f64>()).sqrt() / r;
+            (e < 1.0).then(|| (i, force * ((1.0 - e * e) * (1.0 - e * e)) as f32))
+        }).collect();
+        let voisins = if self.pinceau == peau::Pinceau::Lisser { self.voisins_de(k) } else { Arc::new(Vec::new()) };
+        let repli = a.trouver(&actif).and_then(|b| b.parent.clone());
+        let mode = self.pinceau;
+        let Some(l) = &mut self.projet.objets[k].liaison else { return };
+        let Some(p) = &mut l.poids else { return };
+        let Some(j) = p.colonne(&actif) else {
+            return self.dire("L'os actif ne fait pas partie du groupe de cet objet".into());
+        };
+        let repli = repli.and_then(|r| p.colonne(&r));
+        Arc::make_mut(p).peindre(j, &touches, mode, &voisins, repli);
+    }
+
+    /// Les objets liés à l'armature montrée reviennent aux poids calculés.
+    pub fn recalculer_poids(&mut self) {
+        let Some(id) = self.os_vu().map(|x| x.0.id.clone()) else { return };
+        self.memoriser();
+        for o in &mut self.projet.objets {
+            if let Some(l) = o.liaison.as_mut().filter(|l| l.armature == id) {
+                l.poids = None;
+            }
+        }
+        self.a_sauver = true;
+    }
+
+    /// Réglages du pinceau, sous l'interrupteur des poids.
+    fn reglages_pinceau(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        let Some(arm) = self.os_vu().map(|x| x.0.id.clone()) else { return };
+        let peints = self.projet.objets.iter().filter(|o| o.liaison.as_ref().is_some_and(|l| l.armature == arm && l.poids.is_some())).count();
+        cx.toggle(b, id("pinceau"), "Peindre", &mut self.peindre);
+        if self.peindre {
+            let k = [peau::Pinceau::Ajouter, peau::Pinceau::Retirer, peau::Pinceau::Lisser];
+            let c = k.iter().position(|x| *x == self.pinceau);
+            if let Some(n) = cx.choix(b, id("pinceau-mode"), &["Ajouter", "Retirer", "Lisser"], c, 3) {
+                self.pinceau = k[n];
+            }
+            let r = format!("{} dp", self.pinceau_rayon.round());
+            cx.slider(b, id("pinceau-rayon"), "Rayon", &r, &mut self.pinceau_rayon, 10.0, 150.0);
+            let f = format!("{} %", (self.pinceau_force * 100.0).round());
+            cx.slider(b, id("pinceau-force"), "Force", &f, &mut self.pinceau_force, 0.05, 1.0);
+        }
+        if peints > 0 {
+            let t = if peints == 1 { "1 objet aux poids peints".to_string() } else { format!("{peints} objets aux poids peints") };
+            if cx.legende_lien(b, &t, Some((id("pinceau-recalculer"), "Recalculer"))) {
+                self.recalculer_poids();
+            }
+        }
+    }
+
+    /// Centre de la boîte de l'objet édité, sinon des objets affichés.
+    fn centre_scene(&self) -> P3 {
+        let liste = self.travail.as_ref().map_or(self.affiches(), |t| t.edites.clone());
+        self.boite_monde(&liste).map_or([0.0; 3], |b| [0, 1, 2].map(|k| (b.min[k] + b.max[k]) / 2.0))
+    }
+
+    /// La vue vole jusqu'à regarder le curseur, sans changer de distance ni d'angle.
+    pub fn vue_vers_curseur(&mut self) {
+        self.vol = Some(Vol { depart: self.cam, arrivee: Camera { cible: self.projet.curseur, ..self.cam }, t: 0.0 });
+    }
+
     fn curseur_vers_selection(&mut self) {
         let pts = self.points();
         if !pts.is_empty() {
@@ -3012,7 +3285,7 @@ impl App {
     }
 
     fn poignee(&self, vue: &Vue, dp: f32) -> Option<Poignee> {
-        if self.tirer_actif() {
+        if self.tirer_actif() || self.peinture() {
             return None;
         }
         let pts = self.points();
@@ -3052,7 +3325,14 @@ impl App {
             return None;
         }
         let id = e.actif.clone().filter(|i| a.trouver(i).is_some()).or_else(|| e.os_choisis(a).into_iter().next())?;
-        let (_, q) = *a.matrices_pose().get(&id)?;
+        let m = a.matrices_pose();
+        if self.mode == Mode::Translation {
+            // Les axes des limites de translation : l'os au repos, sous son parent posé
+            let b = a.trouver(&id)?;
+            let qp = b.parent.as_ref().and_then(|p| m.get(p)).map_or([0.0, 0.0, 0.0, 1.0], |x| x.1);
+            return Some(ed::qnorm(ed::qmul(o.rotation, ed::qmul(qp, b.rotation))));
+        }
+        let (_, q) = *m.get(&id)?;
         Some(ed::qnorm(ed::qmul(o.rotation, q)))
     }
 
@@ -3073,6 +3353,11 @@ impl App {
         let vue = self.vue_ecran(w);
         let (px, py) = ((x - w.x) as f64, (y - w.y) as f64);
         let dp = cx.dp as f64;
+        if self.peinture() && self.commencer_trait(px, py, &vue, dp) {
+            self.trait_ecran = (x, y);
+            cx.ui.saisir((x, y));
+            return;
+        }
         if self.tirer_actif() {
             // Tirer : le doigt part d'un os, qu'il emmène ; ailleurs, il tourne la vue
             if self.saisir_os(px, py, &vue, self.rayon(cx.dp)) {
@@ -3083,6 +3368,12 @@ impl App {
         let boite = self.selection == Selection::Boite;
         let poignee = self.poignee(&vue, cx.dp);
         let mut prise = poignee.and_then(|p| p.sous(px, py, &vue, dp));
+        // Le curseur 3D se prend par son anneau, sauf sur un axe ou un anneau de la poignée
+        if matches!(prise, None | Some(Prise::O)) && self.sur_curseur(px, py, &vue, dp) {
+            self.curseur_tenu = Some(self.projet.curseur);
+            cx.ui.saisir((x, y));
+            return;
+        }
         // En pose, les anneaux de l'os croisent son corps : l'os touché l'emporte
         if poignee.is_some() && prise != Some(Prise::O) && self.os.as_ref().is_some_and(|e| e.pose) && self.sur_os(px, py, &vue, self.rayon(cx.dp)) {
             prise = Some(Prise::O);
@@ -3138,6 +3429,27 @@ impl App {
     /// Le doigt saisi pose la sélection, puis la lâche.
     fn suivre(&mut self, cx: &mut Cx, w: Rect) {
         let Some(((x, y), pose)) = cx.ui.prise() else { return };
+        if self.trait_poids.is_some() {
+            self.trait_ecran = (x, y);
+            let vue = self.vue_ecran(w);
+            self.coup_de_pinceau((x - w.x) as f64, (y - w.y) as f64, &vue, cx.dp as f64);
+            if !pose {
+                cx.ui.lacher_prise();
+                self.trait_poids = None;
+                self.a_sauver = true;
+            }
+            return;
+        }
+        if self.curseur_tenu.is_some() {
+            let vue = self.vue_ecran(w);
+            self.placer_curseur((x - w.x) as f64, (y - w.y) as f64, &vue);
+            if !pose {
+                cx.ui.lacher_prise();
+                self.curseur_tenu = None;
+                self.a_sauver = true;
+            }
+            return;
+        }
         if self.saisie.is_some() {
             let vue = self.vue_ecran(w);
             self.tirer_os((x - w.x) as f64, (y - w.y) as f64, &vue);
@@ -3452,7 +3764,13 @@ impl App {
         }
         self.memoriser();
         for &k in &l {
-            self.projet.objets[k].liaison = Some(crate::projet::Liaison { armature: armature.clone(), os: os.clone() });
+            // Relié à la même armature, il garde ses poids peints, colonnes ajustées au groupe
+            let poids = self.projet.objets[k].liaison.as_ref().filter(|x| x.armature == armature).and_then(|x| x.poids.clone()).map(|p| {
+                let mut p = (*p).clone();
+                p.suivre(&os);
+                Arc::new(p)
+            });
+            self.projet.objets[k].liaison = Some(crate::projet::Liaison { armature: armature.clone(), os: os.clone(), poids });
         }
         self.liaison = None;
         self.a_sauver = true;
@@ -3521,6 +3839,7 @@ impl App {
             }
             (Champ::Rotation(k), _) => ed::euler(objet?.rotation)[k],
             (Champ::Dimension(k), _) => self.base(self.seul()?)[k] * objet?.echelle[k],
+            (Champ::Curseur(k), _) => self.projet.curseur[k],
             (Champ::PasTranslation, _) => self.pas_translation(),
             (Champ::PasAngle, _) => self.pas.angle,
             (Champ::PasEchelle, _) => self.pas.echelle,
@@ -3536,12 +3855,28 @@ impl App {
             (Champ::Projet, _) => return Some(self.nom.clone()),
             (Champ::Couleur(i), _) => return Some(theme::hex(coul(theme::LIGNES[i].c))),
             (Champ::OsNom, _) => return self.os_actif().map(|x| x.1.nom.clone()),
+            (Champ::AnimNom, _) => return self.animation().map(|a| a.nom),
+            (Champ::AnimDuree, _) => self.animation()?.duree,
+            (Champ::AnimTemps, _) => {
+                self.animation()?;
+                self.anim_temps
+            }
             (Champ::PoseNom, _) => return self.armature_os().and_then(|(_, _, a)| a.poses_nommees().into_iter().nth(self.pose_choisie?)).map(|p| p.0),
             (Champ::OsLongueur, _) => self.os_actif().map(|(o, x)| x.longueur * o.echelle[0])?,
-            (Champ::OsLimite(k, max), _) => match self.os_actif()?.1.limites()[k] {
-                Limite::Bornee(a, b) => if max { b } else { a },
-                _ => return None,
-            },
+            (Champ::OsLimite(k, max), _) => {
+                let (o, x) = self.os_actif()?;
+                // Les translations au monde, comme la longueur
+                let f = if k >= 3 { o.echelle[0] } else { 1.0 };
+                match limites6(x)[k] {
+                    Limite::Bornee(a, b) => f * if max { b } else { a },
+                    _ => return None,
+                }
+            }
+            (Champ::OsTranslation(k), _) => {
+                let (o, x) = self.os_actif()?;
+                let a = o.armature.as_ref()?;
+                a.translation_os(&x.id)[k] * o.echelle[0]
+            }
             (Champ::SetNom, _) => return match &self.page_liste {
                 PageListe::Set(n) => Some(n.clone()),
                 _ => None,
@@ -3558,6 +3893,12 @@ impl App {
     fn champ_suivant(&self, c: Champ) -> Option<Champ> {
         let s = match c {
             Champ::Position(k) if k < 2 => Champ::Position(k + 1),
+            Champ::Curseur(k) if k < 2 => Champ::Curseur(k + 1),
+            Champ::OsTranslation(k) => {
+                let (_, x) = self.os_actif()?;
+                let l = x.limites_t();
+                Champ::OsTranslation((k + 1..3).find(|j| l[*j] != Limite::Bloquee)?)
+            }
             Champ::Rotation(k) if k < 2 => Champ::Rotation(k + 1),
             Champ::Dimension(k) if k < 2 => Champ::Dimension(k + 1),
             Champ::PasTranslation => Champ::PasAngle,
@@ -3620,6 +3961,17 @@ impl App {
                     }
                 }
                 return self.relancer_ajout();
+            }
+            Champ::Curseur(k) => {
+                self.projet.curseur[k] = v;
+                self.a_sauver = true;
+                return;
+            }
+            Champ::OsTranslation(k) => return self.saisir_translation_os(k, v),
+            Champ::AnimDuree => return self.changer_animation(|a| a.regler_duree(v)),
+            Champ::AnimTemps => {
+                let t = self.animation().map_or(0.0, |a| a.instant(v));
+                return self.aller_a(t);
             }
             Champ::ModifN(i) => {
                 if let Some(k) = self.objet_modifie() {
@@ -3742,6 +4094,13 @@ impl App {
                 self.renommer_os(&p.texte);
             } else if p.cible == Champ::PoseNom {
                 self.renommer_pose(&p.texte);
+            } else if p.cible == Champ::AnimNom {
+                let nom = p.texte.trim().to_string();
+                if nom.is_empty() {
+                    self.dire("Nom vide".into());
+                } else {
+                    self.changer_animation(|a| a.nom = nom);
+                }
             } else if p.cible == Champ::SetNom {
                 if let PageListe::Set(n) = self.page_liste.clone() {
                     self.renommer_set(&n, &p.texte);
@@ -3902,6 +4261,74 @@ impl App {
         self.deposer(format!("{titre}.{ext}"), octets);
     }
 
+    /// L'armature à exporter pour S.A.G.E. : l'ouverte, l'active, celle de l'objet
+    /// actif, sinon la première du projet.
+    fn armature_a_exporter(&self) -> Option<usize> {
+        let p = &self.projet;
+        let est = |k: usize| p.objets.get(k).is_some_and(|o| o.armature.is_some());
+        if let Some(k) = self.os.as_ref().and_then(|e| e.objet).filter(|k| est(*k)) {
+            return Some(k);
+        }
+        if let Some(k) = p.actif.filter(|k| est(*k)) {
+            return Some(k);
+        }
+        let lien = p.actif.and_then(|k| p.objets.get(k)).and_then(|o| o.liaison.as_ref()).and_then(|l| p.objets.iter().position(|x| x.id == l.armature));
+        lien.or_else(|| (0..p.objets.len()).find(|k| est(*k)))
+    }
+
+    /// Le personnage de l'armature : ses objets liés, au repère de l'armature au repos,
+    /// et leurs poids ; prêt pour `sage::glb`.
+    pub fn personnage(&self) -> Option<(String, Vec<crate::sage::Piece>, Vec<(String, maillage::MatMtl)>, Vec<(String, Arc<Vec<u8>>)>)> {
+        let kx = self.armature_a_exporter()?;
+        let p = self.projet_range();
+        let x = &p.objets[kx];
+        let a = x.armature.as_ref()?;
+        let mut cache = self.evals.clone();
+        let (mut liste, mut peaux) = (Vec::new(), Vec::new());
+        for (k, o) in p.objets.iter().enumerate() {
+            let Some(l) = o.liaison.as_ref().filter(|l| l.armature == x.id) else { continue };
+            let base = modifs::evaluer(&p, k, &[], &mut cache);
+            let m = o.matrice();
+            let mut repere = (*base).clone();
+            for s in &mut repere.sommets {
+                *s = geo::vers_local(x, vue::appliquer(&m, *s));
+            }
+            let mat: maillage::Mat = Arc::from(o.materiau.as_str());
+            for f in &mut repere.faces {
+                f.m = mat.clone();
+            }
+            let n = repere.sommets.len();
+            // Un seul os : tout à lui ; sinon les poids peints, ceux déjà calculés, ou un calcul
+            let peau = if l.os.len() == 1 {
+                peau::Main::uniforme(l.os.clone(), n, 0).peau()
+            } else if let Some(m) = l.poids.as_ref().filter(|m| m.n == n) {
+                m.peau()
+            } else {
+                let vue_base = self.maillage_base(k);
+                match self.peaux.get(&o.id).filter(|e| peau::valide(e, n) && vue_base.sommets.len() == n && e.cle == peau::cle(&vue_base, o, x, &l.os)) {
+                    Some(e) => e.peau.clone(),
+                    None => peau::calculer(&repere.sommets, &repere, a, &l.os),
+                }
+            };
+            liste.push((o.nom.clone(), repere));
+            peaux.push(peau);
+        }
+        let (mats, images) = self.textures_export(&mut liste);
+        let pieces = liste.into_iter().zip(peaux).map(|((nom, maillage), peau)| crate::sage::Piece { nom, maillage, peau }).collect();
+        Some((x.nom.clone(), pieces, mats, images))
+    }
+
+    fn exporter_sage(&mut self) {
+        let Some(kx) = self.armature_a_exporter() else { return self.dire("Aucune armature à exporter".into()) };
+        let Some((nom, pieces, mats, images)) = self.personnage() else { return };
+        let x = &self.projet.objets[kx];
+        let Some(a) = &x.armature else { return };
+        let octets = crate::sage::glb(&nom, a, (x.position, x.rotation, x.echelle[0]), &pieces, &mats, &images);
+        let (no, np, na) = (a.os.len(), pieces.len(), a.animations().len());
+        self.deposer(format!("{}.glb", nom.replace('/', "-")), octets);
+        self.dire(format!("« {nom} » pour S.A.G.E. : {no} os, {np} objet{}, {na} animation{}", if np > 1 { "s" } else { "" }, if na > 1 { "s" } else { "" }));
+    }
+
     fn exporter_mtl(&mut self) {
         let mut liste = self.liste_export(false);
         let (mats, images) = self.textures_export(&mut liste);
@@ -3980,8 +4407,8 @@ impl App {
             self.shell.end.open = false;
         }
         self.shell.large = self.contenu == Contenu::Uv;
-        // Un os posé ne fait que tourner
-        if self.os.as_ref().is_some_and(|e| e.pose) {
+        // Un os posé tourne ou se déplace, sans échelle
+        if self.os.as_ref().is_some_and(|e| e.pose) && self.mode == Mode::Echelle {
             self.mode = Mode::Rotation;
         }
         let l = self.shell.layout(screen, dt);
@@ -3989,6 +4416,7 @@ impl App {
         self.espace = w;
         self.gestes(cx, w, dt);
         self.voler(dt);
+        self.lire_animation(dt as f64);
         if let Some((_, reste)) = &mut self.message {
             *reste -= dt;
             if *reste <= 0.0 {
@@ -4133,7 +4561,10 @@ impl App {
         cx.clip(Some(w));
         if let Some(e) = vue.ecran(self.projet.curseur) {
             let (x, y) = (w.x + e[0] as f32, w.y + e[1] as f32);
-            let r = 16.0 * d;
+            let r = RAYON_CURSEUR as f32 * d;
+            if self.curseur_tenu.is_some() {
+                cx.dl.rrect(Rect::new(x - r * 1.4, y - r * 1.4, r * 2.8, r * 2.8), r * 1.4, { let mut c = coul(C::Curseur); c[3] = 60; c });
+            }
             for k in 0..16 {
                 let (a, b) = (k as f32 * std::f32::consts::TAU / 16.0, (k + 1) as f32 * std::f32::consts::TAU / 16.0);
                 let c = if k % 2 == 0 { coul(C::Curseur) } else { coul(C::Surface) };
@@ -4141,6 +4572,15 @@ impl App {
             }
             for (ux, uy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
                 cx.dl.line([x + ux * r * 0.6, y + uy * r * 0.6], [x + ux * r * 1.35, y + uy * r * 1.35], 2.0 * d, coul(C::Reticule));
+            }
+        }
+        // Le pinceau des poids, sous le doigt pendant le trait
+        if self.trait_poids.is_some() {
+            let ((x, y), r) = (self.trait_ecran, self.pinceau_rayon * d);
+            let n = 48;
+            for k in 0..n {
+                let (a, b) = (k as f32 * std::f32::consts::TAU / n as f32, (k + 1) as f32 * std::f32::consts::TAU / n as f32);
+                cx.dl.line([x + r * a.cos(), y + r * a.sin()], [x + r * b.cos(), y + r * b.sin()], 2.0 * d, coul(C::Reticule));
             }
         }
         if let Some(t) = self.travail.as_ref().filter(|t| t.filtres[0]) {
@@ -4517,6 +4957,7 @@ impl App {
         // En pose, ce bouton passe de Tourner à Tirer ; en Tirer, ni axes, ni pas, ni pivot
         let mut l = vec![match (pose, self.tirer) {
             (true, true) => Pilule::icone(cx, sub_id(BARRE, 0), "Tirer", &TIRER, true),
+            (true, false) if self.mode == Mode::Translation => Pilule::icone(cx, sub_id(BARRE, 0), "Déplacer", &icones::DEPLACER, false),
             (true, false) => Pilule::icone(cx, sub_id(BARRE, 0), "Tourner", &icones::TOURNER, false),
             _ => Pilule::icone(cx, sub_id(BARRE, 0), OUTILS[i].1, OUTILS[i].2, false),
         }];
@@ -4548,9 +4989,19 @@ impl App {
         match appui {
             Some(i) if i >= outils => self.appui_selection(i - outils, false),
             Some(0) if pose => {
-                self.tirer = !self.tirer;
+                // Tourner, Déplacer, Tirer
                 self.saisie = None;
-                self.dire(if self.tirer { "Tirer : saisissez un os, la chaîne suit jusqu'à l'ancre" } else { "Tourner : les os tournent autour de leur tête" }.into());
+                let m = if self.tirer {
+                    (self.tirer, self.mode) = (false, Mode::Rotation);
+                    "Tourner : les os tournent autour de leur tête"
+                } else if self.mode == Mode::Rotation {
+                    self.mode = Mode::Translation;
+                    "Déplacer : les os glissent, dans leurs limites de translation"
+                } else {
+                    (self.tirer, self.mode) = (true, Mode::Rotation);
+                    "Tirer : saisissez un os, la chaîne suit jusqu'à l'ancre"
+                };
+                self.dire(m.into());
             }
             Some(0) => {
                 let (mode, nom, _) = OUTILS[(i + 1) % OUTILS.len()];
@@ -4995,17 +5446,18 @@ impl App {
             Contenu::Os => {
                 // En pose : la pose en cours, et le catalogue des poses gardées
                 let catalogue = if self.os.as_ref().is_some_and(|e| e.pose) {
-                    self.onglet_os = cx.tabs(id("onglets-os"), onglets, &["Pose", "Catalogue"], self.onglet_os);
-                    self.onglet_os == 1
+                    self.onglet_os = cx.tabs(id("onglets-os"), onglets, &["Pose", "Catalogue", "Animation"], self.onglet_os);
+                    self.onglet_os
                 } else {
                     cx.tabs(id("onglets-os"), onglets, &["Os"], 0);
-                    false
+                    0
                 };
-                let mut b = cx.body(if catalogue { id("corps-catalogue") } else { id("corps-os") }, corps, &self.scrolls);
-                if catalogue {
-                    self.panneau_catalogue(cx, &mut b);
-                } else {
-                    self.panneau_os(cx, &mut b);
+                let corps_id = [id("corps-os"), id("corps-catalogue"), id("corps-animation")][catalogue.min(2)];
+                let mut b = cx.body(corps_id, corps, &self.scrolls);
+                match catalogue {
+                    1 => self.panneau_catalogue(cx, &mut b),
+                    2 => self.panneau_animation(cx, &mut b),
+                    _ => self.panneau_os(cx, &mut b),
                 }
                 cx.body_end(b, &mut self.scrolls);
             }
@@ -5054,6 +5506,7 @@ impl App {
                 }
                 cx.section(&mut b, "GESTES");
                 cx.paragraph(&mut b, "Un doigt tourne la vue, deux doigts zooment et déplacent. Un double appui dans le vide recadre.");
+                cx.paragraph(&mut b, "Le curseur 3D se prend par son anneau, dans tous les modes : glissé, il se pose sur la surface sous le doigt, ou reste à sa profondeur dans le vide (au pas de translation s'il est actif). Le panneau Scène donne sa position et le place au centre de la vue, de la scène ou de la sélection.");
                 cx.paragraph(&mut b, "Un appui sur un objet l'ajoute à la sélection ; le dernier choisi est l'objet actif, un nouvel appui sur lui le retire.");
                 cx.paragraph(&mut b, "Un appui long choisit l'objet seul ; dans le vide, il vide la sélection.");
                 cx.section(&mut b, "TRANSFORMER");
@@ -5063,6 +5516,9 @@ impl App {
                 cx.paragraph(&mut b, "Glisser depuis la sélection ou la poignée la transforme. Contexte › Géométrie regroupe les opérations. Le bouton de sélection, dans la barre du bas, passe de Toucher à Boîte, qui trace un cadre, puis à Chemin, qui relie deux éléments.");
                 cx.section(&mut b, "ARMATURES");
                 cx.paragraph(&mut b, "La géométrie d'une armature, ce sont ses os : la pilule Géométrie, l'action Éditer la géométrie ou un double appui sur une armature ouvrent ce mode sur elle. Quand une armature est active, la pilule Pose apparaît : les os y tournent autour de leur tête, selon les axes de l'os actif posé, à la poignée comme aux trois curseurs de Os actif, et le panneau Os ne garde que ce qui sert à la pose ; en mode Scène, il montre l'armature active, ses objets liés, ses poids, et la remet au repos. Les autres objets sont estompés et inertes. Un appui sur un bout, tête ou queue, le prend avec ce qui lui est soudé ; un appui sur le corps d'un os prend ses deux bouts ; un appui long les prend seuls. Glisser depuis la sélection ou la poignée déplace les bouts, et les enfants restent en place. Le panneau Os, sous sa pastille, regroupe l'os actif, les opérations et l'arbre des os ; Contexte › Armature donne la position des bouts choisis.");
+                cx.paragraph(&mut b, "Pose : le premier bouton de la barre du bas passe de Tourner à Déplacer, puis à Tirer. Déplacer fait glisser les os choisis, avec leurs enfants, le long des axes de la poignée et dans leurs limites de translation : un os racine est libre, les autres sont bloqués tant que leurs Limites, en mode Géométrie, ne les libèrent pas. Os actif donne aussi sa translation en chiffres.");
+                cx.paragraph(&mut b, "Animation : en mode Pose, l'onglet Animation du panneau Os garde des animations de l'armature. Une clé est la pose de tous les os à un instant : posez les os, choisissez l'instant sur la ligne de temps, puis Poser une clé. Entre deux clés, chaque os passe de l'une à l'autre ; en boucle, la dernière revient à la première. Glissez la ligne de temps pour voir l'animation, ou Lecture ; les instants tombent sur les images (24 par seconde).");
+                cx.paragraph(&mut b, "Poids : avec « Poids de l'os actif », l'interrupteur Peindre transforme le doigt en pinceau sur les objets liés à plusieurs os. Ajouter donne de l'effet à l'os actif, Retirer lui en ôte, Lisser fond les poids avec leurs voisins ; chaque sommet garde une somme de un, et ce qu'on retire va aux autres os. Glisser dans le vide tourne la vue. Les poids peints s'enregistrent avec le projet ; Recalculer rend les poids automatiques.");
                 cx.section(&mut b, "DERNIÈRE OPÉRATION");
                 cx.paragraph(&mut b, "Contexte › Dernière opération récapitule la dernière transformation au doigt ou la dernière opération réglable. Changer une valeur la refait depuis l'état d'avant, sans ajouter d'étape d'annulation. Elle disparaît à la modification suivante ou à l'annulation.");
                 cx.section(&mut b, "BARRE RAPIDE");
@@ -5133,6 +5589,22 @@ impl App {
             if o.rubrique != rubrique {
                 rubrique = o.rubrique;
                 cx.section(b, &rubrique.to_uppercase());
+                // La position du curseur, saisissable, avant ses opérations
+                if menu == Menu::Vue && rubrique == "Curseur 3D" {
+                    let c = self.projet.curseur;
+                    for k in 0..3 {
+                        if cx.champ(b, sub_id(id("curseur-pos"), k), NOMS_AXES[k], coul(COUL_AXES[k]), &chiffres(c[k])) {
+                            self.saisir(Champ::Curseur(k));
+                        }
+                    }
+                }
+            }
+            // Les placements du curseur : des liens, seulement ceux qui s'appliquent
+            if menu == Menu::Vue && rubrique == "Curseur 3D" {
+                if c.possible(o.action) && cx.lien(b, sub_id(id("operation"), o.action as usize), o.libelle) {
+                    choisie = Some(o.action);
+                }
+                continue;
             }
             if cx.bouton(b, sub_id(id("operation"), o.action as usize), o.libelle, c.possible(o.action)) {
                 choisie = Some(o.action);
@@ -5165,6 +5637,7 @@ impl App {
         };
         c.liables = p.objets.iter().any(|o| o.armature.is_some()) && self.choix.iter().any(|k| p.objets[*k].armature.is_none());
         c.lies = self.choix.iter().any(|k| p.objets[*k].liaison.is_some());
+        c.personnage = self.armature_a_exporter().is_some();
         c.os = self.os.is_some();
         if let Some((e, _, a)) = self.armature_os() {
             let choisis = e.os_choisis(a);
@@ -5396,12 +5869,22 @@ impl App {
             A::ExporterSelectionGlb => self.exporter("glb", true),
             A::NouvelleScene => self.nouvelle_scene(),
             A::ExporterMtl => self.exporter_mtl(),
+            A::ExporterSage => self.exporter_sage(),
             A::Recadrer => self.recadrer(),
             A::CurseurOrigine => {
                 self.projet.curseur = [0.0; 3];
                 self.a_sauver = true;
             }
             A::CurseurSelection => self.curseur_vers_selection(),
+            A::CurseurVue => {
+                self.projet.curseur = self.cam.cible;
+                self.a_sauver = true;
+            }
+            A::CurseurScene => {
+                self.projet.curseur = self.centre_scene();
+                self.a_sauver = true;
+            }
+            A::VueCurseur => self.vue_vers_curseur(),
             A::SelectionCurseur => self.selection_vers_curseur(),
             A::AjouterCube => self.ouvrir_ajout(Prim::Cube),
             A::AjouterSphere => self.ouvrir_ajout(Prim::Sphere),
@@ -5668,6 +6151,7 @@ impl App {
         cx.toggle(b, id("os-poids"), "Poids de l'os actif", &mut self.voir_poids);
         if self.voir_poids {
             cx.paragraph(b, if self.calcul_peau.is_some() { "Calcul des poids…" } else if e.actif.is_some() { "Bleu : aucun effet · rouge : plein effet de l'os actif." } else { "Touchez un os pour voir ses poids." });
+            self.reglages_pinceau(cx, b);
         }
         // Os actif : seulement quand des os sont choisis
         let actif = e.actif.as_ref().and_then(|i| a.trouver(i)).filter(|_| !e.bouts.is_empty());
@@ -5679,6 +6163,14 @@ impl App {
                 cx.paragraph(b, &x.nom);
                 let r = a.pose.get(&x.id).map_or([0.0, 0.0, 0.0, 1.0], |p| p.r);
                 self.angles_os(cx, b, &x.id, r, x.limites());
+                // La translation, sur les axes qui ne sont pas bloqués
+                let lt = x.limites_t();
+                let t = a.translation_os(&x.id);
+                for k in (0..3).filter(|k| lt[*k] != Limite::Bloquee) {
+                    if cx.champ(b, sub_id(id("os-translation"), k), &format!("Translation {}", NOMS_AXES[k]), coul(COUL_AXES[k]), &chiffres(t[k] * echelle)) {
+                        self.saisir(Champ::OsTranslation(k));
+                    }
+                }
                 // Ce lien ne concerne que l'os actif
                 if a.pose.contains_key(&x.id) && cx.lien(b, id("os-repos-actif"), "Remettre au repos") {
                     let i = x.id.clone();
@@ -5794,6 +6286,184 @@ impl App {
         self.pose_choisie = Some(i);
     }
 
+    /// L'animation choisie de l'armature ouverte.
+    pub fn animation(&self) -> Option<crate::animation::Animation> {
+        let (e, _, a) = self.armature_os()?;
+        if !e.pose {
+            return None;
+        }
+        a.animations().into_iter().nth(self.anim_choisie?)
+    }
+
+    /// Change l'animation choisie : une étape d'annulation.
+    fn changer_animation(&mut self, f: impl FnOnce(&mut crate::animation::Animation)) {
+        let Some(i) = self.anim_choisie else { return };
+        self.changer_os(|a, _| {
+            let mut l = a.animations();
+            if let Some(x) = l.get_mut(i) {
+                f(x);
+            }
+            a.regler_animations(&l);
+        });
+    }
+
+    pub fn nouvelle_animation(&mut self) {
+        let Some((_, _, a)) = self.armature_os() else { return };
+        let l = a.animations();
+        let nom = (1..).map(|k| format!("Animation {k}")).find(|n| l.iter().all(|x| &x.nom != n)).unwrap_or_default();
+        let n = l.len();
+        let x = nom.clone();
+        self.changer_os(move |a, _| {
+            let mut l = a.animations();
+            // La première clé : la pose du moment
+            let mut an = crate::animation::Animation::neuve(&x);
+            an.poser_cle(0.0, a.pose.clone());
+            l.push(an);
+            a.regler_animations(&l);
+        });
+        (self.anim_choisie, self.anim_temps, self.anim_lecture) = (Some(n), 0.0, false);
+        self.dire(format!("« {nom} » : une clé à 0 s, la pose du moment"));
+    }
+
+    /// Montre l'instant `t` de l'animation choisie : l'armature prend la pose qu'il
+    /// donne, sans étape d'annulation.
+    pub fn aller_a(&mut self, t: f64) {
+        self.anim_temps = t;
+        let Some(an) = self.animation().filter(|a| !a.cles.is_empty()) else { return };
+        let p = an.pose_a(t);
+        let Some(e) = &mut self.os else { return };
+        let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
+        let Some(a) = &mut o.armature else { return };
+        if a.pose != p {
+            a.pose = p;
+            o.maillage = Arc::new(a.enveloppe_pose());
+            e.version += 1;
+        }
+    }
+
+    /// Clé à l'instant montré : la pose du moment y est gardée.
+    pub fn poser_cle(&mut self) {
+        let Some(t) = self.animation().map(|a| a.instant(self.anim_temps)) else { return };
+        let Some(i) = self.anim_choisie else { return };
+        self.anim_temps = t;
+        self.changer_os(|a, _| {
+            let mut l = a.animations();
+            let p = a.pose.clone();
+            if let Some(x) = l.get_mut(i) {
+                x.poser_cle(t, p);
+            }
+            a.regler_animations(&l);
+        });
+        self.dire(format!("Clé à {} s", chiffres(t)));
+    }
+
+    /// La lecture avance l'instant ; sans boucle, elle s'arrête au bout.
+    fn lire_animation(&mut self, dt: f64) {
+        if !self.anim_lecture {
+            return;
+        }
+        let Some(an) = self.animation() else {
+            self.anim_lecture = false;
+            return;
+        };
+        let mut t = self.anim_temps + dt;
+        if t >= an.duree {
+            if an.boucle {
+                t %= an.duree.max(1e-6);
+            } else {
+                t = an.duree;
+                self.anim_lecture = false;
+            }
+        }
+        self.aller_a(t);
+    }
+
+    /// Onglet Animation du mode Pose : les animations de l'armature, et la ligne de
+    /// temps de celle qui est choisie.
+    fn panneau_animation(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        let Some((_, o, a)) = self.armature_os() else {
+            return cx.paragraph(b, "Ouvrez une armature pour l'animer.");
+        };
+        let (nom, l) = (o.nom.clone(), a.animations());
+        if self.anim_choisie.is_some_and(|i| i >= l.len()) {
+            (self.anim_choisie, self.anim_lecture) = (None, false);
+        }
+        cx.section(b, &format!("ANIMATIONS DE {}", nom.to_uppercase()));
+        for (i, x) in l.iter().enumerate() {
+            if cx.row(b, sub_id(id("animation"), i), &x.nom, None, self.anim_choisie == Some(i)) && self.anim_choisie != Some(i) {
+                (self.anim_choisie, self.anim_lecture) = (Some(i), false);
+                self.aller_a(0.0);
+            }
+        }
+        if cx.legende_lien(b, if l.is_empty() { "Aucune animation" } else { "" }, Some((id("animation-nouvelle"), "Nouvelle animation"))) {
+            self.nouvelle_animation();
+        }
+        let Some(an) = self.animation() else { return };
+        cx.section(b, "ANIMATION CHOISIE");
+        if cx.champ(b, id("animation-nom"), "Nom", coul(C::Texte), &an.nom) {
+            self.saisir(Champ::AnimNom);
+        }
+        if cx.champ(b, id("animation-duree"), "Durée (s)", coul(C::Texte), &chiffres(an.duree)) {
+            self.saisir(Champ::AnimDuree);
+        }
+        let mut boucle = an.boucle;
+        cx.toggle(b, id("animation-boucle"), "En boucle", &mut boucle);
+        if boucle != an.boucle {
+            self.changer_animation(|a| a.boucle = boucle);
+        }
+        let cles: Vec<f32> = an.cles.iter().map(|c| c.t as f32).collect();
+        let ici = an.cle_a(self.anim_temps).map(|k| an.cles[k].t);
+        if let Some(t) = cx.ligne_temps(b, id("animation-temps"), an.duree as f32, self.anim_temps as f32, &cles, ici.map(|x| x as f32)) {
+            self.anim_lecture = false;
+            // Le doigt s'aimante aux images
+            self.aller_a(an.instant(t as f64));
+        }
+        let legende = format!("{} s · {} clé{}{}", chiffres(self.anim_temps), an.cles.len(), if an.cles.len() > 1 { "s" } else { "" }, if ici.is_some() { " · sur une clé" } else { "" });
+        if cx.legende_lien(b, &legende, Some((id("animation-cle"), if ici.is_some() { "Remplacer la clé" } else { "Poser une clé" }))) {
+            self.poser_cle();
+        }
+        let prec = an.voisine(self.anim_temps, false);
+        let suiv = an.voisine(self.anim_temps, true);
+        match cx.rangee(b, id("animation-lecture"), &[("Précédente", prec.is_some()), (if self.anim_lecture { "Pause" } else { "Lecture" }, an.cles.len() > 1), ("Suivante", suiv.is_some())]) {
+            Some(0) => {
+                self.anim_lecture = false;
+                self.aller_a(prec.unwrap_or(0.0));
+            }
+            Some(1) => {
+                self.anim_lecture = !self.anim_lecture;
+                // Au bout d'une animation sans boucle, la lecture repart du début
+                if self.anim_lecture && !an.boucle && self.anim_temps >= an.duree - 1e-9 {
+                    self.aller_a(0.0);
+                }
+            }
+            Some(2) => {
+                self.anim_lecture = false;
+                self.aller_a(suiv.unwrap_or(an.duree));
+            }
+            _ => {}
+        }
+        if let Some(t) = ici {
+            if cx.lien(b, id("animation-retirer-cle"), "Retirer la clé") {
+                self.changer_animation(|a| {
+                    a.retirer_cle(t);
+                });
+                self.aller_a(t);
+            }
+        }
+        if cx.lien(b, id("animation-supprimer"), "Supprimer l'animation") {
+            let i = self.anim_choisie;
+            self.changer_os(|a, _| {
+                let mut l = a.animations();
+                if let Some(i) = i.filter(|i| *i < l.len()) {
+                    l.remove(i);
+                }
+                a.regler_animations(&l);
+            });
+            (self.anim_choisie, self.anim_lecture) = (None, false);
+            self.dire(format!("« {} » supprimée", an.nom));
+        }
+    }
+
     fn renommer_pose(&mut self, nom: &str) {
         let nom = nom.trim().to_string();
         if nom.is_empty() {
@@ -5875,24 +6545,29 @@ impl App {
     /// Limites de rotation de l'os actif, repliées derrière un lien : une ligne par axe,
     /// son état, et ses bornes quand il est limité.
     fn limites_os(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, x: &Os) {
-        let l = x.limites();
-        let n = l.iter().filter(|v| **v != Limite::Libre).count();
-        let texte = match n { 0 => "Rotation libre".to_string(), 1 => "1 axe limité".to_string(), n => format!("{n} axes limités") };
+        let l = limites6(x);
+        let s = self.os_actif().map_or(1.0, |o| o.0.echelle[0]);
+        let n = l[..3].iter().filter(|v| **v != Limite::Libre).count();
+        let rot = match n { 0 => "Rotation libre".to_string(), 1 => "1 rotation limitée".to_string(), n => format!("{n} rotations limitées") };
+        let t = &l[3..];
+        let tr = if t.iter().all(|v| *v == Limite::Bloquee) { "translation bloquée" } else if t.iter().all(|v| *v == Limite::Libre) { "translation libre" } else { "translation limitée" };
+        let texte = format!("{rot} · {tr}");
         if cx.legende_lien(b, &texte, Some((id("os-limites"), if self.limites_ouvertes { "Replier" } else { "Limites" }))) {
             self.limites_ouvertes = !self.limites_ouvertes;
         }
         if !self.limites_ouvertes {
             return;
         }
-        for k in 0..3 {
+        for k in 0..6 {
             let (etat, bornes) = match l[k] {
                 Limite::Libre => ("Libre", None),
-                Limite::Bornee(a, b) => ("Limité", Some((format!("{}°", chiffres(a)), format!("{}°", chiffres(b))))),
+                Limite::Bornee(a, c) if k < 3 => ("Limité", Some((format!("{}°", chiffres(a)), format!("{}°", chiffres(c))))),
+                Limite::Bornee(a, c) => ("Limité", Some((chiffres(a * s), chiffres(c * s)))),
                 Limite::Bloquee => ("Bloqué", None),
             };
-            let nom = ["Rotation X", "Vrille Y", "Rotation Z"][k];
+            let nom = ["Rotation X", "Vrille Y", "Rotation Z", "Translation X", "Translation Y", "Translation Z"][k];
             let bornes = bornes.as_ref().map(|(a, b)| (a.as_str(), b.as_str()));
-            let (e, mn, mx) = cx.ligne_limite(b, sub_id(id("os-limite"), k), nom, coul(COUL_AXES[k]), etat, bornes);
+            let (e, mn, mx) = cx.ligne_limite(b, sub_id(id("os-limite"), k), nom, coul(COUL_AXES[k % 3]), etat, bornes);
             if e {
                 self.changer_etat_limite(k);
             }
@@ -6058,6 +6733,7 @@ impl App {
         let os_actif = self.os_scene.as_ref().filter(|(x, _)| *x == id_a).map(|(_, x)| x.clone()).filter(|x| a.trouver(x).is_some());
         if self.voir_poids {
             cx.paragraph(b, if self.calcul_peau.is_some() { "Calcul des poids…" } else if os_actif.is_some() { "Bleu : aucun effet · rouge : plein effet de l'os actif." } else { "Touchez un os de l'arbre pour voir ses poids." });
+            self.reglages_pinceau(cx, b);
         }
     }
 
@@ -6492,13 +7168,22 @@ fn segments_os(e: &EditionOs, a: &Armature) -> Segments {
 
 pub use crate::armature::{angles_os, depuis_angles_os};
 
+/// Limites d'un os : rotation X, Y, Z puis translation X, Y, Z.
+fn limites6(x: &Os) -> [Limite; 6] {
+    let (r, t) = (x.limites(), x.limites_t());
+    [r[0], r[1], r[2], t[0], t[1], t[2]]
+}
+
 fn poser_os(o: &mut Objet, e: &EditionOs, depart: &Pose, v: Transfo) {
-    let Transfo::Rotation { q, .. } = v else { return };
-    let (r, ri) = (o.rotation, ed::qinv(ed::qnorm(o.rotation)));
+    let (r, ri, s) = (o.rotation, ed::qinv(ed::qnorm(o.rotation)), o.echelle[0]);
     let Some(a) = &mut o.armature else { return };
     a.pose = depart.clone();
     let l = e.racines(a);
-    a.tourner(&l, ed::qnorm(ed::qmul(ri, ed::qmul(q, r))));
+    match v {
+        Transfo::Rotation { q, .. } => a.tourner(&l, ed::qnorm(ed::qmul(ri, ed::qmul(q, r)))),
+        Transfo::Translation(d) => a.deplacer(&l, ed::qappliquer(ri, d).map(|c| c / s)),
+        Transfo::Echelle { .. } => return,
+    }
     // L'os bute sur ses limites
     a.borner(depart);
     o.maillage = Arc::new(a.enveloppe_pose());
@@ -9812,7 +10497,7 @@ mod tests {
         let mut b = banc_lie();
         let a = b.app.projet.objets[1].clone();
         let (i, j) = (a.armature.as_ref().unwrap().os[1].id.clone(), a.armature.as_ref().unwrap().os[2].id.clone());
-        b.app.projet.objets[0].liaison = Some(crate::projet::Liaison { armature: a.id.clone(), os: vec![i.clone(), j.clone()] });
+        b.app.projet.objets[0].liaison = Some(crate::projet::Liaison { armature: a.id.clone(), os: vec![i.clone(), j.clone()], poids: None });
         b.app.choisir(Some(1));
         b.app.entrer_armature();
         let (x, y) = (Bout::tete(&i), Bout::queue(&i));
@@ -9904,7 +10589,7 @@ mod tests {
         let mut b = banc_lie();
         let a = b.app.projet.objets[1].clone();
         let bras = a.armature.as_ref().unwrap().os.iter().find(|x| x.nom == "bras.G").unwrap().id.clone();
-        b.app.projet.objets[0].liaison = Some(crate::projet::Liaison { armature: a.id, os: vec![bras.clone()] });
+        b.app.projet.objets[0].liaison = Some(crate::projet::Liaison { armature: a.id, os: vec![bras.clone()], poids: None });
         b.app.projet.objets[0].position = [1.0, 1.4, 0.0];
         b.app.choisir(Some(1));
         b.app.entrer_armature();
@@ -9927,9 +10612,13 @@ mod tests {
         let os = |n: &str| x.os.iter().find(|y| y.nom == n).unwrap().id.clone();
         let reperes = |b: &Banc| b.app.projet.objets[1].armature.as_ref().unwrap().matrices_pose();
         let proche = |u: (P3, ed::Q), v: (P3, ed::Q)| (0..3).all(|k| (u.0[k] - v.0[k]).abs() < 1e-9);
-        // La bascule de la barre : en Tirer, ni poignée ni axes
+        // La bascule de la barre : Tourner, Déplacer, Tirer ; en Tirer, ni poignée ni axes
         b.images(1);
         let z = b.ui.zone(sub_id(BARRE, 0)).unwrap();
+        assert!(b.app.mode == Mode::Rotation && !b.app.tirer);
+        b.appui(z.cx(), z.cy());
+        b.images(1);
+        assert!(b.app.mode == Mode::Translation && !b.app.tirer);
         b.appui(z.cx(), z.cy());
         b.images(1);
         assert!(b.app.tirer && b.ui.zone(sub_id(BARRE, 3)).is_none());
@@ -10277,7 +10966,12 @@ mod tests {
         let c = b.app.contexte();
         assert!(c.pose && !c.possible(A::AjouterOs) && !c.possible(A::SupprimerOs) && !c.possible(A::ExtruderOs) && !c.possible(A::ParenterOs) && !c.possible(A::SelectionCurseur));
         assert!(c.possible(A::TousOs) && c.possible(A::AucunOs));
+        // Tourner ou Déplacer, jamais d'échelle
+        assert!(b.app.mode == Mode::Rotation);
         b.app.mode = Mode::Translation;
+        b.images(1);
+        assert!(b.app.mode == Mode::Translation);
+        b.app.mode = Mode::Echelle;
         b.images(1);
         assert!(b.app.mode == Mode::Rotation);
         b.app.contenu = Contenu::Contexte;
@@ -10357,7 +11051,7 @@ mod tests {
             }
         }
         b.app.projet.objets[0].maillage = Arc::new(Maillage::new(sommets, faces, Vec::new()));
-        b.app.projet.objets[0].liaison = Some(crate::projet::Liaison { armature: x.id.clone(), os: vec![bras.clone(), avant.clone()] });
+        b.app.projet.objets[0].liaison = Some(crate::projet::Liaison { armature: x.id.clone(), os: vec![bras.clone(), avant.clone()], poids: None });
         b.app.choisir(Some(1));
         b.app.entrer_armature();
         b.app.basculer_pose();
@@ -10489,4 +11183,291 @@ mod tests {
         b.app.os.as_mut().unwrap().actif = Some("autre".into());
         assert!(b.app.vue_poids(0, &vu).unwrap().faces[0].uv[0][0] < 0.1);
     }
+
+    /// Pixel d'un point du monde, dans la vue de l'éditeur.
+    fn pixel(b: &Banc, p: P3) -> (f32, f32) {
+        let w = b.app.espace;
+        let e = b.app.vue_ecran(w).ecran(p).unwrap();
+        (w.x + e[0] as f32, w.y + e[1] as f32)
+    }
+
+    #[test]
+    fn glisser_le_curseur_dans_le_vide_le_garde_a_sa_profondeur_sans_tourner_la_vue() {
+        let mut b = Banc::pret();
+        b.app.projet.curseur = [1.2, 0.0, 0.0];
+        b.images(1);
+        let (lacet, a) = (b.app.cam.lacet, pixel(&b, [1.2, 0.0, 0.0]));
+        let arrivee = (a.0 + 30.0, a.1 - 60.0);
+        assert_eq!(b.glisser(a, arrivee), 0, "le curseur ne passe pas par l'annulation");
+        assert_eq!(b.app.cam.lacet, lacet);
+        let c = b.app.projet.curseur;
+        assert!(c != [1.2, 0.0, 0.0]);
+        let q = pixel(&b, c);
+        assert!((q.0 - arrivee.0).abs() < 0.5 && (q.1 - arrivee.1).abs() < 0.5, "{q:?}");
+        let v = b.app.vue_ecran(b.app.espace);
+        let prof: f64 = (0..3).map(|k| (c[k] - 1.2 * (k == 0) as u8 as f64) * v.dos[k]).sum();
+        assert!(prof.abs() < 1e-9, "même profondeur");
+        assert!(b.app.curseur_tenu.is_none());
+    }
+
+    #[test]
+    fn glisser_le_curseur_sur_un_objet_le_pose_sur_sa_surface() {
+        let mut b = Banc::pret();
+        b.app.projet.curseur = [1.2, 0.0, 0.0];
+        b.images(1);
+        let o = &b.app.projet.objets[0];
+        let demi = o.maillage.sommets.iter().map(|p| p[0].abs()).fold(0.0, f64::max);
+        let (a, centre) = (pixel(&b, [1.2, 0.0, 0.0]), pixel(&b, [0.0; 3]));
+        b.glisser(a, centre);
+        let c = b.app.projet.curseur;
+        let plus_loin = c.iter().map(|x| x.abs()).fold(0.0, f64::max);
+        assert!((plus_loin - demi).abs() < 1e-6, "{c:?} sur la face, demi-côté {demi}");
+        let q = pixel(&b, c);
+        assert!((q.0 - centre.0).abs() < 0.5 && (q.1 - centre.1).abs() < 0.5);
+    }
+
+    #[test]
+    fn le_curseur_passe_avant_la_selection_mais_pas_avant_un_axe() {
+        let mut b = Banc::pret();
+        b.app.choisir(Some(0));
+        b.images(1);
+        // Curseur sur l'objet choisi : le prendre déplace le curseur, pas l'objet
+        let a = pixel(&b, [0.0; 3]);
+        assert_eq!(b.glisser(a, (a.0 + 200.0, a.1)), 0);
+        assert_eq!(b.app.projet.objets[0].position, [0.0; 3]);
+        assert!(b.app.projet.curseur != [0.0; 3]);
+        // Un axe de la poignée reste à la poignée
+        b.app.projet.curseur = [0.0; 3];
+        b.images(1);
+        let (_, bout) = b.bout(0);
+        b.app.projet.curseur = b.app.vue_ecran(b.app.espace).sur_plan((bout.0 - b.app.espace.x) as f64, (bout.1 - b.app.espace.y) as f64, [0.0, 0.0, 1.0], [0.0; 3]).unwrap();
+        b.images(1);
+        assert_eq!(b.glisser(bout, (bout.0 + 100.0, bout.1)), 1);
+        assert!(b.app.projet.objets[0].position[0] != 0.0);
+    }
+
+    #[test]
+    fn le_curseur_se_saisit_et_se_place_par_ses_operations() {
+        let mut b = Banc::pret();
+        b.app.appliquer_champ(Champ::Curseur(1), 4.0);
+        assert_eq!(b.app.projet.curseur, [0.0, 4.0, 0.0]);
+        assert_eq!(b.app.valeur_champ(Champ::Curseur(1)).as_deref(), Some("4"));
+        assert_eq!(b.app.champ_suivant(Champ::Curseur(0)), Some(Champ::Curseur(1)));
+        b.app.agir(A::VueCurseur);
+        b.images(200);
+        assert_eq!(b.app.cam.cible, [0.0, 4.0, 0.0]);
+        b.app.cam.cible = [1.0, 2.0, 3.0];
+        b.app.agir(A::CurseurVue);
+        assert_eq!(b.app.projet.curseur, [1.0, 2.0, 3.0]);
+        b.app.agir(A::CurseurScene);
+        let c = b.app.projet.curseur;
+        assert!(c.iter().all(|x| x.abs() < 1e-9), "centre du cube : {c:?}");
+    }
+
+    /// Pixel d'un point du tube de `banc_peau`, à la fraction `t` de l'épaule à la main.
+    fn sur_le_tube(b: &Banc, t: f64) -> (f32, f32) {
+        let o = &b.app.projet.objets[0];
+        let m = &o.maillage.sommets;
+        let (d, f) = (m[0], m[m.len() - 1]);
+        let mx = o.matrice();
+        pixel(b, vue::appliquer(&mx, [0, 1, 2].map(|k| d[k] + (f[k] - d[k]) * t)))
+    }
+
+    #[test]
+    fn peindre_les_poids_les_garde_s_annule_et_s_enregistre() {
+        let (mut b, bras, avant) = banc_peau();
+        b.app.voir_poids = true;
+        b.app.os.as_mut().unwrap().actif = Some(avant.clone());
+        pret(&mut b);
+        b.app.recadrer();
+        b.images(60);
+        pret(&mut b);
+        let calcules = b.app.peaux[&b.app.projet.objets[0].id].peau.poids_de(&avant);
+        let n = calcules.len();
+        assert!(calcules[n - 1] > 0.9);
+        // Retirer l'avant-bras près de la main
+        b.app.peindre = true;
+        (b.app.pinceau, b.app.pinceau_force, b.app.pinceau_rayon) = (peau::Pinceau::Retirer, 1.0, 60.0);
+        let a = sur_le_tube(&b, 0.9);
+        assert!(b.app.peinture() && b.app.lie_sous((a.0 - b.app.espace.x) as f64, (a.1 - b.app.espace.y) as f64, &b.app.vue_ecran(b.app.espace)).is_some());
+        assert_eq!(b.glisser(a, (a.0 + 12.0, a.1 + 12.0)), 1, "un trait, une étape");
+        let l = b.app.projet.objets[0].liaison.clone().unwrap();
+        let p = l.poids.clone().expect("poids peints");
+        assert_eq!((p.n, p.ids.len()), (n, 2));
+        let w = p.poids_de(&avant);
+        assert!(w[n - 1] < calcules[n - 1] - 0.3, "la main perd l'avant-bras : {} → {}", calcules[n - 1], w[n - 1]);
+        assert!(w[0] <= calcules[0] + 1e-6, "l'épaule, loin du pinceau, ne bouge pas");
+        let wb = p.poids_de(&bras);
+        assert!((0..n).all(|i| (w[i] + wb[i] - 1.0).abs() < 1e-5), "somme de un");
+        // La peau et la vue des poids suivent les poids peints
+        pret(&mut b);
+        let e = &b.app.peaux[&b.app.projet.objets[0].id];
+        assert!(e.cle.starts_with("main "));
+        // Enregistrés et relus
+        let texte = b.app.projet.ecrire();
+        let r = Projet::lire(&texte).unwrap();
+        assert_eq!(r.objets[0].liaison.as_ref().unwrap().poids.as_deref().map(|p| p.n), Some(n));
+        let relu = r.objets[0].liaison.as_ref().unwrap().poids.clone().unwrap().poids_de(&avant);
+        assert!((0..n).all(|i| (relu[i] - w[i]).abs() < 2e-4));
+        // Annuler rend les poids calculés ; Recalculer aussi
+        b.app.annuler();
+        assert!(b.app.projet.objets[0].liaison.as_ref().unwrap().poids.is_none());
+        b.app.retablir();
+        assert!(b.app.projet.objets[0].liaison.as_ref().unwrap().poids.is_some());
+        b.app.recalculer_poids();
+        assert!(b.app.projet.objets[0].liaison.as_ref().unwrap().poids.is_none());
+    }
+
+    #[test]
+    fn dans_le_vide_le_pinceau_laisse_tourner_la_vue() {
+        let (mut b, _, avant) = banc_peau();
+        (b.app.voir_poids, b.app.peindre) = (true, true);
+        b.app.os.as_mut().unwrap().actif = Some(avant);
+        pret(&mut b);
+        let lacet = b.app.cam.lacet;
+        assert_eq!(b.glisser((60.0, 900.0), (300.0, 900.0)), 0);
+        assert!(b.app.cam.lacet != lacet);
+        assert!(b.app.projet.objets[0].liaison.as_ref().unwrap().poids.is_none());
+    }
+
+    #[test]
+    fn en_pose_deplacer_la_racine_emmene_tout_et_un_os_bloque_reste() {
+        let mut b = en_os(true);
+        b.app.basculer_pose();
+        b.images(1);
+        let a = armature(&b).clone();
+        let os = |n: &str| a.os.iter().find(|x| x.nom == n).unwrap().id.clone();
+        let (bassin, cuisse) = (os("bassin"), os("cuisse.G"));
+        let repos = a.segments();
+        // Déplacer : le bassin, racine, glisse avec ses enfants
+        b.app.mode = Mode::Translation;
+        let c = milieu_os(&b, &bassin);
+        b.appui(c.0, c.1);
+        assert_eq!(b.app.os.as_ref().unwrap().os_choisis(armature(&b)), [bassin.clone()]);
+        assert_eq!(b.glisser(c, (c.0 + 120.0, c.1)), 1);
+        let p = armature(&b).segments_pose();
+        let d = |i: &String| [0, 1, 2].map(|k| p[i].tete[k] - repos[i].tete[k]);
+        let (db, dc) = (d(&bassin), d(&cuisse));
+        assert!(db.iter().any(|v| v.abs() > 1e-3), "le bassin bouge : {db:?}");
+        assert!((0..3).all(|k| (db[k] - dc[k]).abs() < 1e-9), "la cuisse suit");
+        // Les champs de translation de l'os actif
+        let t = armature(&b).translation_os(&bassin);
+        b.app.appliquer_champ(Champ::OsTranslation(1), 0.25);
+        let t2 = armature(&b).translation_os(&bassin);
+        assert!((t2[1] - 0.25 / b.app.projet.objets[b.app.os.as_ref().unwrap().objet.unwrap()].echelle[0]).abs() < 1e-9 && (t2[0] - t[0]).abs() < 1e-9);
+        // Une cuisse, bloquée par défaut, ne glisse pas
+        b.app.agir(A::ReposOs);
+        let c = milieu_os(&b, &cuisse);
+        b.appui(c.0, c.1);
+        b.glisser(c, (c.0 + 120.0, c.1));
+        assert!(!armature(&b).pose.contains_key(&cuisse));
+        // Libérée en Géométrie, elle glisse dans sa borne
+        b.app.basculer_pose();
+        b.app.os.as_mut().unwrap().actif = Some(cuisse.clone());
+        b.app.regler_limites6([Limite::Libre, Limite::Libre, Limite::Libre, Limite::Libre, Limite::Bornee(-0.05, 0.05), Limite::Libre]);
+        b.app.basculer_pose();
+        b.app.os.as_mut().unwrap().actif = Some(cuisse.clone());
+        b.app.appliquer_champ(Champ::OsTranslation(1), 3.0);
+        let t = armature(&b).translation_os(&cuisse);
+        assert!((t[1] - 0.05).abs() < 1e-9, "{t:?}");
+    }
+
+    #[test]
+    fn une_animation_garde_des_cles_les_interpole_et_se_lit() {
+        let (mut b, bras) = banc_pose();
+        b.app.os.as_mut().unwrap().actif = Some(bras.clone());
+        let arm = |b: &Banc| b.app.projet.objets[1].armature.clone().unwrap();
+        // Une animation neuve : une clé à 0, la pose du moment (le repos)
+        b.app.nouvelle_animation();
+        let an = b.app.animation().unwrap();
+        assert_eq!((an.nom.as_str(), an.cles.len(), an.cles[0].t), ("Animation 1", 1, 0.0));
+        // Une clé à 1 s, le bras levé
+        b.app.aller_a(1.0);
+        b.app.regler_angles(&bras, [0.0, 0.0, 60.0]);
+        b.app.angle_saisie = false;
+        b.app.poser_cle();
+        assert_eq!(b.app.animation().unwrap().cles.len(), 2);
+        // À mi-chemin, le bras est à 30°
+        b.app.aller_a(0.5);
+        let z = angles_os(arm(&b).pose[&bras].r)[2];
+        assert!((z - 30.0).abs() < 1e-6, "{z}");
+        // L'objet lié suit l'instant montré
+        assert!(b.app.place_posee(0).is_some());
+        // Lecture : le temps avance, en boucle sur 2 s
+        b.app.aller_a(0.0);
+        b.app.anim_lecture = true;
+        b.images(10);
+        assert!(b.app.anim_temps > 0.4 && b.app.anim_temps < 0.6, "{}", b.app.anim_temps);
+        assert!(b.app.animating());
+        b.images(40);
+        assert!(b.app.anim_temps < 1.0, "repartie du début : {}", b.app.anim_temps);
+        b.app.anim_lecture = false;
+        // Enregistrée avec le projet
+        let r = Projet::lire(&b.app.projet.ecrire()).unwrap();
+        assert_eq!(r.objets[1].armature.as_ref().unwrap().animations().len(), 1);
+        // Une clé s'annule ; hors du mode Pose, plus d'animation montrée
+        b.app.annuler();
+        assert_eq!(b.app.animation().unwrap().cles.len(), 1);
+        b.app.basculer_pose();
+        assert!(b.app.animation().is_none());
+    }
+
+    #[test]
+    fn la_ligne_de_temps_se_glisse_et_les_boutons_vont_de_cle_en_cle() {
+        let (mut b, bras) = banc_pose();
+        b.app.nouvelle_animation();
+        b.app.aller_a(1.0);
+        b.app.regler_angles(&bras, [0.0, 0.0, 60.0]);
+        b.app.angle_saisie = false;
+        b.app.poser_cle();
+        (b.app.contenu, b.app.onglet_os) = (Contenu::Os, 2);
+        b.app.shell.end.open = true;
+        b.images(20);
+        let z = b.ui.zone(id("animation-temps")).expect("ligne de temps");
+        // Le quart de la ligne : 0,5 s
+        b.glisser((z.x + z.w * 0.6, z.cy()), (z.x + 10.0 + (z.w - 20.0) * 0.25, z.cy()));
+        assert!((b.app.anim_temps - 0.5).abs() < 1.0 / 24.0 + 1e-9, "{}", b.app.anim_temps);
+        let r = b.ui.zone(sub_id(id("animation-lecture"), 2)).expect("suivante");
+        b.appui(r.cx(), r.cy());
+        assert_eq!(b.app.anim_temps, 1.0);
+        let r = b.ui.zone(sub_id(id("animation-lecture"), 0)).expect("précédente");
+        b.appui(r.cx(), r.cy());
+        assert_eq!(b.app.anim_temps, 0.0);
+        // La durée se règle au pavé ; plus courte, elle retire les clés au-delà
+        b.app.appliquer_champ(Champ::AnimDuree, 0.5);
+        let an = b.app.animation().unwrap();
+        assert_eq!((an.duree, an.cles.len()), (0.5, 1));
+    }
+
+    #[test]
+    fn exporter_pour_sage_donne_l_armature_ses_objets_et_leurs_poids() {
+        let (mut b, _, avant) = banc_peau();
+        pret(&mut b);
+        // Des poids peints : l'avant-bras prend tout
+        let n = b.app.projet.objets[0].maillage.sommets.len();
+        let l = b.app.projet.objets[0].liaison.clone().unwrap();
+        let j = l.os.iter().position(|x| *x == avant).unwrap();
+        b.app.projet.objets[0].liaison.as_mut().unwrap().poids = Some(Arc::new(peau::Main::uniforme(l.os.clone(), n, j)));
+        let c = b.app.contexte();
+        assert!(c.possible(A::ExporterSage));
+        b.app.sorties.clear();
+        b.app.agir(A::ExporterSage);
+        let x = b.app.projet.objets[1].clone();
+        let sortie = b.app.sorties.last().expect("un fichier");
+        assert_eq!(sortie.nom, format!("{}.glb", x.nom));
+        let (js, bin) = crate::sage::lire_glb(&sortie.octets).unwrap();
+        assert_eq!(js.get("meshes").unwrap().liste().unwrap().len(), 1);
+        let joints = js.get("skins").unwrap().liste().unwrap()[0].get("joints").unwrap().liste().unwrap().len();
+        assert_eq!(joints, x.armature.as_ref().unwrap().os.len());
+        // Le premier poids de chaque sommet : 1, sur le nœud de l'avant-bras
+        let attr = js.get("meshes").unwrap().liste().unwrap()[0].get("primitives").unwrap().liste().unwrap()[0].get("attributes").unwrap().clone();
+        let k = attr.get("JOINTS_0").unwrap().num().unwrap() as usize;
+        let a = &js.get("accessors").unwrap().liste().unwrap()[k];
+        let v = &js.get("bufferViews").unwrap().liste().unwrap()[a.get("bufferView").unwrap().num().unwrap() as usize];
+        let o = v.get("byteOffset").unwrap().num().unwrap() as usize;
+        let rang = x.armature.as_ref().unwrap().os.iter().position(|b| b.id == avant).unwrap() as u16;
+        assert!((0..n).all(|i| u16::from_le_bytes(bin[o + 8 * i..o + 8 * i + 2].try_into().unwrap()) == rang));
+        assert!(b.app.message.as_ref().unwrap().0.contains("S.A.G.E."));
+    }
 }
+
