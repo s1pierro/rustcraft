@@ -937,7 +937,7 @@ impl App {
     /// Maillage après modifieurs, au repos.
     fn maillage_base(&self, k: usize) -> Arc<Maillage> {
         let o = &self.projet.objets[k];
-        match self.evals.get(&o.nom).filter(|_| !modifs::liste(o).is_empty()) {
+        match self.evals.get(&o.id).filter(|_| !modifs::liste(o).is_empty()) {
             Some(e) => e.maillage.clone(),
             None => o.maillage.clone(),
         }
@@ -952,7 +952,7 @@ impl App {
                 Ok(l) => {
                     self.evals.extend(l);
                     let p = &self.projet;
-                    self.evals.retain(|n, _| p.objets.iter().any(|o| o.nom == *n));
+                    self.evals.retain(|i, _| p.objets.iter().any(|o| o.id == *i));
                     self.calcul = None;
                 }
                 Err(mpsc::TryRecvError::Empty) => return,
@@ -960,9 +960,9 @@ impl App {
             }
         }
         let p = &self.projet;
-        let perime = self.affiches().into_iter().find(|&k| !modifs::liste(&p.objets[k]).is_empty() && self.evals.get(&p.objets[k].nom).is_none_or(|e| e.cle != modifs::cle(p, k, &[])));
+        let perime = self.affiches().into_iter().find(|&k| !modifs::liste(&p.objets[k]).is_empty() && self.evals.get(&p.objets[k].id).is_none_or(|e| e.cle != modifs::cle(p, k, &[])));
         let Some(k) = perime else { return };
-        let (p, mut c, nom) = (self.projet.clone(), self.evals.clone(), self.projet.objets[k].nom.clone());
+        let (p, mut c, id) = (self.projet.clone(), self.evals.clone(), self.projet.objets[k].id.clone());
         let (tx, rx) = mpsc::channel();
         let fil = std::thread::Builder::new().stack_size(32 << 20).spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -971,7 +971,7 @@ impl App {
             }));
             let _ = tx.send(match r {
                 Ok(c) => c.into_iter().collect(),
-                Err(_) => vec![(nom, modifs::Ev::echec(&p, k))],
+                Err(_) => vec![(id, modifs::Ev::echec(&p, k))],
             });
         });
         if fil.is_ok() {
@@ -1947,7 +1947,7 @@ impl App {
         let p = &self.projet;
         let libre = |x: &usize| *x != k && p.objets[*x].armature.is_none();
         let t = self.choix.iter().copied().find(|x| libre(x)).or_else(|| (0..p.objets.len()).rev().find(|x| libre(x)));
-        let cible = t.map(|t| p.objets[t].nom.clone());
+        let cible = t.map(|t| p.objets[t].id.clone());
         let m = modifs::neuf(genre, cible.as_deref());
         self.memoriser();
         if let J::Liste(l) = &mut self.projet.objets[k].modifs {
@@ -1993,8 +1993,9 @@ impl App {
         };
         let o = &self.projet.objets[k];
         let (l, nom) = (modifs::liste(o).to_vec(), o.nom.clone());
-        let erreurs = self.evals.get(&nom).map_or(Vec::new(), |e| e.erreurs.clone());
-        let autres: Vec<String> = self.projet.objets.iter().filter(|x| x.nom != nom && x.armature.is_none()).map(|x| x.nom.clone()).collect();
+        let erreurs = self.evals.get(&o.id).map_or(Vec::new(), |e| e.erreurs.clone());
+        // Les cibles possibles : identifiant, et nom pour les montrer
+        let autres: Vec<(String, String)> = self.projet.objets.iter().filter(|x| x.id != o.id && x.armature.is_none()).map(|x| (x.id.clone(), x.nom.clone())).collect();
         cx.section(b, &nom.to_uppercase());
         if l.is_empty() {
             cx.paragraph(b, "Aucun modifieur. Ils s'appliquent dans l'ordre, sans changer le maillage de base ; le mode Géométrie édite ce dernier.");
@@ -2043,9 +2044,9 @@ impl App {
                 }
                 cx.paragraph(b, "Cible");
                 let cible = modifs::cible(m);
-                for (j, n) in autres.iter().enumerate() {
-                    if cx.row(b, sub_id(cle("m-cible"), j), n, None, n == cible) {
-                        cmd = Some(CmdModif::Fixer(i, "cible", J::Txt(n.clone())));
+                for (j, (x, n)) in autres.iter().enumerate() {
+                    if cx.row(b, sub_id(cle("m-cible"), j), n, None, x == cible) {
+                        cmd = Some(CmdModif::Fixer(i, "cible", J::Txt(x.clone())));
                     }
                 }
                 if autres.is_empty() {
@@ -3692,8 +3693,10 @@ impl App {
                 p.objets.len() - 1
             })
             .collect();
-        // Une armature copiée avec ses objets garde les copies ; seuls, ils restent sur l'originale
+        // Une armature ou une cible copiée avec ses objets garde les copies ; seuls, ils
+        // restent sur l'originale
         for &k in &self.choix {
+            p.objets[k].suivre_cibles(&ids);
             if let Some(l) = &mut p.objets[k].liaison {
                 if let Some((_, n)) = ids.iter().find(|(a, _)| *a == l.armature) {
                     l.armature = n.clone();
@@ -3924,7 +3927,8 @@ impl App {
         self.valeur_champ(s).map(|_| s)
     }
 
-    /// Nouveau nom d'un objet, unique dans la scène ; ses cibles booléennes le suivent.
+    /// Nouveau nom d'un objet, unique dans la scène. Les booléens qui le visent n'en
+    /// dépendent pas : ils le désignent par son identifiant.
     fn renommer(&mut self, k: usize, nom: &str) {
         let nom = nom.trim();
         if nom.is_empty() {
@@ -3936,10 +3940,6 @@ impl App {
         }
         self.memoriser();
         let libre = ed::nom_libre(&self.projet.objets, nom);
-        let noms = [(ancien, libre.clone())];
-        for o in &mut self.projet.objets {
-            o.suivre_cibles(&noms);
-        }
         self.projet.objets[k].nom = libre.clone();
         self.a_sauver = true;
         if libre != nom {
@@ -4311,10 +4311,10 @@ impl App {
                 }
             };
             liste.push((o.nom.clone(), repere));
-            peaux.push(peau);
+            peaux.push((o.id.clone(), peau));
         }
         let (mats, images) = self.textures_export(&mut liste);
-        let pieces = liste.into_iter().zip(peaux).map(|((nom, maillage), peau)| crate::sage::Piece { nom, maillage, peau }).collect();
+        let pieces = liste.into_iter().zip(peaux).map(|((nom, maillage), (id, peau))| crate::sage::Piece { id, nom, maillage, peau }).collect();
         Some((x.nom.clone(), pieces, mats, images))
     }
 
@@ -4323,7 +4323,7 @@ impl App {
         let Some((nom, pieces, mats, images)) = self.personnage() else { return };
         let x = &self.projet.objets[kx];
         let Some(a) = &x.armature else { return };
-        let octets = crate::sage::glb(&nom, a, (x.position, x.rotation, x.echelle[0]), &pieces, &mats, &images);
+        let octets = crate::sage::glb(&nom, &x.id, a, (x.position, x.rotation, x.echelle[0]), &pieces, &mats, &images);
         let (no, np, na) = (a.os.len(), pieces.len(), a.animations().len());
         self.deposer(format!("{}.glb", nom.replace('/', "-")), octets);
         self.dire(format!("« {nom} » pour S.A.G.E. : {no} os, {np} objet{}, {na} animation{}", if np > 1 { "s" } else { "" }, if na > 1 { "s" } else { "" }));
@@ -7317,6 +7317,7 @@ mod tests {
         p.objets[0].nom = "a".into();
         let mut o = p.objets[0].clone();
         o.nom = "b".into();
+        o.id = "b".into();
         o.maillage = Arc::new(Maillage::cube(1.0));
         o.position = [0.0, 1.0, 0.0];
         p.objets.push(o);
@@ -8577,7 +8578,8 @@ mod tests {
     fn renommer_garde_les_noms_uniques_et_s_annule() {
         let mut b = Banc::pret();
         b.app.ouvrir("essai.gda", GDA.as_bytes());
-        b.app.projet.objets[1].modifs = crate::json::lire(r#"[{"type":"booleen","cible":"a"}]"#).unwrap();
+        let a = b.app.projet.objets[0].id.clone();
+        b.app.projet.objets[1].modifs = crate::json::J::Liste(vec![crate::modifs::neuf("booleen", Some(&a))]);
         b.app.choisir(Some(0));
         b.images(1);
         b.app.saisir(Champ::Nom);
@@ -8586,7 +8588,7 @@ mod tests {
         assert_eq!(b.app.projet.objets[0].nom, "b 2");
         assert!(b.app.projet.ecrire().contains("b 2"));
         let crate::json::J::Liste(l) = &b.app.projet.objets[1].modifs else { panic!() };
-        assert_eq!(l[0].get("cible"), Some(&crate::json::J::Txt("b 2".into())));
+        assert_eq!(l[0].get("cible"), Some(&crate::json::J::Txt(a.clone())), "le renommage ne touche pas la cible");
         b.app.annuler();
         assert_eq!(b.app.projet.objets[0].nom, "a");
 
@@ -8857,9 +8859,21 @@ mod tests {
     }
 
     #[test]
+    fn dupliquer_un_objet_et_sa_cible_garde_le_booleen_entre_les_copies() {
+        let mut b = perce();
+        b.app.choix = vec![0];
+        b.app.agir(crate::actions::Action::Dupliquer);
+        assert_eq!(modifs::cible(&modifs::liste(&b.app.projet.objets[2])[0]), "b", "seul, il vise l'original");
+        b.app.choix = vec![0, 1];
+        b.app.agir(crate::actions::Action::Dupliquer);
+        let (a, c) = (&b.app.projet.objets[3], &b.app.projet.objets[4]);
+        assert_eq!(modifs::cible(&modifs::liste(a)[0]), c.id, "avec sa cible, il vise la copie");
+    }
+
+    #[test]
     fn un_booleen_montre_le_resultat_et_la_cible_en_fil_de_fer() {
         let mut b = perce();
-        assert_eq!(modifs::cible(&modifs::liste(&b.app.projet.objets[0])[0]), "b");
+        assert_eq!(modifs::cible(&modifs::liste(&b.app.projet.objets[0])[0]), b.app.projet.objets[1].id);
         assert!(b.app.contenu == Contenu::Modifieurs && b.app.shell.end.open);
         b.app.attendre_calculs();
         let s = b.images(1);

@@ -1,8 +1,9 @@
 //! Export vers S.A.G.E. : une armature et les objets qui lui sont liés, en un seul .glb
 //! que tout moteur lit. Un nœud par os (repos), une peau (JOINTS_0, WEIGHTS_0, matrices
 //! de liaison inverses), une animation glTF par animation de l'armature. Ce que glTF ne
-//! sait pas dire (longueur et limites des os, ancre, poses nommées, boucle) va dans les
-//! `extras`, que S.A.G.E. relira.
+//! sait pas dire (identifiants, longueur et limites des os, ancre, poses nommées, boucle)
+//! va dans les `extras`, que S.A.G.E. relira. Comme dans le .gda, os et objets s'y
+//! désignent par leur identifiant ; les noms ne servent qu'à l'affichage.
 
 use crate::animation::Animation;
 use crate::armature::{Armature, Ecart, Pose};
@@ -14,6 +15,8 @@ use std::sync::Arc;
 
 /// Un objet lié : son maillage dans le repère de l'armature au repos, et ses poids.
 pub struct Piece {
+    /// Identifiant de l'objet dans le projet.
+    pub id: String,
     pub nom: String,
     pub maillage: Maillage,
     pub peau: Peau,
@@ -119,7 +122,7 @@ fn instants(an: &Animation) -> Vec<(f64, Pose)> {
 
 fn extras_os(a: &Armature, id: &str) -> String {
     let b = a.trouver(id).expect("os");
-    let mut x = format!("\"longueur\":{}", json::nombre(b.longueur));
+    let mut x = format!("\"id\":{},\"longueur\":{}", txt(&b.id), json::nombre(b.longueur));
     if let Some((_, c)) = b.extra.iter().find(|(k, _)| k == "contraintes") {
         let mut o = String::new();
         json::compact(c, &mut o);
@@ -128,24 +131,23 @@ fn extras_os(a: &Armature, id: &str) -> String {
     format!("{{{x}}}")
 }
 
-/// Poses nommées et ancre, par nom d'os.
-fn extras_armature(a: &Armature, animations: &[Animation]) -> String {
-    let nom = |id: &str| a.trouver(id).map_or(id.to_string(), |b| b.nom.clone());
+/// Identifiant de l'armature, poses nommées et ancre, les os par leur identifiant.
+fn extras_armature(id: &str, a: &Armature, animations: &[Animation]) -> String {
     let pose_j = |p: &Pose| {
         let l: Vec<String> = a.os.iter().filter_map(|b| {
             let e = p.get(&b.id)?;
-            Some(format!("{}:{{\"r\":{},\"t\":{}}}", txt(&b.nom), nums(&e.r), nums(&e.t)))
+            Some(format!("{}:{{\"r\":{},\"t\":{}}}", txt(&b.id), nums(&e.r), nums(&e.t)))
         }).collect();
         format!("{{{}}}", l.join(","))
     };
     let poses: Vec<String> = a.poses_nommees().iter().map(|(n, p)| format!("{{\"nom\":{},\"os\":{}}}", txt(n), pose_j(p))).collect();
-    let ancre = a.ancre().map_or("null".to_string(), |i| txt(&nom(&i)));
-    format!("{{\"sage\":{{\"format\":1,\"ancre\":{ancre},\"poses\":[{}],\"animations\":{}}}}}", poses.join(","), animations.len())
+    let ancre = a.ancre().map_or("null".to_string(), |i| txt(&i));
+    format!("{{\"sage\":{{\"format\":2,\"id\":{},\"ancre\":{ancre},\"poses\":[{}],\"animations\":{}}}}}", txt(id), poses.join(","), animations.len())
 }
 
-/// Le .glb d'une armature (`nom`, placée par `place` : position, rotation, échelle) et de
-/// ses pièces, avec les matériaux et images de l'export ordinaire.
-pub fn glb(nom: &str, a: &Armature, place: (P3, Q, f64), pieces: &[Piece], mats: &[(String, MatMtl)], images: &[(String, Arc<Vec<u8>>)]) -> Vec<u8> {
+/// Le .glb d'une armature (objet `id`, nommé `nom`, placé par `place` : position,
+/// rotation, échelle) et de ses pièces, avec les matériaux et images de l'export ordinaire.
+pub fn glb(nom: &str, id: &str, a: &Armature, place: (P3, Q, f64), pieces: &[Piece], mats: &[(String, MatMtl)], images: &[(String, Arc<Vec<u8>>)]) -> Vec<u8> {
     let mut t = Tampon::default();
     let rang = |id: &str| a.os.iter().position(|b| b.id == id);
     // Nœud 0 : l'armature ; puis un nœud par os, dans l'ordre de l'armature
@@ -154,7 +156,7 @@ pub fn glb(nom: &str, a: &Armature, place: (P3, Q, f64), pieces: &[Piece], mats:
     let (p, q, s) = place;
     noeuds.push(format!(
         "{{\"name\":{},\"translation\":{},\"rotation\":{},\"scale\":{},\"children\":[{}],\"extras\":{}}}",
-        txt(nom), nums(&p), nums(&q), nums(&[s, s, s]), racines.join(","), extras_armature(a, &a.animations())
+        txt(nom), nums(&p), nums(&q), nums(&[s, s, s]), racines.join(","), extras_armature(id, a, &a.animations())
     ));
     for b in &a.os {
         let enfants: Vec<String> = a.os.iter().enumerate().filter(|(_, c)| c.parent.as_deref() == Some(&b.id)).map(|(k, _)| (k + 1).to_string()).collect();
@@ -223,7 +225,7 @@ pub fn glb(nom: &str, a: &Armature, place: (P3, Q, f64), pieces: &[Piece], mats:
         }
         meshes.push(format!("{{\"name\":{},\"primitives\":[{}]}}", txt(&piece.nom), prims.join(",")));
         scene.push(noeuds.len().to_string());
-        noeuds.push(format!("{{\"name\":{},\"mesh\":{},\"skin\":0}}", txt(&piece.nom), meshes.len() - 1));
+        noeuds.push(format!("{{\"name\":{},\"mesh\":{},\"skin\":0,\"extras\":{{\"id\":{}}}}}", txt(&piece.nom), meshes.len() - 1, txt(&piece.id)));
     }
     // Animations : un canal de rotation par os qui bouge, de translation s'il glisse
     let mut anims = Vec::new();
@@ -388,13 +390,17 @@ mod tests {
         p.insert(id(&a, "bassin"), Ecart { r: [0.0, 0.0, 0.0, 1.0], t: [0.0, 0.1, 0.05] });
         an.poser_cle(0.5, p);
         a.regler_animations(&[an]);
-        (a, Piece { nom: "bras".into(), maillage: m, peau })
+        (a, Piece { id: "o-bras".into(), nom: "bras".into(), maillage: m, peau })
     }
 
     #[test]
     fn le_personnage_se_relit_au_repos_et_dans_son_animation() {
         let (a, piece) = bras();
-        let d = glb("corps", &a, ([1.0, 0.0, 2.0], qaxe([0.0, 1.0, 0.0], 0.3), 2.0), std::slice::from_ref(&piece), &[], &[]);
+        let mut a = a;
+        let ancre = a.os[0].id.clone();
+        a.regler_ancre(Some(&ancre));
+        a.regler_poses(&[("garde".into(), Pose::from([(a.os[2].id.clone(), Ecart { r: qaxe([1.0, 0.0, 0.0], 0.3), t: [0.0; 3] })]))]);
+        let d = glb("corps", "o-corps", &a, ([1.0, 0.0, 2.0], qaxe([0.0, 1.0, 0.0], 0.3), 2.0), std::slice::from_ref(&piece), &[], &[]);
         // Pour le passer au validateur de Khronos : SAGE_GLB=fichier cargo test
         if let Ok(f) = std::env::var("SAGE_GLB") {
             std::fs::write(f, &d).unwrap();
@@ -465,6 +471,14 @@ mod tests {
         // Ce que glTF ne dit pas : la longueur des os, l'ancre et les poses, dans les extras
         let n1 = &j.get("nodes").unwrap().liste().unwrap()[1];
         assert!((n1.get("extras").unwrap().get("longueur").unwrap().num().unwrap() - a.os[0].longueur).abs() < 1e-12);
-        assert!(j.get("nodes").unwrap().liste().unwrap()[0].get("extras").unwrap().get("sage").is_some());
+        // Os, armature et objets désignés par leur identifiant
+        let noeuds = j.get("nodes").unwrap().liste().unwrap();
+        assert_eq!(n1.get("extras").unwrap().get("id"), Some(&J::Txt(a.os[0].id.clone())));
+        let x = noeuds[0].get("extras").unwrap().get("sage").unwrap();
+        assert_eq!(x.get("id"), Some(&J::Txt("o-corps".into())));
+        assert_eq!(x.get("ancre"), Some(&J::Txt(ancre)));
+        let garde = &x.get("poses").unwrap().liste().unwrap()[0];
+        assert!(garde.get("os").unwrap().get(&a.os[2].id).is_some());
+        assert_eq!(noeuds.last().unwrap().get("extras").unwrap().get("id"), Some(&J::Txt("o-bras".into())));
     }
 }

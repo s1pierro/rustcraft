@@ -1,6 +1,6 @@
 //! Modifieurs : une pile par objet, appliquée dans l'ordre à son maillage sans le changer.
 //! Répétition (copies décalées, éventuellement unies) et Booléen (avec un autre objet, la
-//! « cible »). Les réglages restent dans `Objet::modifs`, au format du .gda de GDA.
+//! « cible », désignée par son identifiant). Les réglages restent dans `Objet::modifs`.
 //!
 //! `evaluer` calcule, `cle` dit si un résultat est encore bon : l'application lance le
 //! calcul dans un fil et affiche le dernier résultat en attendant.
@@ -32,7 +32,7 @@ impl Ev {
     }
 }
 
-/// Résultats, par nom d'objet.
+/// Résultats, par identifiant d'objet.
 pub type Cache = HashMap<String, Ev>;
 
 pub const OPS: [(&str, &str); 3] = [("difference", "Différence"), ("union", "Union"), ("intersection", "Intersection")];
@@ -90,8 +90,8 @@ pub fn fixer(m: &mut J, k: &str, v: J) {
     }
 }
 
-fn indice(p: &Projet, nom: &str) -> Option<usize> {
-    p.objets.iter().position(|o| o.nom == nom)
+fn indice(p: &Projet, id: &str) -> Option<usize> {
+    p.objets.iter().position(|o| o.id == id)
 }
 
 fn adresse(m: &Arc<Maillage>) -> usize {
@@ -125,7 +125,7 @@ pub fn evaluer(p: &Projet, k: usize, pile: &[usize], cache: &mut Cache) -> Arc<M
         return o.maillage.clone();
     }
     let c = cle(p, k, pile);
-    if let Some(e) = cache.get(&o.nom).filter(|e| e.cle == c) {
+    if let Some(e) = cache.get(&o.id).filter(|e| e.cle == c) {
         return e.maillage.clone();
     }
     let (mut mm, mut erreurs, mut deps) = (o.maillage.clone(), Vec::new(), vec![o.maillage.clone()]);
@@ -139,7 +139,7 @@ pub fn evaluer(p: &Projet, k: usize, pile: &[usize], cache: &mut Cache) -> Arc<M
             Err(e) => erreurs.push(Some(e)),
         }
     }
-    cache.insert(o.nom.clone(), Ev { cle: c, maillage: mm.clone(), erreurs, _deps: deps });
+    cache.insert(o.id.clone(), Ev { cle: c, maillage: mm.clone(), erreurs, _deps: deps });
     mm
 }
 
@@ -190,11 +190,11 @@ fn modifier(p: &Projet, k: usize, mm: &Arc<Maillage>, m: &J, pile: &[usize], cac
             Ok(Arc::new(r))
         }
         "booleen" => {
-            let nom = cible(m);
-            if nom.is_empty() {
+            let id = cible(m);
+            if id.is_empty() {
                 return Err("choisissez une cible".into());
             }
-            let t = indice(p, nom).ok_or_else(|| format!("cible absente : {nom}"))?;
+            let t = indice(p, id).ok_or("la cible n’existe plus")?;
             let pile2: Vec<usize> = pile.iter().copied().chain([k]).collect();
             if pile2.contains(&t) {
                 return Err("dépendance circulaire".into());
@@ -252,14 +252,19 @@ mod tests {
             o.set = p.sets[0].nom.clone();
             p.objets.push(o);
         }
-        p.objets[0].modifs = J::Liste(vec![neuf("booleen", Some("b"))]);
+        let b = p.objets[1].id.clone();
+        p.objets[0].modifs = J::Liste(vec![neuf("booleen", Some(&b))]);
         p
+    }
+
+    fn id(p: &Projet, k: usize) -> String {
+        p.objets[k].id.clone()
     }
 
     fn ev(p: &Projet, k: usize) -> Ev {
         let mut c = Cache::new();
         evaluer(p, k, &[], &mut c);
-        c.remove(&p.objets[k].nom).unwrap()
+        c.remove(&p.objets[k].id).unwrap()
     }
 
     #[test]
@@ -311,16 +316,18 @@ mod tests {
         assert_eq!(e.erreurs[0].as_deref(), Some("choisissez une cible"));
         assert_eq!(e.maillage.faces.len(), 18, "la répétition s'applique quand même");
         p.objets[0].modifs = l("zz");
-        assert_eq!(ev(&p, 0).erreurs[0].as_deref(), Some("cible absente : zz"));
-        p.objets[0].modifs = l("a");
-        assert_eq!(ev(&p, 0).erreurs[0].as_deref(), Some("dépendance circulaire"));
+        assert_eq!(ev(&p, 0).erreurs[0].as_deref(), Some("la cible n’existe plus"));
         p.objets[0].modifs = l("b");
-        p.objets[1].modifs = J::Liste(vec![neuf("booleen", Some("a"))]);
+        assert_eq!(ev(&p, 0).erreurs[0].as_deref(), Some("la cible n’existe plus"), "un nom ne désigne pas");
+        p.objets[0].modifs = l(&id(&p, 0));
+        assert_eq!(ev(&p, 0).erreurs[0].as_deref(), Some("dépendance circulaire"));
+        p.objets[0].modifs = l(&id(&p, 1));
+        p.objets[1].modifs = J::Liste(vec![neuf("booleen", Some(&id(&p, 0)))]);
         assert_eq!(ev(&p, 1).erreurs[0], None);
         assert_eq!(ev(&p, 0).erreurs[0], None, "b, évalué sous a, voit la boucle et reste entier");
         let mut c = Cache::new();
         evaluer(&p, 1, &[0], &mut c);
-        assert_eq!(c["b"].erreurs[0].as_deref(), Some("dépendance circulaire"));
+        assert_eq!(c[&id(&p, 1)].erreurs[0].as_deref(), Some("dépendance circulaire"));
     }
 
     #[test]
@@ -349,7 +356,7 @@ mod tests {
     fn un_resultat_vide_peut_continuer_la_pile() {
         let mut p = scene();
         p.objets[1].position = [5.0, 0.0, 0.0];
-        let mut m = neuf("booleen", Some("b"));
+        let mut m = neuf("booleen", Some(&id(&p, 1)));
         fixer(&mut m, "op", J::Txt("intersection".into()));
         p.objets[0].modifs = J::Liste(vec![m, neuf("repetition", None)]);
         let e = ev(&p, 0);
@@ -360,7 +367,7 @@ mod tests {
     #[test]
     fn appliquer_ne_prend_qu_un_modifieur_meme_eteint() {
         let mut p = scene();
-        let mut m = neuf("booleen", Some("b"));
+        let mut m = neuf("booleen", Some(&id(&p, 1)));
         fixer(&mut m, "actif", J::Bool(false));
         p.objets[0].modifs = J::Liste(vec![neuf("repetition", None), m]);
         assert!((volume(&appliquer(&p, 0, 1).unwrap()) - 0.5).abs() < 1e-9);

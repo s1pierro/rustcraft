@@ -203,9 +203,9 @@ impl Objet {
         }
     }
 
-    /// Les modifieurs booléens désignent leur cible par son nom : ils suivent ces
-    /// renommages (ancien, nouveau).
-    pub fn suivre_cibles(&mut self, noms: &[(String, String)]) {
+    /// Les modifieurs booléens désignent leur cible par son identifiant : ils suivent ces
+    /// changements (ancien, nouveau).
+    pub fn suivre_cibles(&mut self, ids: &[(String, String)]) {
         let J::Liste(l) = &mut self.modifs else { return };
         for m in l {
             let J::Objet(c) = m else { continue };
@@ -214,7 +214,7 @@ impl Objet {
             }
             for (k, v) in c {
                 if let (true, J::Txt(t)) = (k == "cible", v) {
-                    if let Some((_, n)) = noms.iter().find(|(a, _)| a == t) {
+                    if let Some((_, n)) = ids.iter().find(|(a, _)| a == t) {
                         *t = n.clone();
                     }
                 }
@@ -253,21 +253,17 @@ fn echelle(j: Option<&J>) -> [f64; 3] {
 
 impl Projet {
     /// Ajoute les objets d'un autre projet dans le set `set`, et rend leurs rangs. Les
-    /// noms pris sont changés, jusque dans les modifieurs booléens qui les désignent ;
-    /// un matériau de même nom mais différent reste distinct.
+    /// noms et identifiants pris sont changés, les identifiants jusque dans les liaisons et
+    /// les modifieurs booléens qui les désignent ; un matériau de même nom mais différent
+    /// reste distinct.
     pub fn fusionner(&mut self, autre: Projet, set: &str) -> Vec<usize> {
         let Projet { mut objets, materiaux, textures, .. } = autre;
         self.textures.extend(textures);
 
-        // Noms d'objets : d'abord tous décidés, une cible peut suivre son objet
-        let mut noms: Vec<(String, String)> = Vec::new();
+        // Noms d'objets : libres dans la scène
         let mut pris: Vec<Objet> = self.objets.clone();
         for o in &mut objets {
-            let n = crate::edition::nom_libre(&pris, &o.nom);
-            if n != o.nom {
-                noms.push((o.nom.clone(), n.clone()));
-            }
-            o.nom = n;
+            o.nom = crate::edition::nom_libre(&pris, &o.nom);
             pris.push(o.clone());
         }
 
@@ -318,7 +314,7 @@ impl Projet {
                     }
                 }
             }
-            o.suivre_cibles(&noms);
+            o.suivre_cibles(&suivis);
             self.objets.push(o);
         }
         (debut..self.objets.len()).collect()
@@ -411,7 +407,23 @@ impl Projet {
         }
         let mut r = Projet { objets, sets, actif, curseur, materiaux, textures };
         r.verifier();
+        r.cibles_en_identifiants();
         Ok(r)
+    }
+
+    /// Jusqu'à Rustcraft 0.47 (et dans GDA), un booléen désignait sa cible par son nom :
+    /// une cible qui n'est pas un identifiant mais le nom d'un objet prend son identifiant.
+    fn cibles_en_identifiants(&mut self) {
+        let ids: HashSet<String> = self.objets.iter().map(|o| o.id.clone()).collect();
+        let mut noms: Vec<(String, String)> = Vec::new();
+        for o in &self.objets {
+            if !ids.contains(&o.nom) && !noms.iter().any(|(n, _)| *n == o.nom) {
+                noms.push((o.nom.clone(), o.id.clone()));
+            }
+        }
+        for o in &mut self.objets {
+            o.suivre_cibles(&noms);
+        }
     }
 
     /// `_verifierSets` et `_verifierMateriaux` : chaque objet a son set et son matériau.
@@ -830,7 +842,7 @@ mod tests {
         let mut a = Projet::neuf();
         a.materiaux.push(("bois".into(), Materiau::neuf(Some("#112233"))));
         let t = r##"{"format":"gda","version":9,"materiaux":{"bois":{"couleur":"#445566"},"inutile":{"couleur":"#778899"}},"scene":{"objets":[
-          {"nom":"cube","materiau":"bois","maillage":{"v":[[0,0,0],[1,0,0],[0,1,0]],"f":[["bois",0,1,2]]},"modifs":[{"type":"booleen","op":"union","cible":"cube"}]}]}}"##;
+          {"id":"x1","nom":"cube","materiau":"bois","maillage":{"v":[[0,0,0],[1,0,0],[0,1,0]],"f":[["bois",0,1,2]]},"modifs":[{"type":"booleen","op":"union","cible":"cube"}]}]}}"##;
         let l = a.fusionner(Projet::lire(t).unwrap(), SET_DEFAUT);
         assert_eq!(l, [1]);
         let o = &a.objets[1];
@@ -839,7 +851,14 @@ mod tests {
         assert_eq!(a.materiau("bois").unwrap().couleur, "#112233");
         assert!(a.materiau("inutile").is_none());
         let J::Liste(l) = &o.modifs else { panic!() };
-        assert_eq!(l[0].get("cible"), Some(&J::Txt("cube 2".into())));
+        assert_eq!(o.id, "x1");
+        assert_eq!(l[0].get("cible"), Some(&J::Txt("x1".into())), "l'ancien nom devient l'identifiant");
+        // Le même fichier, deux fois : la cible suit le nouvel identifiant
+        let l = a.fusionner(Projet::lire(t).unwrap(), SET_DEFAUT);
+        let o = &a.objets[l[0]];
+        assert_ne!(o.id, "x1");
+        let J::Liste(m) = &o.modifs else { panic!() };
+        assert_eq!(m[0].get("cible"), Some(&J::Txt(o.id.clone())));
     }
 
     #[test]

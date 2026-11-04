@@ -380,6 +380,7 @@ fn main() {
             p.objets[0].modifs = rustcraft::json::lire(r#"[{"type":"booleen","op":"difference","cible":"percage","actif":true}]"#).unwrap();
             let mut o = p.objets[0].clone();
             o.nom = "percage".into();
+            o.id = "percage".into();
             o.maillage = Arc::new(Maillage::cylindre(0.5, 3.0, 32, false));
             o.modifs = rustcraft::json::J::Liste(Vec::new());
             o.position = [0.3, 0.0, 0.3];

@@ -12,7 +12,7 @@ ouvrez la page, puis touchez le fichier `.apk`.
 
 ## État
 
-Version 0.47 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
+Version 0.48 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
 
 - Projets `.gda` des formats 1 à 10, fichiers OBJ, STL, glTF et GLB ; Rustcraft écrit
   le format 10, que GDA n'ouvre pas
@@ -112,6 +112,9 @@ modifieurs.
 
 Depuis le panneau Fichier, ou depuis un gestionnaire de fichiers : **Ouvrir avec** ou
 **Partager**, puis Rustcraft.
+
+Le format des projets `.gda` (version 10) et l'export pour S.A.G.E. sont décrits dans
+[docs/format-gda.md](docs/format-gda.md).
 
 ## Organisation
 
