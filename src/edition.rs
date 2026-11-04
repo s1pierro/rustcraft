@@ -7,46 +7,10 @@ use crate::maillage::{Maillage, P3};
 use crate::projet::{Materiau, Objet, Set};
 use std::sync::Arc;
 
-pub type Q = [f64; 4];
+pub use gda::quat::{qappliquer, qaxe, qinv, qmul, qnorm, Q};
 
 /// Étapes d'annulation conservées.
 pub const HISTOIRE: usize = 60;
-
-pub fn qmul(a: Q, b: Q) -> Q {
-    let [ax, ay, az, aw] = a;
-    let [bx, by, bz, bw] = b;
-    [
-        ax * bw + aw * bx + ay * bz - az * by,
-        ay * bw + aw * by + az * bx - ax * bz,
-        az * bw + aw * bz + ax * by - ay * bx,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ]
-}
-
-pub fn qnorm(q: Q) -> Q {
-    let l = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-    if l == 0.0 { [0.0, 0.0, 0.0, 1.0] } else { [q[0] / l, q[1] / l, q[2] / l, q[3] / l] }
-}
-
-pub fn qinv(q: Q) -> Q {
-    [-q[0], -q[1], -q[2], q[3]]
-}
-
-/// Rotation d'angle `a` autour de l'axe unitaire `u`.
-pub fn qaxe(u: P3, a: f64) -> Q {
-    let s = (a / 2.0).sin();
-    [u[0] * s, u[1] * s, u[2] * s, (a / 2.0).cos()]
-}
-
-pub fn qappliquer(q: Q, v: P3) -> P3 {
-    let [x, y, z, w] = q;
-    let t = [2.0 * (y * v[2] - z * v[1]), 2.0 * (z * v[0] - x * v[2]), 2.0 * (x * v[1] - y * v[0])];
-    [
-        v[0] + w * t[0] + y * t[2] - z * t[1],
-        v[1] + w * t[1] + z * t[0] - x * t[2],
-        v[2] + w * t[2] + x * t[1] - y * t[0],
-    ]
-}
 
 fn q_matrice(q: Q) -> [f64; 16] {
     crate::maillage::composer([0.0; 3], q, [1.0; 3])

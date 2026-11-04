@@ -69,6 +69,11 @@ fn main() {
         Vue { nom: "pose-limites-geo", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-deplacer", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(1), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-animation", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(1), mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "melange", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "melange-couche-1000", w: 1200, h: 1920, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "melange-couche-1700", w: 1200, h: 1920, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "melange-couche-2400", w: 1200, h: 1920, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "melange-couche", w: 1200, h: 1920, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-tirer", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "pose-scene", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "curseur", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
@@ -200,6 +205,21 @@ fn main() {
             if s.nom == "liaison-fiche" {
                 app.lier();
             }
+            app.recadrer();
+        }
+        if s.nom.starts_with("melange") {
+            // Le projet ouvert (hb-01-repos-vivant.gda) : son armature joue « Repos vivant » à 1,5 s
+            let k = app.projet.objets.iter().position(|o| o.armature.is_some()).expect("un projet avec une armature");
+            app.choisir(Some(k));
+            app.entrer_armature();
+            app.basculer_pose();
+            app.melange_choisi = Some(0);
+            if s.nom.starts_with("melange-couche") {
+                app.couche_choisie = Some(1);
+            }
+            app.aller_a(1.5);
+            app.contenu = Contenu::Os;
+            app.onglet_os = 2;
             app.recadrer();
         }
         if s.nom.starts_with("pose") {
@@ -453,13 +473,20 @@ fn main() {
                 _ => app.ouvrir_uv(),
             }
         }
-        if s.nom.starts_with("armature") || s.nom == "pose" || s.nom.starts_with("pose-limites") || s.nom == "pose-tirer" || s.nom.starts_with("sets") || s.nom == "modifieurs" || s.nom.starts_with("vis") || s.nom.starts_with("uv") || s.nom.starts_with("materiaux") {
+        if s.nom.starts_with("armature") || s.nom == "pose" || s.nom.starts_with("melange") || s.nom.starts_with("pose-limites") || s.nom == "pose-tirer" || s.nom.starts_with("sets") || s.nom == "modifieurs" || s.nom.starts_with("vis") || s.nom.starts_with("uv") || s.nom.starts_with("materiaux") {
             let t0 = std::time::Instant::now();
             let sc = etape(&mut app, &mut ui, &mut text, &mut dl);
             render.draw(w, h, &sc, &dl, &mut text);
             app.attendre_calculs();
             println!("{} : calcul {:.0} ms", s.nom, t0.elapsed().as_secs_f64() * 1e3);
             for _ in 0..30 {
+                let sc = etape(&mut app, &mut ui, &mut text, &mut dl);
+                render.draw(w, h, &sc, &dl, &mut text);
+            }
+        }
+        if let Some(d) = s.nom.strip_prefix("melange-couche").and_then(|x| x.strip_prefix('-')).and_then(|x| x.parse::<f32>().ok()) {
+            app.defiler_panneaux(d);
+            for _ in 0..3 {
                 let sc = etape(&mut app, &mut ui, &mut text, &mut dl);
                 render.draw(w, h, &sc, &dl, &mut text);
             }

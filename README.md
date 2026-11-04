@@ -12,11 +12,18 @@ ouvrez la page, puis touchez le fichier `.apk`.
 
 ## État
 
-Version 0.48 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
+Version 0.52 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
 
 - Projets `.gda` des formats 1 à 10, fichiers OBJ, STL, glTF et GLB ; Rustcraft écrit
   le format 10, que GDA n'ouvre pas
 - Rendus Solide, En jeu et Rayons X, éclairage de GDA
+- Faces retournées à l'import : un fichier dont les faces regardent vers l'intérieur
+  (comme ceux des visualiseurs web qui dessinent tout des deux côtés) est remis à
+  l'endroit, et le message le dit ; « Retourner les faces », dans la fiche de l'objet,
+  le refait à la main sur les objets choisis
+- Matériaux « Deux côtés » (onglet Matériaux, en jeu et à l'export) : l'envers se voit
+  en rendu En jeu, pour les feuillages, grilles et vitres ; lu et écrit en glTF
+  (`doubleSided`)
 - Textures PNG et JPEG à l'import : un `.glb` les contient, un `.obj` se choisit avec
   son `.mtl` et ses images ; visibles en rendu En jeu, gardées dans le `.gda` et à
   l'export : intégrées au GLB, en `.mtl` et images à côté de l'OBJ
@@ -83,7 +90,14 @@ Version 0.48 : **édition en modes Scène, Géométrie et Pose, armatures, modif
   que la pose ; « Sauvegarder la pose » la garde dans l'onglet Catalogue, d'où elle se
   rappelle, se renomme, se remplace ou se supprime ; l'onglet Animation garde des
   animations (nom, durée, boucle) faites de clés de pose sur une ligne de temps à
-  24 images par seconde, interpolées os par os, lues en boucle ou une fois ; un objet lié à
+  24 images par seconde, interpolées os par os, lues en boucle ou une fois, et les
+  mélanges de l'armature : des animations jouées ensemble en couches (normales ou
+  additives, avec poids, masque d'os et vitesse), lus en boucle sur leur durée commune,
+  qui se créent et se règlent au toucher : pile de couches (animation, mode, poids,
+  masque, vitesse, décalage, activation, solo), clés posées sur une couche en voyant tout
+  le mélange, masques faits de l'os actif et de ses descendants, et « Aplatir » en une
+  animation normale, une clé par image ;
+  un objet lié à
   un seul os le suit, un objet lié à un groupe se déforme selon des poids automatiques
   (diffusion de chaleur sur la surface, 4 os au plus par sommet), recalculés quand le
   maillage ou les os changent ; pose gardée dans le `.gda`, retour au repos par os ou en
@@ -100,7 +114,10 @@ Version 0.48 : **édition en modes Scène, Géométrie et Pose, armatures, modif
   valide pour le validateur de Khronos : un nœud par os au repos, une peau (JOINTS_0,
   WEIGHTS_0, matrices de liaison inverses) aux poids peints ou calculés, une animation
   glTF par animation (rotation, et translation des os qui glissent) ; longueurs et limites
-  des os, ancre, poses nommées, boucle et durée dans les `extras`
+  des os, ancre, poses nommées, boucle et durée dans les `extras` ; les mélanges en
+  couches (identifiants, mode et référence des animations, masques et mélanges dans les
+  `extras`, extras au format 3, recomposés par S.A.G.E.) ou aplatis en animations
+  ordinaires, lisibles par tout moteur
 
 
 Les limites de rotation suivent l'ordre des curseurs (X, puis Z, puis la vrille Y) ;
@@ -118,18 +135,18 @@ Le format des projets `.gda` (version 10) et l'export pour S.A.G.E. sont décrit
 
 ## Organisation
 
-- `src/maillage.rs`, `json.rs`, `projet.rs`, `texture.rs` : le modèle, sans dépendance
-  graphique
+- La crate [`gda`](https://github.com/s1pierro/gda-modele), partagée avec S.A.G.E. : JSON, quaternions, maillages,
+  armatures, animations, couches (masques et mélanges), saisie directe, peau, export et
+  relecture du `.glb` pour S.A.G.E. ; Rustcraft la réexporte sous les mêmes noms de
+  modules
+- `src/projet.rs`, `texture.rs` : le projet et ses textures, sans dépendance graphique
 - `src/actions.rs` : le catalogue des opérations, source des panneaux, de l'aide et de la barre rapide
 - `src/edition.rs` : poses, pivots, gestes, annulation, sans interface
 - `src/geometrie.rs` : sélection et opérations du mode Géométrie, sans interface
 - `src/booleens.rs`, `modifs.rs` : opérations booléennes et évaluation des modifieurs
 - `src/primitives.rs`, `visserie.rs` : réglages des primitives, pièces de visserie
-- `src/armature.rs` : os, hiérarchie, pose, limites, bouts soudés et sélection des os, sans interface
-- `src/animation.rs` : animations d'une armature, clés de pose et interpolation par os (forme glTF)
-- `src/sage.rs` : export d'un personnage (armature, peau, animations) en `.glb` pour S.A.G.E.
-- `src/marionnette.rs` : saisie directe d'une armature posée, l'ancre restant fixe, sans interface
-- `src/peau.rs` : poids automatiques et déformation des objets liés à un groupe d'os, sans interface
+- `src/peau.rs` : la liaison des objets du projet à leur armature, par-dessus la peau de
+  `gda`
 - `src/uv.rs` : points, îlots et transformations des coordonnées de texture, sans interface
 - `src/vue.rs`, `editeur.rs` : du modèle à l'écran, et l'interface de l'éditeur
 - `src/ui.rs`, `shell.rs`, `widgets.rs`, `draw.rs`, `text.rs` : le socle d'interface,
@@ -138,6 +155,11 @@ Le format des projets `.gda` (version 10) et l'export pour S.A.G.E. sont décrit
 - `java/` : la seule classe Java, qui reçoit le résultat du sélecteur de fichiers
 - `examples/apercu.rs` : dessine l'application hors écran, sur le processeur
   graphique de l'appareil
+- `examples/repos_vivant.rs` : prépare la démonstration des couches sur
+  `hb-01-repos.gda` (respiration additive masquée sur le transfert d'appui)
+- `examples/exporter_sage.rs` : exporte l'armature d'un projet pour S.A.G.E., en
+  couches et aplatie
+- `examples/aller_retour.rs` : relit un projet et le réécrit, pour comparer
 
 ## Tests
 
@@ -177,14 +199,21 @@ vrai `moteur/peau.js` :
 ## Dépendances
 
 `png` et `jpeg-decoder` décodent les images des textures. `boolmesh` (MPL-2.0) calcule
-les opérations booléennes.
+les opérations booléennes. Le modèle (maillages, armatures, peaux, animations, format
+`.gda`) vient de [gda](https://github.com/s1pierro/gda-modele), partagé avec
+[S.A.G.E.](https://github.com/s1pierro/sage).
 
 ## Construire l'APK
 
-Dans [Termux](https://termux.dev), avec le Rust natif :
+Rustcraft attend gda dans un dossier `gda` voisin :
+
+    git clone https://github.com/s1pierro/gda-modele gda
+    git clone https://github.com/s1pierro/rustcraft
+
+Puis, dans [Termux](https://termux.dev), avec le Rust natif :
 
     pkg install rust aapt apksigner zip unzip curl openjdk-17 d8
-    bash build.sh
+    cd rustcraft && bash build.sh
 
 L'APK est produit dans `dist/rustcraft.apk`. La compilation a lieu dans
 `~/.cache/rust-apk/rustcraft`.

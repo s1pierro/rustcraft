@@ -1,6 +1,6 @@
 [package]
 name = "rustcraft"
-version = "0.48.0"
+version = "0.52.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 
@@ -8,6 +8,8 @@ license = "PolyForm-Noncommercial-1.0.0"
 # les textures ; boolmesh calcule les booléens. OpenGL ES est chargé à l'exécution via dlopen : les libEGL de Termux
 # (Mesa) n'existent pas sur Android, il ne faut surtout pas lier dessus.
 [dependencies]
+# Le modèle partagé avec S.A.G.E. (maillages, armatures, peaux, animations, format .gda)
+gda = { path = "../gda" }
 fontdue = "0.9"
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"

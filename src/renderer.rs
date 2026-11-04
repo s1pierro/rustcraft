@@ -174,6 +174,8 @@ vec3 srgb(vec3 c) {
 }
 void main() {
   vec3 n = normalize(v_n);
+  // L'envers d'une face à deux côtés s'éclaire comme son endroit
+  if (!gl_FrontFacing) n = -n;
   vec3 ciel = mix(SOL, vec3(1.0), 0.5 * n.y + 0.5) * 1.1;
   vec3 e = ciel + vec3(2.2 * max(dot(n, u_lumiere), 0.0));
   vec3 albedo = u_albedo, emission = u_emission;
@@ -602,7 +604,16 @@ impl Renderer {
             (gl.glActiveTexture)(0x84C0);
         }
         (gl.glBindVertexArray)(g.vao);
+        // Un matériau à deux côtés : l'envers se dessine aussi (les objets se dessinent
+        // toujours envers cachés)
+        let cache = o.deux_cotes;
+        if cache {
+            (gl.glDisable)(CULL_FACE);
+        }
         (gl.glDrawArrays)(TRIANGLES, 0, g.nb);
+        if cache {
+            (gl.glEnable)(CULL_FACE);
+        }
         // L'envers d'une face de la copie de travail se voit, teinté, sans éclairage
         if let Some(e) = o.envers {
             (gl.glCullFace)(0x0404);

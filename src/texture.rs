@@ -70,9 +70,7 @@ pub fn identifiant(octets: &[u8]) -> String {
 }
 
 /// Type de l'image, d'après son contenu.
-pub fn mime(d: &[u8]) -> &'static str {
-    if d.starts_with(&[0xFF, 0xD8]) { "image/jpeg" } else { "image/png" }
-}
+pub use crate::maillage::mime;
 
 /// Nom de fichier de chaque texture, à l'export : sans chemin ni espace, l'extension
 /// suivant le contenu, et unique même sans tenir compte de la casse.

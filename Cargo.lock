@@ -96,6 +96,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gda"
+version = "0.1.0"
+
+[[package]]
 name = "glam"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -159,10 +163,11 @@ dependencies = [
 
 [[package]]
 name = "rustcraft"
-version = "0.48.0"
+version = "0.52.0"
 dependencies = [
  "boolmesh",
  "fontdue",
+ "gda",
  "jpeg-decoder",
  "png",
 ]

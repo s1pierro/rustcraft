@@ -100,6 +100,7 @@ pub enum Action {
     AucunOs,
     DescendantsOs,
     ExporterSage,
+    ExporterSageAplati,
 }
 
 /// Panneau où figure l'opération.
@@ -278,7 +279,7 @@ impl Contexte {
             }
             return match a {
                 Ouvrir | Enregistrer | Importer | ExporterObj | ExporterStl | ExporterGlb | ExporterMtl | NouvelleScene | Recadrer | CurseurOrigine | CurseurVue | CurseurScene | VueCurseur | AjouterArmature | AjouterHumanoide => true,
-                ExporterSage => self.personnage,
+                ExporterSage | ExporterSageAplati => self.personnage,
                 AjouterOs | TousOs => self.os_ouvert,
                 ExporterSelectionObj | ExporterSelectionStl | ExporterSelectionGlb => self.choisis > 0,
                 CurseurSelection | SelectionCurseur | AucunOs => self.bouts > 0,
@@ -293,7 +294,7 @@ impl Contexte {
         }
         match a {
             Ouvrir | Enregistrer | Importer | ExporterObj | ExporterStl | ExporterGlb | ExporterMtl | NouvelleScene | Recadrer | CurseurOrigine | CurseurVue | CurseurScene | VueCurseur => true,
-            ExporterSage => self.personnage,
+            ExporterSage | ExporterSageAplati => self.personnage,
             ExporterSelectionObj | ExporterSelectionStl | ExporterSelectionGlb => self.choisis > 0,
             CurseurSelection | SelectionCurseur => {
                 if self.geo {
@@ -1120,8 +1121,16 @@ pub const CATALOGUE: &[Op] = &[
         action: Action::ExporterSage,
         menu: Menu::Exporter,
         rubrique: "Personnage pour S.A.G.E.",
-        libelle: "GLB animé",
-        aide: "exporter l’armature active (ou celle de l’objet actif) et ses objets liés en un .glb : os au repos, peau aux poids calculés ou peints, animations ; longueurs, limites, ancre et poses nommées dans les extras",
+        libelle: "GLB animé, en couches",
+        aide: "exporter l’armature active (ou celle de l’objet actif) et ses objets liés en un .glb : os au repos, peau aux poids calculés ou peints, animations telles quelles ; longueurs, limites, ancre, poses nommées, mode des animations, masques et mélanges dans les extras, que S.A.G.E. recompose",
+        barre: None,
+    },
+    Op {
+        action: Action::ExporterSageAplati,
+        menu: Menu::Exporter,
+        rubrique: "Personnage pour S.A.G.E.",
+        libelle: "GLB animé, mélanges aplatis",
+        aide: "le même .glb, où chaque mélange devient en plus une animation ordinaire, une clé par image : lisible par tout moteur",
         barre: None,
     },
 ];
@@ -1136,7 +1145,7 @@ mod tests {
         for (k, o) in CATALOGUE.iter().enumerate() {
             assert_eq!(o.action as usize, k, "{:?}", o.action);
         }
-        assert_eq!(CATALOGUE.len(), Action::ExporterSage as usize + 1);
+        assert_eq!(CATALOGUE.len(), Action::ExporterSageAplati as usize + 1);
     }
 
     #[test]

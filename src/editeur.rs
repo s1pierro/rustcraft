@@ -90,6 +90,9 @@ const CLE_FACES: usize = 1;
 const CLE_CHOISIES: usize = 2;
 /// Numéros d'ordre affichés au plus sur les sommets choisis.
 const MAX_NUMEROS: usize = 24;
+/// Ce que dit un import dont les faces regardaient vers l'intérieur.
+const RETOURNEES: &str = ", faces retournées (elles regardaient vers l'intérieur)";
+
 /// Opacité des objets non édités, et des faces en Rayons X.
 const OPACITE_PASSIF: f32 = 0.4;
 const AUCUN_PARENT: &str = "— aucun —";
@@ -163,6 +166,8 @@ pub struct ObjetVue {
     pub envers: Option<[f32; 3]>,
     /// Dessiné après les autres, à travers eux : une armature au premier plan.
     pub devant: bool,
+    /// Ses faces se voient des deux côtés (matériau « Deux côtés », en rendu En jeu).
+    pub deux_cotes: bool,
 }
 
 /// Fil, points et arêtes choisies de la copie de travail.
@@ -340,6 +345,13 @@ pub enum Champ {
     AnimNom,
     AnimDuree,
     AnimTemps,
+    /// Mélange choisi : son nom ; sa couche choisie : vitesse et décalage ; le masque
+    /// choisi : son nom ; la durée à aplatir.
+    MelangeNom,
+    CoucheVitesse,
+    CoucheDecalage,
+    MasqueNom,
+    AplatirDuree,
     /// Code d'une couleur du matériau de l'objet actif.
     MatCode(usize),
     /// Champ du panneau d'ajout : son rang et son libellé.
@@ -380,6 +392,11 @@ impl Champ {
             Champ::AnimNom => "Nom de l'animation".into(),
             Champ::AnimDuree => "Durée (s)".into(),
             Champ::AnimTemps => "Instant (s)".into(),
+            Champ::MelangeNom => "Nom du mélange".into(),
+            Champ::CoucheVitesse => "Vitesse de la couche".into(),
+            Champ::CoucheDecalage => "Décalage de la couche (s)".into(),
+            Champ::MasqueNom => "Nom du masque".into(),
+            Champ::AplatirDuree => "Durée à aplatir (s)".into(),
             Champ::OsLongueur => "Longueur de l'os".into(),
             Champ::OsLimite(k, max) => format!("{} {}{}", if max { "Maximum" } else { "Minimum" }, if k >= 3 { "translation " } else { "" }, NOMS_AXES[k % 3]),
             Champ::MatCode(k) => format!("{} (#rrggbb)", COULEURS_MAT[k].0),
@@ -389,7 +406,7 @@ impl Champ {
 
     /// Champ qui accepte du texte, pas seulement un nombre.
     fn libre(self) -> bool {
-        matches!(self, Champ::Nom | Champ::Projet | Champ::Couleur(_) | Champ::MatNom | Champ::MatCode(_) | Champ::SetNom | Champ::OsNom | Champ::PoseNom | Champ::AnimNom)
+        matches!(self, Champ::Nom | Champ::Projet | Champ::Couleur(_) | Champ::MatNom | Champ::MatCode(_) | Champ::SetNom | Champ::OsNom | Champ::PoseNom | Champ::AnimNom | Champ::MelangeNom | Champ::MasqueNom)
     }
 }
 
@@ -802,6 +819,18 @@ pub struct App {
     pub onglet_os: usize,
     /// Animation choisie de l'armature ouverte, l'instant montré, et la lecture.
     pub anim_choisie: Option<usize>,
+    /// Le mélange choisi, joué à la place d'une animation.
+    pub melange_choisi: Option<usize>,
+    /// Dans le mélange choisi : la couche choisie, celle jouée seule, et le masque
+    /// choisi. La mise en solo ne s'enregistre pas.
+    pub couche_choisie: Option<usize>,
+    pub couche_solo: Option<usize>,
+    pub masque_choisi: Option<usize>,
+    /// Le glissé du poids d'une couche ne fait qu'une étape d'annulation.
+    couche_tenue: bool,
+    masque_tenu: bool,
+    /// La durée à aplatir, quand elle n'est pas celle où les couches se rejoignent.
+    aplatir_duree: Option<f64>,
     pub anim_temps: f64,
     pub anim_lecture: bool,
     pose_choisie: Option<usize>,
@@ -903,6 +932,13 @@ impl App {
             os_plies: HashSet::new(),
             onglet_os: 0,
             anim_choisie: None,
+            melange_choisi: None,
+            couche_choisie: None,
+            couche_solo: None,
+            masque_choisi: None,
+            couche_tenue: false,
+            masque_tenu: false,
+            aplatir_duree: None,
             anim_temps: 0.0,
             anim_lecture: false,
             pose_choisie: None,
@@ -1872,6 +1908,13 @@ impl App {
         if o != m.opacite as f32 * 100.0 {
             self.regler_materiau(nom, |m| m.opacite = o as f64 / 100.0);
         }
+        let mut deux = m.deux_cotes;
+        cx.toggle(b, id("mat-deux-cotes"), "Deux côtés", &mut deux);
+        if deux != m.deux_cotes {
+            self.regler_materiau(nom, |m| m.deux_cotes = deux);
+            self.mat_saisie = false;
+            self.dire(if deux { "Faces visibles des deux côtés : feuillages, grilles, vitres".into() } else { "Faces visibles de face seulement".into() });
+        }
         let (mut e, z) = (m.illumination as f32, id("mat-illum"));
         let rang = (m.illumination.round() as usize).min(10);
         cx.slider(b, z, "Éclairage", &format!("{rang} · {}", ILLUM[rang]), &mut e, 0.0, 10.0);
@@ -2071,24 +2114,35 @@ impl App {
     pub fn ouvrir(&mut self, nom: &str, contenu: &[u8]) {
         let base = nom.rsplit_once('.').map_or(nom, |x| x.0).to_string();
         match Self::lire(nom, contenu, &[]) {
-            Ok((p, _)) => {
+            Ok((p, _, envers)) => {
                 self.remplacer(p, &base);
                 let n = self.projet.objets.len();
-                self.dire(format!("« {base} » ouvert : {n} objet{}", if n > 1 { "s" } else { "" }));
+                self.dire(format!("« {base} » ouvert : {n} objet{}{}", if n > 1 { "s" } else { "" }, if envers { RETOURNEES } else { "" }));
             }
             Err(e) => self.dire(format!("Ouverture impossible : {e}")),
         }
     }
 
-    fn lire(nom: &str, contenu: &[u8], annexes: &[(String, Vec<u8>)]) -> Result<(Projet, Vec<String>), String> {
+    /// Le projet d'un fichier, les textures qui lui manquent, et si ses faces ont été
+    /// retournées : un fichier 3D dont les faces regardent vers l'intérieur (comme en
+    /// exportent les visualiseurs qui dessinent tout des deux côtés) est remis à l'endroit.
+    fn lire(nom: &str, contenu: &[u8], annexes: &[(String, Vec<u8>)]) -> Result<(Projet, Vec<String>, bool), String> {
         let ext = maillage::extension(nom);
         let gda = ext == "gda" || contenu.iter().find(|c| !c.is_ascii_whitespace()) == Some(&b'{') && ext != "gltf";
         if gda {
             let p = std::str::from_utf8(contenu).map_err(|_| "fichier .gda illisible".to_string()).and_then(Projet::lire)?;
-            Ok((p, Vec::new()))
-        } else {
-            Projet::depuis_fichiers(nom, contenu, annexes)
+            return Ok((p, Vec::new(), false));
         }
+        let (mut p, manquantes) = Projet::depuis_fichiers(nom, contenu, annexes)?;
+        let envers = Maillage::a_l_envers(&p.objets.iter().filter(|o| o.armature.is_none()).map(|o| &*o.maillage).collect::<Vec<_>>());
+        if envers {
+            for o in p.objets.iter_mut().filter(|o| o.armature.is_none()) {
+                let mut m = (*o.maillage).clone();
+                m.retourner();
+                o.maillage = Arc::new(m);
+            }
+        }
+        Ok((p, manquantes, envers))
     }
 
     /// Ajoute le contenu d'un fichier à la scène, l'origine du fichier sur le curseur 3D.
@@ -2107,7 +2161,7 @@ impl App {
         let k = fichiers.iter().position(|(n, _)| est_3d(n)).unwrap_or(0);
         let (nom, contenu) = fichiers.remove(k);
         let base = nom.rsplit_once('.').map_or(&*nom, |x| x.0).to_string();
-        let (mut p, manquantes) = match Self::lire(&nom, &contenu, &fichiers) {
+        let (mut p, manquantes, envers) = match Self::lire(&nom, &contenu, &fichiers) {
             Ok(x) => x,
             Err(e) => return self.dire(format!("Import impossible : {e}")),
         };
@@ -2129,7 +2183,7 @@ impl App {
         if nb_images > 0 {
             self.rendu = Rendu::Jeu; // le rendu Solide est neutre : rien ne se verrait
         }
-        let mut m = format!("« {base} » importé : {n} objet{}", if n > 1 { "s" } else { "" });
+        let mut m = format!("« {base} » importé : {n} objet{}{}", if n > 1 { "s" } else { "" }, if envers { RETOURNEES } else { "" });
         if nb_images > 0 {
             m += &format!(", {nb_images} texture{}", if nb_images > 1 { "s" } else { "" });
         }
@@ -2560,6 +2614,11 @@ impl App {
     /// Modification mémorisée de l'armature éditée ; son dessin suit.
     fn changer_os(&mut self, f: impl FnOnce(&mut Armature, &mut EditionOs)) {
         self.memoriser();
+        self.retoucher_os(f);
+    }
+
+    /// Comme `changer_os`, sans nouvelle étape : la suite d'un glissé.
+    fn retoucher_os(&mut self, f: impl FnOnce(&mut Armature, &mut EditionOs)) {
         let Some(e) = &mut self.os else { return };
         let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
         let Some(mut a) = o.armature.take() else { return };
@@ -3860,11 +3919,16 @@ impl App {
             (Champ::OsNom, _) => return self.os_actif().map(|x| x.1.nom.clone()),
             (Champ::AnimNom, _) => return self.animation().map(|a| a.nom),
             (Champ::AnimDuree, _) => self.animation()?.duree,
+            (Champ::MelangeNom, _) => return self.melange().map(|m| m.nom),
+            (Champ::CoucheVitesse, _) => self.couche()?.vitesse,
+            (Champ::CoucheDecalage, _) => self.couche()?.decalage,
+            (Champ::MasqueNom, _) => return self.masque().map(|m| m.nom),
+            (Champ::AplatirDuree, _) => self.duree_a_aplatir()?,
             (Champ::AnimTemps, _) => {
                 self.animation()?;
                 self.anim_temps
             }
-            (Champ::PoseNom, _) => return self.armature_os().and_then(|(_, _, a)| a.poses_nommees().into_iter().nth(self.pose_choisie?)).map(|p| p.0),
+            (Champ::PoseNom, _) => return self.armature_os().and_then(|(_, _, a)| a.poses_nommees().into_iter().nth(self.pose_choisie?)).map(|p| p.nom),
             (Champ::OsLongueur, _) => self.os_actif().map(|(o, x)| x.longueur * o.echelle[0])?,
             (Champ::OsLimite(k, max), _) => {
                 let (o, x) = self.os_actif()?;
@@ -3969,6 +4033,20 @@ impl App {
             }
             Champ::OsTranslation(k) => return self.saisir_translation_os(k, v),
             Champ::AnimDuree => return self.changer_animation(|a| a.regler_duree(v)),
+            Champ::CoucheVitesse => {
+                if v.abs() < 1e-3 {
+                    return self.dire("Une vitesse nulle figerait la couche".into());
+                }
+                let v = v.clamp(-100.0, 100.0);
+                return self.changer_couche(|c| c.vitesse = v);
+            }
+            Champ::CoucheDecalage => return self.changer_couche(|c| c.decalage = (v * crate::animation::IPS).round() / crate::animation::IPS),
+            Champ::AplatirDuree => {
+                let lcm = self.duree_melange().unwrap_or(v);
+                let d = ((v.clamp(1.0 / crate::animation::IPS, 600.0)) * crate::animation::IPS).round() / crate::animation::IPS;
+                self.aplatir_duree = ((d - lcm).abs() > 1e-9).then_some(d);
+                return;
+            }
             Champ::AnimTemps => {
                 let t = self.animation().map_or(0.0, |a| a.instant(v));
                 return self.aller_a(t);
@@ -4094,6 +4172,15 @@ impl App {
                 self.renommer_os(&p.texte);
             } else if p.cible == Champ::PoseNom {
                 self.renommer_pose(&p.texte);
+            } else if p.cible == Champ::MelangeNom || p.cible == Champ::MasqueNom {
+                let nom = p.texte.trim().to_string();
+                if nom.is_empty() {
+                    self.dire("Nom vide".into());
+                } else if p.cible == Champ::MelangeNom {
+                    self.changer_melange(|m| m.nom = nom);
+                } else {
+                    self.changer_masque(|m| m.nom = nom);
+                }
             } else if p.cible == Champ::AnimNom {
                 let nom = p.texte.trim().to_string();
                 if nom.is_empty() {
@@ -4318,15 +4405,21 @@ impl App {
         Some((x.nom.clone(), pieces, mats, images))
     }
 
-    fn exporter_sage(&mut self) {
+    pub fn exporter_sage(&mut self, couches: crate::sage::Couches) {
         let Some(kx) = self.armature_a_exporter() else { return self.dire("Aucune armature à exporter".into()) };
         let Some((nom, pieces, mats, images)) = self.personnage() else { return };
         let x = &self.projet.objets[kx];
         let Some(a) = &x.armature else { return };
-        let octets = crate::sage::glb(&nom, &x.id, a, (x.position, x.rotation, x.echelle[0]), &pieces, &mats, &images);
-        let (no, np, na) = (a.os.len(), pieces.len(), a.animations().len());
+        let octets = crate::sage::glb_couches(&nom, &x.id, a, (x.position, x.rotation, x.echelle[0]), &pieces, &mats, &images, couches);
+        let (no, np, na, nm) = (a.os.len(), pieces.len(), a.animations().len(), a.melanges().len());
         self.deposer(format!("{}.glb", nom.replace('/', "-")), octets);
-        self.dire(format!("« {nom} » pour S.A.G.E. : {no} os, {np} objet{}, {na} animation{}", if np > 1 { "s" } else { "" }, if na > 1 { "s" } else { "" }));
+        let s = |n: usize| if n > 1 { "s" } else { "" };
+        let melanges = match (nm, couches) {
+            (0, _) => String::new(),
+            (_, crate::sage::Couches::EnCouches) => format!(", {nm} mélange{} en couches", s(nm)),
+            (_, crate::sage::Couches::Aplaties) => format!(", {nm} mélange{} aplati{}", s(nm), s(nm)),
+        };
+        self.dire(format!("« {nom} » pour S.A.G.E. : {no} os, {np} objet{}, {na} animation{}{melanges}", s(np), s(na)));
     }
 
     fn exporter_mtl(&mut self) {
@@ -5886,7 +5979,8 @@ impl App {
             A::ExporterSelectionGlb => self.exporter("glb", true),
             A::NouvelleScene => self.nouvelle_scene(),
             A::ExporterMtl => self.exporter_mtl(),
-            A::ExporterSage => self.exporter_sage(),
+            A::ExporterSage => self.exporter_sage(crate::sage::Couches::EnCouches),
+            A::ExporterSageAplati => self.exporter_sage(crate::sage::Couches::Aplaties),
             A::Recadrer => self.recadrer(),
             A::CurseurOrigine => {
                 self.projet.curseur = [0.0; 3];
@@ -6252,7 +6346,7 @@ impl App {
         if self.pose_choisie.is_some_and(|i| i >= poses.len()) {
             self.pose_choisie = None;
         }
-        for (i, (n, _)) in poses.iter().enumerate() {
+        for (i, n) in poses.iter().map(|p| &p.nom).enumerate() {
             if cx.row(b, sub_id(id("pose-nommee"), i), n, None, self.pose_choisie == Some(i)) {
                 self.appliquer_pose(i);
             }
@@ -6261,16 +6355,16 @@ impl App {
             return cx.paragraph(b, "Touchez une pose pour la donner à l'armature.");
         };
         cx.section(b, "POSE CHOISIE");
-        if cx.champ(b, id("pose-nom"), "Nom", coul(C::Texte), &poses[i].0) {
+        if cx.champ(b, id("pose-nom"), "Nom", coul(C::Texte), &poses[i].nom) {
             self.saisir(Champ::PoseNom);
         }
         if cx.lien(b, id("pose-remplacer"), "Remplacer par la pose actuelle") {
             self.changer_os(|a, _| {
                 let mut l = a.poses_nommees();
-                l[i].1 = a.pose.clone();
+                l[i].pose = a.pose.clone();
                 a.regler_poses(&l);
             });
-            self.dire(format!("Pose « {} » remplacée", poses[i].0));
+            self.dire(format!("Pose « {} » remplacée", poses[i].nom));
         }
         if cx.lien(b, id("pose-supprimer"), "Supprimer") {
             self.changer_os(|a, _| {
@@ -6279,7 +6373,7 @@ impl App {
                 a.regler_poses(&l);
             });
             self.pose_choisie = None;
-            self.dire(format!("Pose « {} » supprimée", poses[i].0));
+            self.dire(format!("Pose « {} » supprimée", poses[i].nom));
         }
     }
 
@@ -6287,12 +6381,12 @@ impl App {
     pub fn sauver_pose(&mut self) {
         let Some((_, _, a)) = self.armature_os() else { return };
         let l = a.poses_nommees();
-        let nom = (1..).map(|k| format!("Pose {k}")).find(|n| l.iter().all(|p| &p.0 != n)).unwrap_or_default();
+        let nom = (1..).map(|k| format!("Pose {k}")).find(|n| l.iter().all(|p| &p.nom != n)).unwrap_or_default();
         let n = l.len();
         let x = nom.clone();
         self.changer_os(move |a, _| {
             let mut l = a.poses_nommees();
-            l.push((x, a.pose.clone()));
+            l.push(crate::armature::PoseNommee::neuve(&x, a.pose.clone()));
             a.regler_poses(&l);
         });
         self.pose_choisie = Some(n);
@@ -6302,7 +6396,7 @@ impl App {
     /// Donne à l'armature ouverte la pose `i` du catalogue.
     pub fn appliquer_pose(&mut self, i: usize) {
         let Some(p) = self.armature_os().and_then(|(_, _, a)| a.poses_nommees().into_iter().nth(i)) else { return };
-        self.changer_os(|a, _| a.pose = p.1);
+        self.changer_os(|a, _| a.pose = p.pose);
         self.pose_choisie = Some(i);
     }
 
@@ -6345,12 +6439,264 @@ impl App {
         self.dire(format!("« {nom} » : une clé à 0 s, la pose du moment"));
     }
 
-    /// Montre l'instant `t` de l'animation choisie : l'armature prend la pose qu'il
-    /// donne, sans étape d'annulation.
+    /// Le mélange choisi de l'armature ouverte.
+    pub fn melange(&self) -> Option<crate::couches::Melange> {
+        let (e, _, a) = self.armature_os()?;
+        if !e.pose {
+            return None;
+        }
+        a.melanges().into_iter().nth(self.melange_choisi?)
+    }
+
+    /// Fait défiler tous les panneaux de `de` pixels : pour les aperçus.
+    pub fn defiler_panneaux(&mut self, de: f32) {
+        for v in self.scrolls.values_mut() {
+            v.0 += de;
+        }
+    }
+
+    /// Le mélange tel qu'il se joue : la couche en solo, seule, si l'une l'est.
+    fn melange_joue(&self) -> Option<crate::couches::Melange> {
+        let mut m = self.melange()?;
+        if let Some(k) = self.couche_solo.filter(|k| *k < m.couches.len()) {
+            for (j, c) in m.couches.iter_mut().enumerate() {
+                c.actif = j == k;
+            }
+        }
+        Some(m)
+    }
+
+    /// La couche choisie du mélange choisi.
+    fn couche(&self) -> Option<crate::couches::Couche> {
+        self.melange()?.couches.into_iter().nth(self.couche_choisie?)
+    }
+
+    fn masque(&self) -> Option<crate::couches::Masque> {
+        let (e, _, a) = self.armature_os()?;
+        if !e.pose {
+            return None;
+        }
+        a.masques().into_iter().nth(self.masque_choisi?)
+    }
+
+    /// La durée après laquelle le mélange joué se répète.
+    fn duree_melange(&self) -> Option<f64> {
+        let m = self.melange_joue()?;
+        Some(crate::couches::Lecteur::de(self.armature_os()?.2).duree(&m))
+    }
+
+    fn duree_a_aplatir(&self) -> Option<f64> {
+        let d = self.duree_melange()?;
+        Some(self.aplatir_duree.unwrap_or(d))
+    }
+
+    /// Choisit un mélange, ou aucun : sa couche, son solo et sa durée repartent de zéro.
+    fn choisir_melange(&mut self, i: Option<usize>) {
+        (self.melange_choisi, self.couche_choisie, self.couche_solo, self.aplatir_duree, self.anim_lecture) = (i, None, None, None, false);
+        if i.is_some() {
+            self.anim_choisie = None;
+            self.aller_a(0.0);
+        }
+    }
+
+    /// Change le mélange choisi : une étape d'annulation, et la pose suit.
+    fn changer_melange(&mut self, f: impl FnOnce(&mut crate::couches::Melange)) {
+        let Some(i) = self.melange_choisi else { return };
+        self.changer_os(|a, _| {
+            let mut l = a.melanges();
+            if let Some(m) = l.get_mut(i) {
+                f(m);
+            }
+            a.regler_melanges(&l);
+        });
+        self.aller_a(self.anim_temps);
+    }
+
+    fn changer_couche(&mut self, f: impl FnOnce(&mut crate::couches::Couche)) {
+        let Some(k) = self.couche_choisie else { return };
+        self.changer_melange(|m| {
+            if let Some(c) = m.couches.get_mut(k) {
+                f(c);
+            }
+        });
+    }
+
+    fn changer_masque(&mut self, f: impl FnOnce(&mut crate::couches::Masque)) {
+        let Some(i) = self.masque_choisi else { return };
+        self.changer_os(|a, _| {
+            let mut l = a.masques();
+            if let Some(m) = l.get_mut(i) {
+                f(m);
+            }
+            a.regler_masques(&l);
+        });
+        if self.melange_choisi.is_some() {
+            self.aller_a(self.anim_temps);
+        }
+    }
+
+    /// Un mélange neuf, d'une couche : l'animation choisie, ou la première.
+    pub fn nouveau_melange(&mut self) {
+        let Some((_, _, a)) = self.armature_os() else { return };
+        let (l, anims) = (a.melanges(), a.animations());
+        let Some(base) = self.anim_choisie.and_then(|i| anims.get(i)).or(anims.first()).map(|x| x.id.clone()) else {
+            return self.dire("Créez d'abord une animation".into());
+        };
+        let nom = (1..).map(|k| format!("Mélange {k}")).find(|n| l.iter().all(|x| &x.nom != n)).unwrap_or_default();
+        let n = l.len();
+        let x = nom.clone();
+        self.changer_os(move |a, _| {
+            let mut l = a.melanges();
+            l.push(crate::couches::Melange { couches: vec![crate::couches::Couche::de(&base)], ..crate::couches::Melange::neuf(&x) });
+            a.regler_melanges(&l);
+        });
+        self.choisir_melange(Some(n));
+        self.couche_choisie = Some(0);
+        self.dire(format!("« {nom} » : une couche"));
+    }
+
+    /// Ajoute en haut de la pile une couche de l'animation `i`.
+    fn ajouter_couche(&mut self, i: usize) {
+        let Some(id) = self.armature_os().and_then(|(_, _, a)| a.animations().into_iter().nth(i)).map(|x| x.id) else { return };
+        let mut n = 0;
+        self.changer_melange(|m| {
+            m.couches.push(crate::couches::Couche::de(&id));
+            n = m.couches.len();
+        });
+        self.couche_choisie = n.checked_sub(1);
+    }
+
+    /// Clé sur l'animation de la couche choisie : la pose montrée, une fois défaites les
+    /// autres couches, à l'instant de la couche qui correspond à celui du mélange.
+    pub fn poser_cle_couche(&mut self) {
+        let (Some(k), Some(m)) = (self.couche_choisie, self.melange_joue()) else { return };
+        let Some((_, _, a)) = self.armature_os() else { return };
+        let lecteur = crate::couches::Lecteur::de(a);
+        let Some(c) = m.couches.get(k) else { return };
+        let Some(ia) = lecteur.animations.iter().position(|x| x.id == c.animation) else { return };
+        let an = &lecteur.animations[ia];
+        if !c.actif {
+            return self.dire("La couche est éteinte : la pose montrée ne lui doit rien".into());
+        }
+        let ti = an.instant(c.temps(an, self.anim_temps));
+        if let (crate::animation::Mode::Additif, crate::animation::Reference::Cle(r)) = (an.mode, &an.reference) {
+            if an.cles.get(*r).is_some_and(|x| (x.t - ti).abs() < 1e-6) {
+                return self.dire("Cette clé est la référence de l'animation additive".into());
+            }
+        }
+        let Some(p) = lecteur.retrouver(&m, k, self.anim_temps, &a.pose) else { return };
+        let (nom, t) = (an.nom.clone(), self.anim_temps);
+        self.changer_os(|a, _| {
+            let mut l = a.animations();
+            if let Some(x) = l.get_mut(ia) {
+                x.poser_cle(ti, p);
+            }
+            a.regler_animations(&l);
+        });
+        self.aller_a(t);
+        self.dire(format!("Clé de « {nom} » à {} s", chiffres(ti)));
+    }
+
+    /// L'animation de la couche choisie, et son instant quand le mélange en est là.
+    fn instant_couche(&self) -> Option<(crate::animation::Animation, f64)> {
+        let c = self.couche()?;
+        let an = self.armature_os()?.2.animations().into_iter().find(|x| x.id == c.animation)?;
+        let t = an.instant(c.temps(&an, self.anim_temps));
+        Some((an, t))
+    }
+
+    fn retirer_cle_couche(&mut self) {
+        let Some((an, t)) = self.instant_couche() else { return };
+        let id = an.id.clone();
+        self.changer_os(|a, _| {
+            let mut l = a.animations();
+            if let Some(x) = l.iter_mut().find(|x| x.id == id) {
+                x.retirer_cle(t);
+            }
+            a.regler_animations(&l);
+        });
+        self.aller_a(self.anim_temps);
+        self.dire(format!("Clé de « {} » à {} s retirée", an.nom, chiffres(t)));
+    }
+
+    /// Le mélange joué, échantillonné à chaque image en une animation normale.
+    pub fn aplatir(&mut self) {
+        let (Some(m), Some(d)) = (self.melange_joue(), self.duree_a_aplatir()) else { return };
+        let Some((_, _, a)) = self.armature_os() else { return };
+        let noms: Vec<String> = a.animations().into_iter().map(|x| x.nom).collect();
+        let nom = std::iter::once(format!("{} aplati", m.nom)).chain((2..).map(|k| format!("{} aplati {k}", m.nom))).find(|n| !noms.contains(n)).unwrap_or_default();
+        let plat = crate::couches::Lecteur::de(a).aplatir(&m, &nom, d);
+        let n = plat.cles.len();
+        self.changer_os(move |a, _| {
+            let mut l = a.animations();
+            l.push(plat);
+            a.regler_animations(&l);
+        });
+        self.dire(format!("« {nom} » : {n} clés sur {} s", chiffres(d)));
+    }
+
+    /// Un masque neuf : l'os actif et ses descendants, ou tous les os.
+    fn nouveau_masque(&mut self) {
+        let Some((e, _, a)) = self.armature_os() else { return };
+        let l = a.masques();
+        let (os, de) = match e.actif.as_ref().and_then(|i| a.trouver(i)) {
+            Some(b) => (crate::couches::Masque::os_et_descendants(a, &b.id, 1.0), Some(b.nom.clone())),
+            None => (a.os.iter().map(|b| (b.id.clone(), 1.0)).collect(), None),
+        };
+        let nom = match &de {
+            Some(n) => std::iter::once(n.clone()).chain((2..).map(|k| format!("{n} {k}"))).find(|x| l.iter().all(|m| &m.nom != x)).unwrap_or_default(),
+            None => (1..).map(|k| format!("Masque {k}")).find(|x| l.iter().all(|m| &m.nom != x)).unwrap_or_default(),
+        };
+        let n = l.len();
+        let x = nom.clone();
+        self.changer_os(move |a, _| {
+            let mut l = a.masques();
+            l.push(crate::couches::Masque { id: String::new(), nom: x, os });
+            a.regler_masques(&l);
+        });
+        self.masque_choisi = Some(n);
+        self.dire(match de {
+            Some(b) => format!("« {nom} » : {b} et ses descendants"),
+            None => format!("« {nom} » : tous les os"),
+        });
+    }
+
+    fn supprimer_masque(&mut self) {
+        let Some(i) = self.masque_choisi else { return };
+        let Some(x) = self.masque() else { return };
+        self.changer_os(|a, _| {
+            let mut l = a.masques();
+            if i < l.len() {
+                l.remove(i);
+            }
+            // Les couches qui le portaient n'en ont plus
+            let mut m = a.melanges();
+            for c in m.iter_mut().flat_map(|m| m.couches.iter_mut()) {
+                if c.masque.as_ref() == Some(&x.id) {
+                    c.masque = None;
+                }
+            }
+            a.regler_masques(&l);
+            a.regler_melanges(&m);
+        });
+        self.masque_choisi = None;
+        if self.melange_choisi.is_some() {
+            self.aller_a(self.anim_temps);
+        }
+        self.dire(format!("« {} » supprimé", x.nom));
+    }
+
+    /// Montre l'instant `t` de l'animation ou du mélange choisi : l'armature prend la
+    /// pose qu'il donne, sans étape d'annulation.
     pub fn aller_a(&mut self, t: f64) {
         self.anim_temps = t;
-        let Some(an) = self.animation().filter(|a| !a.cles.is_empty()) else { return };
-        let p = an.pose_a(t);
+        let p = if let Some(m) = self.melange_joue() {
+            let Some((_, _, a)) = self.armature_os() else { return };
+            crate::couches::Lecteur::de(a).pose(&m, t)
+        } else {
+            let Some(an) = self.animation().filter(|a| !a.cles.is_empty()) else { return };
+            an.pose_a(t)
+        };
         let Some(e) = &mut self.os else { return };
         let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
         let Some(a) = &mut o.armature else { return };
@@ -6382,6 +6728,11 @@ impl App {
         if !self.anim_lecture {
             return;
         }
+        // Un mélange tourne en boucle sur la durée qui ramène toutes ses couches au début
+        if self.melange_choisi.is_some() {
+            let Some(d) = self.duree_melange() else { return };
+            return self.aller_a((self.anim_temps + dt) % d.max(1e-6));
+        }
         let Some(an) = self.animation() else {
             self.anim_lecture = false;
             return;
@@ -6404,19 +6755,38 @@ impl App {
         let Some((_, o, a)) = self.armature_os() else {
             return cx.paragraph(b, "Ouvrez une armature pour l'animer.");
         };
-        let (nom, l) = (o.nom.clone(), a.animations());
+        let (nom, l, melanges) = (o.nom.clone(), a.animations(), a.melanges());
+        let lecteur = crate::couches::Lecteur::de(a);
         if self.anim_choisie.is_some_and(|i| i >= l.len()) {
             (self.anim_choisie, self.anim_lecture) = (None, false);
+        }
+        if self.melange_choisi.is_some_and(|i| i >= melanges.len()) {
+            self.choisir_melange(None);
         }
         cx.section(b, &format!("ANIMATIONS DE {}", nom.to_uppercase()));
         for (i, x) in l.iter().enumerate() {
             if cx.row(b, sub_id(id("animation"), i), &x.nom, None, self.anim_choisie == Some(i)) && self.anim_choisie != Some(i) {
-                (self.anim_choisie, self.anim_lecture) = (Some(i), false);
+                (self.anim_choisie, self.melange_choisi, self.anim_lecture) = (Some(i), None, false);
                 self.aller_a(0.0);
             }
         }
         if cx.legende_lien(b, if l.is_empty() { "Aucune animation" } else { "" }, Some((id("animation-nouvelle"), "Nouvelle animation"))) {
             self.nouvelle_animation();
+        }
+        // Les mélanges : des animations jouées ensemble, en couches
+        if !l.is_empty() {
+            cx.section(b, "MÉLANGES");
+            for (i, m) in melanges.iter().enumerate() {
+                if cx.row(b, sub_id(id("melange"), i), &m.nom, None, self.melange_choisi == Some(i)) && self.melange_choisi != Some(i) {
+                    self.choisir_melange(Some(i));
+                }
+            }
+            if cx.legende_lien(b, if melanges.is_empty() { "Aucun mélange" } else { "" }, Some((id("melange-nouveau"), "Nouveau mélange"))) {
+                self.nouveau_melange();
+            }
+            if let Some(m) = self.melange_choisi.and_then(|i| melanges.get(i)) {
+                return self.panneau_melange(cx, b, m, &lecteur);
+            }
         }
         let Some(an) = self.animation() else { return };
         cx.section(b, "ANIMATION CHOISIE");
@@ -6430,6 +6800,12 @@ impl App {
         cx.toggle(b, id("animation-boucle"), "En boucle", &mut boucle);
         if boucle != an.boucle {
             self.changer_animation(|a| a.boucle = boucle);
+        }
+        // Additive : dans un mélange, son écart à sa référence s'ajoute aux couches d'en dessous
+        let mut additive = an.mode == crate::animation::Mode::Additif;
+        cx.toggle(b, id("animation-additive"), "Additive", &mut additive);
+        if additive != (an.mode == crate::animation::Mode::Additif) {
+            self.changer_animation(|a| a.mode = if additive { crate::animation::Mode::Additif } else { crate::animation::Mode::Normal });
         }
         let cles: Vec<f32> = an.cles.iter().map(|c| c.t as f32).collect();
         let ici = an.cle_a(self.anim_temps).map(|k| an.cles[k].t);
@@ -6484,6 +6860,275 @@ impl App {
         }
     }
 
+    /// Le mélange choisi : sa lecture, sa pile de couches, la couche choisie, l'aplatir
+    /// et les masques de l'armature.
+    fn panneau_melange(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, m: &crate::couches::Melange, l: &crate::couches::Lecteur) {
+        let n = m.couches.len();
+        if self.couche_choisie.is_some_and(|k| k >= n) {
+            self.couche_choisie = None;
+        }
+        if self.couche_solo.is_some_and(|k| k >= n) {
+            self.couche_solo = None;
+        }
+        let duree = self.duree_melange().unwrap_or_else(|| l.duree(m));
+        cx.section(b, "MÉLANGE CHOISI");
+        if cx.champ(b, id("melange-nom"), "Nom", coul(C::Texte), &m.nom) {
+            self.saisir(Champ::MelangeNom);
+        }
+        if let Some(t) = cx.ligne_temps(b, id("melange-temps"), duree as f32, self.anim_temps as f32, &[], None) {
+            self.anim_lecture = false;
+            self.aller_a((t as f64 * crate::animation::IPS).round() / crate::animation::IPS);
+        }
+        cx.legende_lien(b, &format!("{} s sur {} s", chiffres(self.anim_temps), chiffres(duree)), None);
+        match cx.rangee(b, id("melange-lecture"), &[("Début", self.anim_temps > 0.0), (if self.anim_lecture { "Pause" } else { "Lecture" }, n > 0)]) {
+            Some(0) => {
+                self.anim_lecture = false;
+                self.aller_a(0.0);
+            }
+            Some(1) => self.anim_lecture = !self.anim_lecture,
+            _ => {}
+        }
+
+        cx.section(b, "COUCHES");
+        for (k, c) in m.couches.iter().enumerate() {
+            let Some(an) = l.animations.iter().find(|a| a.id == c.animation) else { continue };
+            let mut d = vec![format!("{}. {}", k + 1, an.nom)];
+            if an.mode == crate::animation::Mode::Additif {
+                d.push("additive".into());
+            }
+            if let Some(x) = c.masque.as_ref().and_then(|i| l.masques.iter().find(|x| &x.id == i)) {
+                d.push(x.nom.clone());
+            }
+            d.push(format!("{} %", (c.poids * 100.0).round()));
+            if c.vitesse != 1.0 {
+                d.push(format!("× {}", chiffres(c.vitesse)));
+            }
+            if self.couche_solo == Some(k) {
+                d.push("solo".into());
+            } else if !c.actif {
+                d.push("éteinte".into());
+            }
+            if cx.row(b, sub_id(id("couche"), k), &d.join(" · "), None, self.couche_choisie == Some(k)) {
+                self.couche_choisie = if self.couche_choisie == Some(k) { None } else { Some(k) };
+            }
+        }
+        if cx.legende_lien(b, if n == 0 { "Aucune couche" } else { "" }, Some((id("couche-ajouter"), "Ajouter une couche"))) {
+            self.ajouter_couche(0);
+        }
+        // Une couche ajoutée à l'instant n'est pas encore dans `m` : elle se montrera à l'image suivante
+        if let Some((k, c)) = self.couche_choisie.and_then(|k| Some((k, m.couches.get(k)?))) {
+            self.panneau_couche(cx, b, c, k, n, l);
+        }
+
+        if n > 0 {
+            cx.section(b, "APLATIR");
+            if cx.champ(b, id("aplatir-duree"), "Durée (s)", coul(C::Texte), &chiffres(self.aplatir_duree.unwrap_or(duree))) {
+                self.saisir(Champ::AplatirDuree);
+            }
+            // À la durée commune, un seul lien ; à une autre, de quoi y revenir
+            if self.aplatir_duree.is_some() {
+                if cx.legende_lien(b, &format!("Les couches se rejoignent à {} s", chiffres(duree)), Some((id("aplatir-commune"), "Y revenir"))) {
+                    self.aplatir_duree = None;
+                }
+                if cx.lien(b, id("aplatir"), "Aplatir") {
+                    self.aplatir();
+                }
+            } else if cx.legende_lien(b, "Là où les couches se rejoignent", Some((id("aplatir"), "Aplatir"))) {
+                self.aplatir();
+            }
+        }
+
+        self.panneau_masques(cx, b, l);
+        if cx.lien(b, id("melange-supprimer"), "Supprimer le mélange") {
+            let i = self.melange_choisi;
+            self.changer_os(|a, _| {
+                let mut l = a.melanges();
+                if let Some(i) = i.filter(|i| *i < l.len()) {
+                    l.remove(i);
+                }
+                a.regler_melanges(&l);
+            });
+            self.choisir_melange(None);
+            self.dire(format!("« {} » supprimé", m.nom));
+        }
+    }
+
+    /// La couche choisie : son animation, son mode, son poids, son masque, son temps,
+    /// et la clé qu'on y pose en voyant tout le mélange.
+    #[allow(clippy::too_many_arguments)]
+    fn panneau_couche(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, c: &crate::couches::Couche, k: usize, n: usize, l: &crate::couches::Lecteur) {
+        use crate::animation::{Mode, Reference};
+        let anims = &l.animations;
+        let Some(ia) = anims.iter().position(|a| a.id == c.animation) else { return };
+        let an = &anims[ia];
+        cx.section(b, &format!("COUCHE {}", k + 1));
+        let noms: Vec<&str> = anims.iter().map(|a| a.nom.as_str()).collect();
+        if let Some(j) = cx.choix(b, id("couche-animation"), &noms, Some(ia), 2).filter(|j| *j != ia) {
+            let x = anims[j].id.clone();
+            self.changer_couche(|c| c.animation = x);
+        }
+        // Le mode est celui de l'animation, pour toutes les couches qui la jouent
+        let additive = an.mode == Mode::Additif;
+        if let Some(j) = cx.choix(b, id("couche-mode"), &["Normale", "Additive"], Some(additive as usize), 2).filter(|j| (*j == 1) != additive) {
+            let mode = if j == 1 { Mode::Additif } else { Mode::Normal };
+            self.changer_os(|a, _| {
+                let mut l = a.animations();
+                if let Some(x) = l.get_mut(ia) {
+                    x.mode = mode;
+                }
+                a.regler_animations(&l);
+            });
+            self.aller_a(self.anim_temps);
+        }
+        let reference = match &an.reference {
+            Reference::Cle(r) => format!("sa clé {}", r + 1),
+            Reference::Pose(p) => l.poses.iter().find(|x| &x.id == p).map_or("le repos".into(), |x| format!("la pose « {} »", x.nom)),
+        };
+        cx.legende_lien(b, &if additive { format!("« {} » ajoute son écart à {reference}", an.nom) } else { format!("« {} » tire la pose vers la sienne", an.nom) }, None);
+
+        let (mut w, z) = (c.poids as f32, id("couche-poids"));
+        cx.slider(b, z, "Poids", &format!("{:.0} %", w * 100.0), &mut w, 0.0, 1.0);
+        let tenu = cx.ui.pressed(z);
+        let w = (w as f64 * 100.0).round() / 100.0;
+        if (w - c.poids).abs() > 1e-9 {
+            if !self.couche_tenue {
+                self.memoriser();
+            }
+            let i = self.melange_choisi;
+            self.retoucher_os(|a, _| {
+                let mut l = a.melanges();
+                if let Some(c) = i.and_then(|i| l.get_mut(i)).and_then(|m| m.couches.get_mut(k)) {
+                    c.poids = w;
+                }
+                a.regler_melanges(&l);
+            });
+            self.aller_a(self.anim_temps);
+        }
+        self.couche_tenue = tenu;
+
+        let mut choix = vec!["Sans masque"];
+        choix.extend(l.masques.iter().map(|x| x.nom.as_str()));
+        let actuel = c.masque.as_ref().and_then(|i| l.masques.iter().position(|x| &x.id == i)).map_or(0, |j| j + 1);
+        if let Some(j) = cx.choix(b, id("couche-masque"), &choix, Some(actuel), 2).filter(|j| *j != actuel) {
+            let x = j.checked_sub(1).map(|j| l.masques[j].id.clone());
+            self.changer_couche(|c| c.masque = x);
+        }
+        if cx.champ(b, id("couche-vitesse"), "Vitesse", coul(C::Texte), &format!("× {}", chiffres(c.vitesse))) {
+            self.saisir(Champ::CoucheVitesse);
+        }
+        if cx.champ(b, id("couche-decalage"), "Décalage (s)", coul(C::Texte), &chiffres(c.decalage)) {
+            self.saisir(Champ::CoucheDecalage);
+        }
+        let mut actif = c.actif;
+        cx.toggle(b, id("couche-active"), "Active", &mut actif);
+        if actif != c.actif {
+            self.changer_couche(|c| c.actif = actif);
+        }
+        let mut solo = self.couche_solo == Some(k);
+        cx.toggle(b, id("couche-solo"), "Solo", &mut solo);
+        if solo != (self.couche_solo == Some(k)) {
+            self.couche_solo = solo.then_some(k);
+            self.aller_a(self.anim_temps);
+        }
+
+        // Les clés : posez les os sur le mélange, la clé va à l'animation de la couche
+        if let Some((an, ti)) = self.instant_couche() {
+            let ici = an.cle_a(ti).is_some();
+            let legende = format!("« {} » à {} s{}", an.nom, chiffres(ti), if ici { " · sur une clé" } else { "" });
+            if cx.legende_lien(b, &legende, Some((id("couche-cle"), if ici { "Remplacer la clé" } else { "Poser une clé" }))) {
+                self.poser_cle_couche();
+            }
+            if ici && cx.lien(b, id("couche-retirer-cle"), "Retirer la clé") {
+                self.retirer_cle_couche();
+            }
+        }
+        match cx.rangee(b, id("couche-ordre"), &[("Monter", k > 0), ("Descendre", k + 1 < n), ("Retirer", true)]) {
+            Some(r @ (0 | 1)) => {
+                let j = if r == 0 { k - 1 } else { k + 1 };
+                self.changer_melange(|m| m.couches.swap(k, j));
+                self.couche_choisie = Some(j);
+                self.couche_solo = self.couche_solo.map(|s| if s == k { j } else if s == j { k } else { s });
+                self.aller_a(self.anim_temps);
+            }
+            Some(2) => {
+                self.couche_solo = self.couche_solo.and_then(|s| if s == k { None } else if s > k { Some(s - 1) } else { Some(s) });
+                self.couche_choisie = None;
+                self.changer_melange(|m| {
+                    m.couches.remove(k);
+                });
+                self.dire(format!("Couche {} retirée", k + 1));
+            }
+            _ => {}
+        }
+    }
+
+    /// Les masques de l'armature : le poids de l'os actif dans celui qui est choisi.
+    fn panneau_masques(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, l: &crate::couches::Lecteur) {
+        if self.masque_choisi.is_some_and(|k| k >= l.masques.len()) {
+            self.masque_choisi = None;
+        }
+        cx.section(b, "MASQUES");
+        for (i, x) in l.masques.iter().enumerate() {
+            if cx.row(b, sub_id(id("masque"), i), &x.nom, None, self.masque_choisi == Some(i)) {
+                self.masque_choisi = if self.masque_choisi == Some(i) { None } else { Some(i) };
+            }
+        }
+        if cx.legende_lien(b, if l.masques.is_empty() { "Aucun masque" } else { "" }, Some((id("masque-nouveau"), "Nouveau masque"))) {
+            self.nouveau_masque();
+        }
+        let Some(x) = self.masque_choisi.and_then(|i| l.masques.get(i)) else { return };
+        if cx.champ(b, id("masque-nom"), "Nom", coul(C::Texte), &x.nom) {
+            self.saisir(Champ::MasqueNom);
+        }
+        let total = self.armature_os().map_or(0, |(_, _, a)| a.os.len());
+        let dedans = x.os.iter().filter(|o| o.1 > 0.0).count();
+        cx.legende_lien(b, &format!("{dedans} os sur {total}"), None);
+        let actif = self.armature_os().and_then(|(e, _, a)| a.trouver(e.actif.as_ref()?)).map(|o| (o.id.clone(), o.nom.clone()));
+        match actif {
+            Some((os, nom)) => {
+                let (mut w, z) = (x.poids(&os) as f32, id("masque-poids"));
+                cx.slider(b, z, &format!("Poids de {nom}"), &format!("{:.0} %", w * 100.0), &mut w, 0.0, 1.0);
+                let tenu = cx.ui.pressed(z);
+                let w = (w as f64 * 100.0).round() / 100.0;
+                if (w - x.poids(&os)).abs() > 1e-9 {
+                    if !self.masque_tenu {
+                        self.memoriser();
+                    }
+                    let (i, os) = (self.masque_choisi, os.clone());
+                    self.retoucher_os(|a, _| {
+                        let mut l = a.masques();
+                        if let Some(m) = i.and_then(|i| l.get_mut(i)) {
+                            m.os.retain(|o| o.0 != os);
+                            if w > 0.0 {
+                                m.os.push((os, w));
+                            }
+                        }
+                        a.regler_masques(&l);
+                    });
+                    self.aller_a(self.anim_temps);
+                }
+                self.masque_tenu = tenu;
+                let (avec, sans) = (format!("Y mettre {nom} et ses descendants"), format!("En ôter {nom} et ses descendants"));
+                for (cle, texte, mettre) in [("masque-mettre", &avec, true), ("masque-oter", &sans, false)] {
+                    if cx.lien(b, id(cle), texte) {
+                        let Some((_, _, a)) = self.armature_os() else { return };
+                        let l = crate::couches::Masque::os_et_descendants(a, &os, 1.0);
+                        self.changer_masque(|m| {
+                            m.os.retain(|o| l.iter().all(|x| x.0 != o.0));
+                            if mettre {
+                                m.os.extend(l);
+                            }
+                        });
+                    }
+                }
+            }
+            None => cx.paragraph(b, "Touchez un os pour régler son poids dans le masque."),
+        }
+        if cx.lien(b, id("masque-supprimer"), "Supprimer le masque") {
+            self.supprimer_masque();
+        }
+    }
+
     fn renommer_pose(&mut self, nom: &str) {
         let nom = nom.trim().to_string();
         if nom.is_empty() {
@@ -6493,7 +7138,7 @@ impl App {
         self.changer_os(|a, _| {
             let mut l = a.poses_nommees();
             if let Some(p) = l.get_mut(i) {
-                p.0 = nom;
+                p.nom = nom;
             }
             a.regler_poses(&l);
         });
@@ -6862,6 +7507,23 @@ impl App {
         })
     }
 
+    /// Retourne toutes les faces des objets choisis : l'endroit devient l'envers.
+    fn retourner_faces(&mut self) {
+        let l: Vec<usize> = self.choix.iter().copied().filter(|k| self.projet.objets.get(*k).is_some_and(|o| o.armature.is_none())).collect();
+        if l.is_empty() {
+            return;
+        }
+        self.memoriser();
+        for &k in &l {
+            let o = &mut self.projet.objets[k];
+            let mut m = (*o.maillage).clone();
+            m.retourner();
+            o.maillage = Arc::new(m);
+        }
+        self.a_sauver = true;
+        self.dire(format!("Faces retournées : {} objet{}", l.len(), if l.len() > 1 { "s" } else { "" }));
+    }
+
     fn fiche(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
         let pts = self.points();
         if pts.is_empty() {
@@ -6902,6 +7564,9 @@ impl App {
                         self.a_sauver = true;
                         self.dire(if d { "Armature vue à travers les objets, en mode Scène" } else { "Armature cachée par les objets placés devant" }.into());
                     }
+                }
+                if self.projet.objets[k].armature.is_none() && cx.lien(b, id("objet-retourner"), "Retourner les faces") {
+                    self.retourner_faces();
                 }
                 let mut v = self.projet.objets[k].visible;
                 cx.toggle(b, id("objet-visible"), "Visible", &mut v);
@@ -7039,7 +7704,8 @@ impl App {
             };
             besoin.extend(texture.clone());
             let devant = self.devant(k);
-            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&m), normale: vue::mat_normale(&m), albedo, emission, opacite, contour, filaire: cibles.contains(&k), texture, envers: None, devant });
+            let deux_cotes = self.rendu == Rendu::Jeu && self.travail.is_none() && self.os.is_none() && self.projet.materiau(&o.materiau).is_some_and(|m| m.deux_cotes);
+            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&m), normale: vue::mat_normale(&m), albedo, emission, opacite, contour, filaire: cibles.contains(&k), texture, envers: None, devant, deux_cotes });
             vus.insert(cle);
             if !self.connus.contains_key(&cle) {
                 ajouts.push((cle, vue::tampons(&vu)));
@@ -7052,7 +7718,7 @@ impl App {
             let cle = Arc::as_ptr(&m) as usize;
             let c = self.projet.curseur;
             let mx = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, c[0], c[1], c[2], 1.0];
-            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&mx), normale: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], albedo: lin_octets(coul(C::ObjetActif)), emission: [0.0; 3], opacite: 1.0, contour: true, filaire: false, texture: None, envers: None, devant: false });
+            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&mx), normale: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], albedo: lin_octets(coul(C::ObjetActif)), emission: [0.0; 3], opacite: 1.0, contour: true, filaire: false, texture: None, envers: None, devant: false, deux_cotes: false });
             vus.insert(cle);
             if !self.connus.contains_key(&cle) {
                 ajouts.push((cle, vue::tampons(&m)));
@@ -7123,7 +7789,7 @@ impl App {
                 (Some(_), false) => [1.0; 3],
                 (Some(_), true) => lin_octets(c).map(|x| 0.7 + 0.3 * x),
             };
-            objets.push(ObjetVue { tampon: cle, modele, normale: id3, albedo, emission: [0.0; 3], opacite, contour: false, filaire: false, texture: image.clone(), envers: Some(lin_octets(coul(C::Envers))), devant: false });
+            objets.push(ObjetVue { tampon: cle, modele, normale: id3, albedo, emission: [0.0; 3], opacite, contour: false, filaire: false, texture: image.clone(), envers: Some(lin_octets(coul(C::Envers))), devant: false, deux_cotes: false });
         }
         if self.version_geo == Some(t.version) {
             return Some(GeoVue { maj: None, rayons: self.rayons });
@@ -7669,6 +8335,38 @@ mod tests {
         assert_eq!(b.app.rendu, Rendu::Solide);
         let m = &b.app.message.as_ref().unwrap().0;
         assert!(m.contains("Texture absente : a.png"), "{m}");
+    }
+
+    #[test]
+    fn un_modele_aux_faces_retournees_se_remet_a_l_endroit_et_deux_cotes_suit_le_materiau() {
+        let mut b = Banc::pret();
+        let n = b.app.projet.objets.len();
+        // Un cube aux faces tournées vers l'intérieur, comme en exportent les visualiseurs
+        let mut c = Maillage::cube(2.0);
+        c.retourner();
+        let mat = c.faces[0].m.to_string();
+        let glb = c.vers_glb("boite", &[(mat.clone(), maillage::MatMtl { couleur: Some("#808080".into()), deux_cotes: true, ..Default::default() })]);
+        b.app.importer("boite.glb", &glb);
+        let m = &b.app.message.as_ref().unwrap().0;
+        assert!(m.contains("faces retournées"), "{m}");
+        let k = n;
+        assert!(!Maillage::a_l_envers(&[&*b.app.projet.objets[k].maillage]), "remis à l'endroit");
+        // doubleSided est lu ; en rendu En jeu, l'objet se voit des deux côtés
+        let nom = b.app.projet.objets[k].materiau.clone();
+        assert!(b.app.projet.materiau(&nom).unwrap().deux_cotes);
+        b.app.rendu = Rendu::Jeu;
+        let s = b.images(1);
+        assert!(s.objets.iter().any(|o| o.deux_cotes));
+        // Le lien de l'objet le retourne à nouveau, et s'annule
+        b.app.choix = vec![k];
+        b.app.retourner_faces();
+        assert!(Maillage::a_l_envers(&[&*b.app.projet.objets[k].maillage]));
+        b.app.annuler();
+        assert!(!Maillage::a_l_envers(&[&*b.app.projet.objets[k].maillage]));
+        // Le réglage se garde dans le projet et repart à l'export
+        let p = Projet::lire(&b.app.projet.ecrire()).unwrap();
+        assert!(p.materiau(&nom).unwrap().deux_cotes);
+        assert!(maillage::materiau_gltf(&nom, &p.materiau(&nom).unwrap().vers_mtl(), None).contains("\"doubleSided\":true"));
     }
 
     #[test]
@@ -10209,7 +10907,7 @@ mod tests {
         b.images(2);
         let z = b.ui.zone(id("pose-sauver")).unwrap();
         b.appui(z.cx(), z.cy());
-        assert_eq!(a(&b).poses_nommees(), vec![("Pose 1".to_string(), levee.clone())]);
+        assert_eq!(a(&b).poses_nommees().iter().map(|p| (p.id.as_str(), p.nom.as_str(), &p.pose)).collect::<Vec<_>>(), [("p1", "Pose 1", &levee)]);
         // Une autre pose, gardée aussi
         b.app.angle_saisie = false;
         b.app.regler_angles(&bras, [0.0, 0.0, -30.0]);
@@ -10228,8 +10926,8 @@ mod tests {
         b.app.valider_pave();
         let relu = Projet::lire(&b.app.projet.ecrire()).unwrap();
         let p = relu.objets[1].armature.as_ref().unwrap().poses_nommees();
-        assert_eq!(p[0].0, "Salut");
-        assert_eq!(p[0].1.len(), levee.len());
+        assert_eq!(p[0].nom, "Salut");
+        assert_eq!(p[0].pose.len(), levee.len());
         // Supprimer, puis annuler
         b.images(2);
         let z = b.ui.zone(id("pose-supprimer")).unwrap();
@@ -11462,6 +12160,199 @@ mod tests {
         assert!(b.app.animation().is_none());
     }
 
+    /// Touche un lien ou une ligne du panneau par son identifiant, en faisant défiler
+    /// le panneau jusqu'à lui.
+    fn toucher_id(b: &mut Banc, cible: Id) {
+        for _ in 0..40 {
+            b.images(2);
+            let Some(z) = b.ui.zone(cible) else { panic!("rien à toucher") };
+            if z.y > 0.0 && z.bottom() < ECRAN.h && z.x >= 0.0 && z.right() <= ECRAN.w + 1.0 {
+                return b.appui(z.cx(), z.cy());
+            }
+            b.app.defiler_panneaux(if z.y < 0.0 { -200.0 } else { 200.0 });
+        }
+        panic!("hors de vue");
+    }
+
+    #[test]
+    fn ajouter_au_toucher_couches_melanges_et_masques_ne_plante_pas() {
+        use crate::animation::Animation;
+        let (mut b, _) = banc_pose();
+        {
+            let a = b.app.projet.objets[1].armature.as_mut().unwrap();
+            let mut x = Animation::neuve("x");
+            x.poser_cle(0.0, Pose::new());
+            let mut y = Animation::neuve("y");
+            y.duree = 0.5;
+            y.poser_cle(0.0, Pose::new());
+            a.regler_animations(&[x, y]);
+        }
+        b.app.contenu = Contenu::Os;
+        b.app.shell.end.open = true;
+        b.app.onglet_os = 2;
+        let arm = |b: &Banc| b.app.projet.objets[1].armature.clone().unwrap();
+        toucher_id(&mut b, id("melange-nouveau"));
+        assert_eq!(arm(&b).melanges().len(), 1);
+        for n in 2..=4 {
+            toucher_id(&mut b, id("couche-ajouter"));
+            assert_eq!(b.app.melange().unwrap().couches.len(), n);
+            assert_eq!(b.app.couche_choisie, Some(n - 1));
+        }
+        toucher_id(&mut b, id("masque-nouveau"));
+        assert_eq!(arm(&b).masques().len(), 1);
+        toucher_id(&mut b, sub_id(id("couche-ordre"), 2));
+        assert_eq!(b.app.melange().unwrap().couches.len(), 3);
+        toucher_id(&mut b, id("aplatir"));
+        assert_eq!(arm(&b).animations().len(), 3);
+        toucher_id(&mut b, id("masque-supprimer"));
+        toucher_id(&mut b, id("melange-supprimer"));
+        assert!(arm(&b).melanges().is_empty());
+        b.images(2);
+    }
+
+    #[test]
+    fn la_pile_de_couches_s_edite_et_s_aplatit() {
+        use crate::animation::{Animation, Mode};
+        let (mut b, bras) = banc_pose();
+        {
+            let a = b.app.projet.objets[1].armature.as_mut().unwrap();
+            let os = |n: &str| a.os.iter().find(|x| x.nom == n).unwrap().id.clone();
+            let bassin = os("bassin");
+            let mut appui = Animation::neuve("appui");
+            appui.duree = 1.0;
+            appui.poser_cle(0.0, Pose::new());
+            appui.poser_cle(0.5, Pose::from([(bassin, Ecart { r: depuis_angles_os([0.0, 0.0, 10.0]), t: [0.0; 3] })]));
+            let mut souffle = Animation::neuve("souffle");
+            souffle.duree = 0.75;
+            souffle.poser_cle(0.0, Pose::new());
+            souffle.poser_cle(0.25, Pose::from([(bras.clone(), Ecart { r: depuis_angles_os([0.0, 0.0, 30.0]), t: [0.0; 3] })]));
+            a.regler_animations(&[appui, souffle]);
+        }
+        let arm = |b: &Banc| b.app.projet.objets[1].armature.clone().unwrap();
+        // Un mélange neuf : une couche, l'animation choisie
+        b.app.anim_choisie = Some(0);
+        b.app.nouveau_melange();
+        assert_eq!((b.app.melange_choisi, b.app.anim_choisie, b.app.couche_choisie), (Some(0), None, Some(0)));
+        assert_eq!(b.app.melange().unwrap().couches[0].animation, "a1");
+        // Une deuxième couche, additive, à mi-poids et deux fois plus lente
+        b.app.ajouter_couche(1);
+        assert_eq!(b.app.couche_choisie, Some(1));
+        b.app.changer_os(|a, _| {
+            let mut l = a.animations();
+            l[1].mode = Mode::Additif;
+            a.regler_animations(&l);
+        });
+        b.app.changer_couche(|c| (c.poids, c.vitesse) = (0.5, 0.5));
+        assert_eq!(b.app.duree_melange(), Some(3.0), "1 s et 1,5 s se rejoignent à 3 s");
+        // À 0,5 s du mélange, la couche en est à 0,25 s : le bras est à 15°
+        b.app.aller_a(0.5);
+        let z = angles_os(arm(&b).pose[&bras].r)[2];
+        assert!((z - 15.0).abs() < 1e-6, "{z}");
+        // Le solo n'écoute que la couche choisie ; il ne s'enregistre pas
+        b.app.couche_solo = Some(0);
+        b.app.aller_a(0.5);
+        assert!(arm(&b).pose.get(&bras).is_none_or(|e| angles_os(e.r)[2].abs() < 1e-6));
+        b.app.couche_solo = None;
+
+        // Une clé sur la couche additive, en voyant le mélange : le bras à 25°
+        b.app.aller_a(0.5);
+        tourner_bras(&mut b, depuis_angles_os([0.0, 0.0, 10.0]));
+        let montre = arm(&b).pose[&bras].r;
+        b.app.poser_cle_couche();
+        let an = arm(&b).animations()[1].clone();
+        assert!(an.cle_a(0.25).is_some(), "la clé va à l'instant de la couche");
+        b.app.aller_a(0.0);
+        b.app.aller_a(0.5);
+        let d: f64 = (0..4).map(|k| arm(&b).pose[&bras].r[k] * montre[k]).sum();
+        assert!((d.abs() - 1.0).abs() < 1e-9, "le mélange redonne la pose montrée");
+        // La première clé est la référence : on ne la remplace pas ainsi
+        b.app.aller_a(0.0);
+        b.app.poser_cle_couche();
+        assert_eq!(arm(&b).animations()[1].cles.len(), an.cles.len());
+        // Une étape d'annulation par clé
+        b.app.annuler();
+        assert!(arm(&b).animations()[1].cle_a(0.25).is_some_and(|k| arm(&b).animations()[1].cles[k].pose != an.cles[an.cle_a(0.25).unwrap()].pose));
+
+        // Aplatir : sur la durée commune, une clé par image
+        b.app.aplatir();
+        let l = arm(&b).animations();
+        assert_eq!((l.len(), l[2].nom.as_str(), l[2].duree, l[2].cles.len()), (3, "Mélange 1 aplati", 3.0, 73));
+        b.app.appliquer_champ(Champ::AplatirDuree, 1.0);
+        assert_eq!(b.app.duree_a_aplatir(), Some(1.0));
+        b.app.aplatir();
+        assert_eq!(arm(&b).animations()[3].nom, "Mélange 1 aplati 2");
+        assert_eq!(arm(&b).animations()[3].cles.len(), 25);
+
+        // Un masque depuis l'os actif : le bras et ses descendants
+        b.app.os.as_mut().unwrap().actif = Some(bras.clone());
+        b.app.nouveau_masque();
+        let m = arm(&b).masques();
+        assert_eq!((m[0].id.as_str(), m[0].nom.as_str()), ("m1", "bras.G"));
+        assert!(m[0].poids(&bras) == 1.0 && m[0].os.len() > 1);
+        b.app.changer_couche(|c| c.masque = Some("m1".into()));
+        b.app.saisir(Champ::MasqueNom);
+        b.app.pave.as_mut().unwrap().texte = "bras gauche".into();
+        b.app.valider_pave();
+        assert_eq!(arm(&b).masques()[0].nom, "bras gauche");
+        // Le panneau se dessine, tout ouvert
+        (b.app.contenu, b.app.shell.end.open, b.app.onglet_os) = (Contenu::Os, true, 2);
+        b.app.couche_choisie = Some(1);
+        b.app.masque_choisi = Some(0);
+        b.images(3);
+        assert!(b.ui.zone(id("couche-poids")).is_some() && b.ui.zone(id("masque-nom")).is_some(), "couche et masque sont montrés");
+        b.images(3);
+        // Supprimer le masque le retire des couches
+        b.app.supprimer_masque();
+        assert!(arm(&b).masques().is_empty());
+        assert_eq!(b.app.melange().unwrap().couches[1].masque, None);
+        // Tout reste dans le projet enregistré
+        let r = Projet::lire(&b.app.projet.ecrire()).unwrap();
+        let a = r.objets[1].armature.clone().unwrap();
+        assert_eq!(a.melanges()[0].couches[1].vitesse, 0.5);
+        assert_eq!(a.animations()[1].mode, Mode::Additif);
+    }
+
+    #[test]
+    fn un_melange_se_choisit_et_se_lit_en_boucle() {
+        use crate::animation::{Animation, Mode};
+        use crate::couches::{Couche, Masque, Melange};
+        let (mut b, bras) = banc_pose();
+        {
+            let a = b.app.projet.objets[1].armature.as_mut().unwrap();
+            let os = |n: &str| a.os.iter().find(|x| x.nom == n).unwrap().id.clone();
+            let (bassin, colonne) = (os("bassin"), os("colonne"));
+            let mut appui = Animation::neuve("appui");
+            appui.duree = 1.0;
+            appui.poser_cle(0.0, Pose::new());
+            appui.poser_cle(0.5, Pose::from([(bassin, Ecart { r: depuis_angles_os([0.0, 0.0, 10.0]), t: [0.0; 3] })]));
+            let mut souffle = Animation::neuve("souffle");
+            (souffle.duree, souffle.mode) = (0.75, Mode::Additif);
+            souffle.poser_cle(0.0, Pose::new());
+            souffle.poser_cle(0.25, Pose::from([(bras.clone(), Ecart { r: depuis_angles_os([0.0, 0.0, 30.0]), t: [0.0; 3] })]));
+            a.regler_animations(&[appui, souffle]);
+            let haut = Masque::os_et_descendants(a, &colonne, 1.0);
+            a.regler_masques(&[Masque { id: String::new(), nom: "haut".into(), os: haut }]);
+            let couches = vec![Couche::de("a1"), Couche { masque: Some("m1".into()), ..Couche::de("a2") }];
+            a.regler_melanges(&[Melange { couches, ..Melange::neuf("vivant") }]);
+        }
+        b.app.melange_choisi = Some(0);
+        assert_eq!(b.app.melange().unwrap().nom, "vivant");
+        assert!(b.app.animation().is_none());
+        // À 0,25 s, le souffle lève le bras de 30° par-dessus l'appui
+        b.app.aller_a(0.25);
+        let z = angles_os(b.app.projet.objets[1].armature.as_ref().unwrap().pose[&bras].r)[2];
+        assert!((z - 30.0).abs() < 1e-6, "{z}");
+        // Lecture en boucle sur 3 s, le plus petit multiple commun de 1 et 0,75 s
+        b.app.anim_lecture = true;
+        b.images(70);
+        assert!(b.app.anim_temps > 0.0 && b.app.anim_temps < 3.0, "{}", b.app.anim_temps);
+        assert!(b.app.animating());
+        b.app.anim_lecture = false;
+        // Le mélange reste dans le projet enregistré
+        let r = Projet::lire(&b.app.projet.ecrire()).unwrap();
+        assert_eq!(r.objets[1].armature.as_ref().unwrap().melanges()[0].couches.len(), 2);
+    }
+
     #[test]
     fn la_ligne_de_temps_se_glisse_et_les_boutons_vont_de_cle_en_cle() {
         let (mut b, bras) = banc_pose();
@@ -11487,6 +12378,36 @@ mod tests {
         b.app.appliquer_champ(Champ::AnimDuree, 0.5);
         let an = b.app.animation().unwrap();
         assert_eq!((an.duree, an.cles.len()), (0.5, 1));
+    }
+
+    #[test]
+    fn exporter_pour_sage_en_couches_ou_aplati() {
+        use crate::animation::{Animation, Mode};
+        use crate::couches::{Couche, Melange};
+        let (mut b, _, avant) = banc_peau();
+        pret(&mut b);
+        {
+            let a = b.app.projet.objets[1].armature.as_mut().unwrap();
+            let mut x = Animation::neuve("plie");
+            x.poser_cle(0.0, Pose::new());
+            x.poser_cle(1.0, Pose::from([(avant.clone(), Ecart { r: depuis_angles_os([0.0, 0.0, 40.0]), t: [0.0; 3] })]));
+            let mut y = Animation::neuve("souffle");
+            (y.duree, y.mode) = (0.5, Mode::Additif);
+            y.poser_cle(0.0, Pose::new());
+            a.regler_animations(&[x, y]);
+            a.regler_melanges(&[Melange { couches: vec![Couche::de("a1"), Couche::de("a2")], ..Melange::neuf("vivant") }]);
+        }
+        let mut clips = Vec::new();
+        for action in [A::ExporterSage, A::ExporterSageAplati] {
+            assert!(b.app.contexte().possible(action));
+            b.app.sorties.clear();
+            b.app.agir(action);
+            let (js, _) = crate::sage::lire_glb(&b.app.sorties.last().unwrap().octets).unwrap();
+            let sage = js.get("nodes").unwrap().liste().unwrap()[0].get("extras").unwrap().get("sage").unwrap().clone();
+            clips.push((js.get("animations").unwrap().liste().unwrap().len(), sage.get("melanges").is_some()));
+            assert!(b.app.message.as_ref().unwrap().0.contains("1 mélange"));
+        }
+        assert_eq!(clips, [(2, true), (3, false)]);
     }
 
     #[test]

@@ -32,6 +32,8 @@ pub struct Materiau {
     pub illumination: f64,
     /// Texture de couleur : un identifiant de `Projet::textures`.
     pub texture: Option<String>,
+    /// Ses faces se voient des deux côtés : en rendu En jeu, et `doubleSided` à l'export.
+    pub deux_cotes: bool,
 }
 
 impl Materiau {
@@ -46,6 +48,7 @@ impl Materiau {
             refraction: 1.0,
             illumination: 1.0,
             texture: None,
+            deux_cotes: false,
         }
     }
 
@@ -64,6 +67,7 @@ impl Materiau {
             refraction: nb("refraction", d.refraction, 0.001, 10.0),
             illumination: (nb("illumination", d.illumination, 0.0, 10.0) + 0.5).floor(),
             texture: j.get("texture").and_then(J::txt).map(String::from),
+            deux_cotes: j.get("deux_cotes").and_then(J::bool).unwrap_or(false),
         }
     }
 
@@ -83,6 +87,9 @@ impl Materiau {
         if let Some(x) = &self.texture {
             l.push(t("texture", x));
         }
+        if self.deux_cotes {
+            l.push(("deux_cotes".to_string(), J::Bool(true)));
+        }
         J::Objet(l)
     }
 
@@ -99,6 +106,7 @@ impl Materiau {
             refraction: m.refraction.unwrap_or(d.refraction),
             illumination: m.illumination.unwrap_or(d.illumination),
             texture: None,
+            deux_cotes: m.deux_cotes,
         }
     }
 
@@ -113,6 +121,7 @@ impl Materiau {
             refraction: Some(self.refraction),
             illumination: Some(self.illumination),
             texture: None,
+            deux_cotes: self.deux_cotes,
         }
     }
 }
@@ -642,6 +651,7 @@ impl Projet {
                 let mut x = Materiau::neuf(Some(&hex_lineaire(m.couleur)));
                 x.opacite = m.couleur[3].clamp(0.0, 1.0);
                 x.texture = m.image.map(|(n, o)| self.garder_texture(&n, o));
+                x.deux_cotes = m.deux_cotes;
                 if m.manquante {
                     manquantes.push(m.nom.clone());
                 }

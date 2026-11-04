@@ -1,8 +1,8 @@
 # Format `.gda` 10 (Rustcraft)
 
-Spécification du fichier de projet écrit par Rustcraft 0.48, tirée du code
-(`src/projet.rs`, `src/maillage.rs`, `src/armature.rs`, `src/animation.rs`,
-`src/peau.rs`, `src/modifs.rs`). En cas de doute, le code fait foi.
+Spécification du fichier de projet écrit par Rustcraft 0.51, tirée du code : `src/projet.rs`
+et `src/modifs.rs` de Rustcraft, et la crate partagée `gda` (`maillage.rs`, `armature.rs`,
+`animation.rs`, `couches.rs`, `peau.rs`). En cas de doute, le code fait foi.
 
 Le format est né dans GDA, l'éditeur web, qui s'arrête au format 9. Le format 10 est
 propre à Rustcraft et **GDA refuse de l'ouvrir**. C'est voulu : le `.gda` évolue
@@ -16,17 +16,28 @@ compatibilité à garder vers GDA (voir la dernière partie).
   gauche est en +X.
 - **Unités** : le mètre. L'humanoïde de base mesure 1,75 m.
 - **Quaternions** : `[x, y, z, w]`. Un quaternion nul ou illisible vaut l'identité
-  `[0, 0, 0, 1]`, et un quaternion non unitaire est normalisé à la lecture.
+  `[0, 0, 0, 1]`. Un quaternion non unitaire est normalisé à la lecture. Un écart de
+  moins de 4·10⁻⁶ sur la norme au carré compte comme unitaire, et le quaternion est
+  gardé tel quel : un quaternion écrit avec six décimales se réécrit à l'identique.
 - **Angles** : les limites des os sont en degrés. Partout ailleurs, les rotations sont
   des quaternions.
 - **Couleurs** : chaînes `"#rrggbb"`.
-- **Identifiants** : chaînes opaques. Les objets en reçoivent un à leur création
-  (`o<millisecondes en hexa>-<compteur>`), et ceux des os viennent de GDA ou de
-  Rustcraft. Les noms sont libres, peuvent changer et ne servent qu'à l'affichage :
-  **toute référence passe par un identifiant** (liaison, cible d'un booléen, ancre,
-  poses, animations, poids peints, export S.A.G.E.).
+- **Identifiants** : chaînes opaques.
+  - Les objets en reçoivent un à leur création (`o<millisecondes en hexa>-<compteur>`),
+    et ceux des os viennent de GDA ou de Rustcraft.
+  - Dans une armature, les animations, les poses du catalogue, les masques et les
+    mélanges ont leur identifiant, unique parmi les leurs : `a1`, `p1`, `m1`, `c1`… À la
+    lecture, une animation ou une pose qui n'en a pas reçoit le premier libre (fichiers
+    antérieurs à Rustcraft 0.49).
+  - Les noms sont libres, peuvent changer et ne servent qu'à l'affichage : **toute
+    référence passe par un identifiant** (liaison, cible d'un booléen, ancre, poses,
+    animations, masques, mélanges, poids peints, export S.A.G.E.).
 - **Clés inconnues** : un lecteur doit les ignorer. Rustcraft garde et réécrit telles
-  quelles celles des os et des armatures, mais pas celles des objets.
+  quelles, et dans leur ordre, celles des os, des armatures, des animations, des poses,
+  des mélanges et de leurs couches, mais pas celles des objets.
+- **Écriture** : un fichier écrit par Rustcraft se relit et se réécrit à l'octet près. Un
+  fichier produit par un autre outil peut changer une fois, à sa première réécriture :
+  par exemple, un zéro écrit `0.0` devient `0`.
 
 ## Racine
 
@@ -141,10 +152,12 @@ C'est une pile appliquée dans l'ordre au maillage, sans le changer. Chaque entr
 {
   "os": [ { … }, … ],
   "pose": { "<id os>": { "r": [x, y, z, w], "t": [x, y, z] }, … },
-  "poses": [ { "nom": "Garde", "os": { "<id os>": { "r": …, "t": … } } }, … ],
+  "poses": [ { "id": "p1", "nom": "Garde", "os": { "<id os>": { "r": …, "t": … } } }, … ],
   "ancre": "<id os>" | null,
   "devant": true,
-  "animations": [ … ]
+  "animations": [ … ],
+  "masques": [ … ],
+  "melanges": [ … ]
 }
 ```
 
@@ -197,10 +210,11 @@ l'écriture.
 | Clé | Rôle |
 |---|---|
 | `pose` | Pose courante de l'armature. |
-| `poses` | Poses nommées (catalogue) : `{ "nom", "os": { id: écart } }`. |
+| `poses` | Poses nommées (catalogue) : `{ "id", "nom", "os": { id: écart } }`. |
 | `ancre` | Os fixé au monde pour la manipulation « Tirer », ou `null`. Une ancre vers un os disparu devient `null`. |
 | `devant` | `true` : l'armature est dessinée au premier plan en mode Scène. Clé absente sinon. |
 | `animations` | Animations à clés (voir ci-dessous). Clé absente s'il n'y en a pas. |
+| `masques`, `melanges` | Couches d'animation (voir plus bas). Clés absentes s'il n'y en a pas. |
 
 Rustcraft garde et réécrit toutes les autres clés de l'armature.
 
@@ -208,9 +222,12 @@ Rustcraft garde et réécrit toutes les autres clés de l'armature.
 
 ```json
 {
-  "nom": "marche",
-  "duree": 2,
+  "id": "a3",
+  "nom": "Marche",
+  "duree": 1,
   "boucle": true,
+  "vitesse": 1.44,
+  "marqueurs": [{ "t": 0, "nom": "contact.G" }, { "t": 0.5, "nom": "contact.D" }],
   "cles": [
     { "t": 0,   "os": { "<id os>": { "r": […], "t": […] } } },
     { "t": 0.5, "os": { … } }
@@ -230,6 +247,73 @@ Rustcraft garde et réécrit toutes les autres clés de l'armature.
   - sinon, la dernière pose est tenue.
 - Une clé sans `t` rend son animation illisible : l'animation est ignorée. Les écarts
   vers des os disparus sont oubliés.
+- **`mode`** : `"normal"` (par défaut, clé absente) ou `"additif"`. Une animation normale
+  donne une pose complète. Une animation additive donne un écart par rapport à sa
+  `reference`, à poser par-dessus d'autres couches.
+- **`reference`**, pour une animation additive : `{ "cle": n }`, le rang d'une de ses
+  clés (0 par défaut), ou `{ "pose": "<id de pose>" }`, une pose du catalogue.
+  Introuvable, c'est le repos. Les deux clés ne sont écrites que pour une animation
+  additive.
+- **Autres clés**, gardées telles quelles et dans leur ordre, entre `boucle` (ou
+  `reference`) et `cles` :
+  - `vitesse` : la vitesse au sol d'une allure, en m/s ;
+  - `marqueurs` : des instants nommés, `{ "t", "nom" }`, par exemple le contact d'un
+    pied.
+
+### Couches : masques et mélanges
+
+Un **mélange** joue plusieurs animations ensemble, en couches, chacune avec un poids,
+un masque d'os et son propre temps. L'éditeur et S.A.G.E. partagent ainsi la même
+recette.
+
+```json
+"masques": [
+  { "id": "m1", "nom": "haut du corps", "os": { "o2": 0.5, "o3": 1, "o4": 1, … } }
+],
+"melanges": [
+  {
+    "id": "c1",
+    "nom": "Repos vivant",
+    "couches": [
+      { "animation": "a2", "poids": 1 },
+      { "animation": "a1", "poids": 1, "masque": "m1", "vitesse": 1, "decalage": 0 }
+    ]
+  }
+]
+```
+
+- **Masque** : le poids de chaque os, de 0 à 1, par identifiant. Un os absent pèse 0.
+  Les os disparus sont retirés à l'écriture.
+- **Couche** :
+  - `animation` : l'identifiant de l'animation. Une couche vers une animation disparue
+    est oubliée.
+  - `poids` : de 0 à 1, 1 par défaut.
+  - `masque` : l'identifiant d'un masque, facultatif. Sans masque, tous les os pèsent 1.
+  - `vitesse` et `decalage` : le temps de l'animation vaut `t × vitesse + decalage`,
+    ramené dans sa durée si elle boucle. Par défaut, 1 et 0, et non écrits.
+  - `actif` : `false` éteint la couche. Absent, elle est allumée.
+- **Évaluation**, couche par couche dans l'ordre de la liste, en partant du repos. Pour
+  chaque os, `k = poids × masque(os)`, et un os absent d'une pose y est au repos :
+  - couche normale : `r = slerp(r_dessous, r_couche, k)` et
+    `t = t_dessous + k·(t_couche − t_dessous)` ;
+  - couche additive, de référence `ref` : `Δr = r_ref⁻¹ × r_couche`,
+    `Δt = t_couche − t_ref`, puis `r = r_dessous × slerp(identité, Δr, k)` et
+    `t = t_dessous + k·Δt`. La multiplication à droite place l'écart dans le repère de
+    l'os.
+  - Le slerp prend toujours le plus court chemin : `q` et `−q` sont la même rotation.
+- **Durée d'un mélange** : il se répète au plus petit multiple commun des durées de ses
+  couches, compté en images à 24 par seconde. Par exemple, 10 s et 4 s donnent 20 s. La
+  durée est bornée à 10 minutes.
+- **Aplatir** (Rustcraft 0.50) : le mélange échantillonné à chaque image, de 0 à sa
+  durée incluse, devient une animation normale en boucle, avec une clé par image. C'est
+  la forme la plus sûre pour un lecteur qui ne connaît pas les couches.
+- **Clé posée sur une couche** : l'éditeur montre tout le mélange. La clé qu'il range
+  dans l'animation de la couche est la pose qui, recomposée avec les autres couches,
+  redonne ce qui est montré. Le fichier n'en garde que la clé.
+- La mise en solo d'une couche n'est qu'un état de l'éditeur : elle ne s'écrit pas.
+- **Compatibilité** : ces ajouts restent dans le format 10. Un lecteur ancien les
+  ignore. Attention, Rustcraft avant 0.49 les perd s'il réenregistre le fichier, avec
+  les autres clés des animations (`vitesse`, `marqueurs`).
 
 ## Liaison (`objet.liaison`)
 
@@ -263,7 +347,7 @@ Un objet dont les clés sont les noms de matériau :
 "peau": {
   "couleur": "#d9a066", "ambiante": "#000000", "speculaire": "#000000",
   "emission": "#000000", "brillance": 10, "opacite": 1, "refraction": 1,
-  "illumination": 1, "texture": "<id texture>"
+  "illumination": 1, "texture": "<id texture>", "deux_cotes": true
 }
 ```
 
@@ -276,6 +360,10 @@ Seuls ces champs sont lus. Ils reprennent ceux du MTL et sont bornés :
 
 La `texture` est facultative. Le matériau `"defaut"` est partagé et ne porte jamais
 d'image.
+
+`deux_cotes` est facultatif et vaut `false` s'il manque : il n'est écrit que s'il est
+vrai. Vrai, les faces du matériau se voient des deux côtés en rendu En jeu, et
+l'export glTF écrit `"doubleSided": true`. Le MTL ne le connaît pas.
 
 ## `textures`
 
@@ -308,10 +396,19 @@ orné d'un papillon sur le S. Son cahier des charges n'est pas encore écrit.
 - **Données d'animation** : armatures, peaux, poses et animations sont pensées pour être
   consommées par S.A.G.E.
 
-## Export actuel : GLB animé (Rustcraft 0.46 et suivantes, extras au format 2 depuis 0.48)
+## Export actuel : GLB animé (Rustcraft 0.46 et suivantes, extras au format 3 depuis 0.51)
 
-On le trouve dans Fichier › Exporter › « Personnage pour S.A.G.E. » › « GLB animé »
-(`src/sage.rs`). Il exporte l'armature active et ses objets liés en un fichier glTF 2.0
+On le trouve dans Fichier › Exporter › « Personnage pour S.A.G.E. », sous deux formes
+(`gda/src/sage.rs`) :
+
+- **« GLB animé, en couches »** : chaque animation telle quelle, en pose complète, et les
+  `extras` décrivent le reste (mode, référence, masques, mélanges). S.A.G.E. recompose
+  les couches au chargement.
+- **« GLB animé, mélanges aplatis »** : de plus, chaque mélange devient une animation glTF
+  ordinaire, échantillonnée à chaque image (24 par seconde) sur sa durée commune. Tout
+  moteur la lit ; les masques et mélanges ne sont alors pas écrits.
+
+ Il exporte l'armature active et ses objets liés en un fichier glTF 2.0
 binaire standard, validé sans erreur ni avertissement par le validateur Khronos.
 
 - **Nœud 0** : l'armature, à la place de l'objet (échelle uniforme). C'est aussi la
@@ -327,18 +424,34 @@ binaire standard, validé sans erreur ni avertissement par le validateur Khronos
 - **Une animation glTF par animation** :
   - échantillonneurs LINEAR ;
   - rotation = repos × `r` ; translation seulement pour les os qui glissent ;
-  - des clés ajoutées à 0 et à `duree` si elles manquent.
+  - des clés ajoutées à 0 et à `duree` si elles manquent ;
+  - une animation qui laisse tout au repos garde un canal, la rotation de repos du
+    premier os, pour qu'un mélange puisse la désigner.
 - **`extras`**, pour ce que glTF ne sait pas porter :
   - sur le nœud 0 :
-    `"sage": { "format": 2, "id": <id de l'objet armature>, "ancre": <id d'os> | null, "poses": [{ "nom", "os": { <id d'os>: { "r", "t" } } }], "animations": <nombre> }` ;
+    `"sage": { "format": 3, "id": <id de l'objet armature>, "ancre": <id d'os> | null, "poses": [{ "id", "nom", "os": { <id d'os>: { "r", "t" } } }], "animations": <nombre>, "masques": […], "melanges": […] }`.
+    Les poses portent leur identifiant depuis Rustcraft 0.49. `masques` et `melanges`
+    ont la forme du `.gda` (voir « Couches »), n'apparaissent qu'en couches, et seulement
+    s'il y en a ;
   - sur chaque os : `id`, `longueur` et, s'il y en a, `contraintes` (même forme que
     dans le `.gda`) ;
   - sur chaque objet lié (nœud à `mesh`) : `id`, l'identifiant de l'objet ;
-  - sur chaque animation : `boucle` et `duree`.
+  - sur chaque animation : `id`, `boucle` et `duree` ; pour une additive, `mode`
+    (`"additif"`) et `reference` ; puis ses autres clés du `.gda` (`vitesse`,
+    `marqueurs`…). Une référence `{ "cle": k }` donne le rang de la clé **parmi les clés
+    du clip glTF**, qui peut en avoir une de plus au début ; `{ "pose": <id> }` désigne une
+    pose des extras du nœud 0. Une animation aplatie porte `melange`, l'identifiant du
+    mélange dont elle vient, et un identifiant d'animation libre.
 
   Comme dans le `.gda`, **os et objets sont désignés par leur identifiant**. Le `name`
   glTF de chaque nœud porte le nom, pour l'affichage seulement. Le format 1 des extras
-  (Rustcraft 0.46 et 0.47) désignait les os par leur nom et n'avait pas d'`id`.
+  (Rustcraft 0.46 et 0.47) désignait les os par leur nom et n'avait pas d'`id`. Le format
+  2 (0.48 à 0.50) n'avait ni identifiant ni mode d'animation, ni masques, ni mélanges :
+  relu, ses animations reçoivent un identifiant neuf et sont normales.
+- **Relecture** (`gda::sage::lire`, utilisée par S.A.G.E.) : l'armature retrouve ses
+  animations avec leurs identifiants, modes, références et autres clés, ses masques et
+  ses mélanges. Un mélange relu se joue comme l'original, à la précision des flottants du
+  `.glb` (moins de 10⁻⁵ radian sur `Repos vivant`).
 
 Ce choix d'un GLB standard a été fait faute de format S.A.G.E. défini. Il changera quand
 le moteur exprimera ses besoins.
