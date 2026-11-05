@@ -12,7 +12,7 @@ ouvrez la page, puis touchez le fichier `.apk`.
 
 ## État
 
-Version 0.52 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
+Version 0.55 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
 
 - Projets `.gda` des formats 1 à 10, fichiers OBJ, STL, glTF et GLB ; Rustcraft écrit
   le format 10, que GDA n'ouvre pas
@@ -21,6 +21,17 @@ Version 0.52 : **édition en modes Scène, Géométrie et Pose, armatures, modif
   (comme ceux des visualiseurs web qui dessinent tout des deux côtés) est remis à
   l'endroit, et le message le dit ; « Retourner les faces », dans la fiche de l'objet,
   le refait à la main sur les objets choisis
+- « Lier dans cette pose » : un modèle fait dans une autre pose que le repos de
+  l'armature (les bras baissés d'un piéton, l'armature en croix) se lie à l'armature
+  posée comme lui ; il est d'abord remis grossièrement en croix, ses poids s'y
+  calculent, chaque sommet n'allant qu'à un os qu'il voit sans traverser la peau (le
+  flanc d'un corps aux bras le long du torse reste au thorax), puis son
+  maillage revient exactement au repos, et les animations s'y appliquent telles quelles
+- Squelettes sans peau (les piétons de GTA, exportés sans poids) : leurs os vides
+  s'importent en armature « os de … ». Dans la fiche d'un humanoïde, « Ajuster aux os de
+  « … » » le place et le dimensionne dans ce corps, en reconnaissant les noms (Pelvis,
+  L UpperArm, Spine1… ou ceux de Mixamo), garde ses identifiants et son repos en croix,
+  et le pose comme le fichier : « Lier dans cette pose » y lie ensuite le corps
 - Matériaux « Deux côtés » (onglet Matériaux, en jeu et à l'export) : l'envers se voit
   en rendu En jeu, pour les feuillages, grilles et vitres ; lu et écrit en glTF
   (`doubleSided`)
@@ -90,7 +101,10 @@ Version 0.52 : **édition en modes Scène, Géométrie et Pose, armatures, modif
   que la pose ; « Sauvegarder la pose » la garde dans l'onglet Catalogue, d'où elle se
   rappelle, se renomme, se remplace ou se supprime ; l'onglet Animation garde des
   animations (nom, durée, boucle) faites de clés de pose sur une ligne de temps à
-  24 images par seconde, interpolées os par os, lues en boucle ou une fois, et les
+  24 images par seconde, interpolées os par os, lues en boucle ou une fois (une clé
+  posée sur une pose du catalogue s'en souvient : « Reprendre les poses du catalogue »
+  y recopie leur version actuelle, en rattachant les anciennes clés à la pose la plus
+  proche), et les
   mélanges de l'armature : des animations jouées ensemble en couches (normales ou
   additives, avec poids, masque d'os et vitesse), lus en boucle sur leur durée commune,
   qui se créent et se règlent au toucher : pile de couches (animation, mode, poids,

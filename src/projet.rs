@@ -707,6 +707,15 @@ impl Projet {
             p.objets.push(o);
         }
         p.couper_par_texture();
+        // Un squelette laissé sans peau par l'export (les piétons de GTA) : ses os vides
+        // deviennent une armature, à laquelle ajuster l'humanoïde
+        if matches!(ext.as_str(), "glb" | "gltf") {
+            if let Some(a) = Maillage::reperes_gltf(contenu).ok().and_then(|r| gda::ajustement::armature_des_reperes(&r)) {
+                let mut o = Objet::neuf(&format!("os de {base}"), a.enveloppe());
+                o.armature = Some(a);
+                p.objets.push(o);
+            }
+        }
         p.verifier();
         Ok((p, manquantes))
     }

@@ -3841,6 +3841,60 @@ impl App {
         self.dire(format!("{qui} à « {nom} » : {n} os"));
     }
 
+    /// L'armature `id` est-elle posée, telle qu'elle se montre ?
+    fn armature_posee(&self, id: &str) -> bool {
+        !self.au_repos(id) && self.projet.objet_id(id).and_then(|o| o.armature.as_ref()).is_some_and(|a| !a.pose.is_empty())
+    }
+
+    /// Lie les objets choisis dans la pose présente de l'armature, pour un modèle fait
+    /// dans une autre pose que son repos (les bras baissés d'un piéton, l'armature en
+    /// croix) : les poids se calculent dans cette pose, où chaque os est dans son membre,
+    /// puis le maillage revient au repos de l'armature. Dans cette pose, l'objet ne bouge
+    /// pas ; les animations, faites depuis le repos, s'y appliquent telles quelles.
+    pub fn lier_dans_la_pose(&mut self) {
+        let Some(PageLiaison { armature: Some(armature), os }) = self.liaison.clone() else { return };
+        let l = self.cibles_liaison();
+        let Some(x) = self.projet.objet_id(&armature).cloned() else { return };
+        let Some(a) = x.armature.clone() else { return };
+        if os.is_empty() || l.is_empty() {
+            return;
+        }
+        if !self.armature_posee(&armature) {
+            return self.lier();
+        }
+        if let Some(&k) = l.iter().find(|&&k| !modifs::liste(&self.projet.objets[k]).is_empty()) {
+            return self.dire(format!("« {} » a des modifieurs : appliquez-les d'abord", self.projet.objets[k].nom));
+        }
+        // La forme montrée de chaque objet, dans le repère de l'armature
+        let formes: Vec<(usize, Vec<P3>)> = l.iter().map(|&k| {
+            let (vu, m) = (self.maillage_vu(k), self.projet.objets[k].matrice());
+            (k, vu.sommets.iter().map(|p| geo::vers_local(&x, vue::appliquer(&m, *p))).collect())
+        }).collect();
+        self.memoriser();
+        let mx = x.matrice();
+        for (k, pose) in formes {
+            let n = pose.len();
+            let base = self.projet.objets[k].maillage.clone();
+            if base.sommets.len() != n {
+                continue;
+            }
+            let p = if os.len() == 1 { peau::Main::uniforme(os.clone(), n, 0).peau() } else { peau::calculer_dans_la_pose(&pose, &base, &a, &os) };
+            let repos = p.deposer(&pose, &a);
+            let o = &self.projet.objets[k];
+            let mut m = (*base).clone();
+            for (s, v) in m.sommets.iter_mut().zip(repos) {
+                *s = geo::vers_local(o, vue::appliquer(&mx, v));
+            }
+            let o = &mut self.projet.objets[k];
+            o.maillage = Arc::new(m);
+            o.liaison = Some(crate::projet::Liaison { armature: armature.clone(), os: os.clone(), poids: Some(Arc::new(peau::Main::depuis_peau(&p, n))) });
+        }
+        self.liaison = None;
+        self.a_sauver = true;
+        let qui = if let [k] = l[..] { format!("« {} » lié", self.projet.objets[k].nom) } else { format!("{} objets liés", l.len()) };
+        self.dire(format!("{qui} à « {} » dans sa pose : {} os, maillage ramené au repos", x.nom, os.len()));
+    }
+
     fn delier(&mut self) {
         let l: Vec<usize> = self.choix.iter().copied().filter(|k| self.projet.objets[*k].liaison.is_some()).collect();
         if l.is_empty() {
@@ -5545,14 +5599,17 @@ impl App {
                     cx.tabs(id("onglets-os"), onglets, &["Os"], 0);
                     0
                 };
-                let corps_id = [id("corps-os"), id("corps-catalogue"), id("corps-animation")][catalogue.min(2)];
-                let mut b = cx.body(corps_id, corps, &self.scrolls);
-                match catalogue {
-                    1 => self.panneau_catalogue(cx, &mut b),
-                    2 => self.panneau_animation(cx, &mut b),
-                    _ => self.panneau_os(cx, &mut b),
+                if catalogue == 1 {
+                    self.onglet_catalogue(cx, corps);
+                } else {
+                    let corps_id = [id("corps-os"), id("corps-animation")][catalogue.min(2) / 2];
+                    let mut b = cx.body(corps_id, corps, &self.scrolls);
+                    match catalogue {
+                        2 => self.panneau_animation(cx, &mut b),
+                        _ => self.panneau_os(cx, &mut b),
+                    }
+                    cx.body_end(b, &mut self.scrolls);
                 }
-                cx.body_end(b, &mut self.scrolls);
             }
             Contenu::Modifieurs => {
                 cx.tabs(id("onglets-modifieurs"), onglets, &["Modifieurs"], 0);
@@ -6351,9 +6408,38 @@ impl App {
                 self.appliquer_pose(i);
             }
         }
-        let Some(i) = self.pose_choisie else {
-            return cx.paragraph(b, "Touchez une pose pour la donner à l'armature.");
-        };
+        if self.pose_choisie.is_none() {
+            cx.paragraph(b, "Touchez une pose pour la donner à l'armature.");
+        }
+    }
+
+    /// L'onglet Catalogue : la pose choisie reste en tête, fixe, au-dessus de la liste
+    /// qui défile.
+    fn onglet_catalogue(&mut self, cx: &mut Cx, corps: Rect) {
+        let n = self.armature_os().map_or(0, |(_, _, a)| a.poses_nommees().len());
+        if self.pose_choisie.is_some_and(|i| i >= n) {
+            self.pose_choisie = None;
+        }
+        let mut corps = corps;
+        if self.pose_choisie.is_some() {
+            // Sa hauteur est celle mesurée à l'image d'avant
+            let tete = id("catalogue-tete");
+            let h = self.scrolls.get(&tete).map_or(186.0 * cx.dp, |x| x.1).min(corps.h * 0.6);
+            let mut b = cx.body(tete, Rect::new(corps.x, corps.y, corps.w, h), &self.scrolls);
+            self.pose_choisie_tete(cx, &mut b);
+            cx.body_end(b, &mut self.scrolls);
+            corps = Self::sous_entete(cx, corps, h);
+        }
+        let mut b = cx.body(id("corps-catalogue"), corps, &self.scrolls);
+        self.panneau_catalogue(cx, &mut b);
+        cx.body_end(b, &mut self.scrolls);
+    }
+
+    /// La pose choisie du catalogue : son nom, la remplacer, la supprimer.
+    fn pose_choisie_tete(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        let Some((_, _, a)) = self.armature_os() else { return };
+        let poses = a.poses_nommees();
+        let Some(i) = self.pose_choisie.filter(|i| *i < poses.len()) else { return };
         cx.section(b, "POSE CHOISIE");
         if cx.champ(b, id("pose-nom"), "Nom", coul(C::Texte), &poses[i].nom) {
             self.saisir(Champ::PoseNom);
@@ -6712,15 +6798,43 @@ impl App {
         let Some(t) = self.animation().map(|a| a.instant(self.anim_temps)) else { return };
         let Some(i) = self.anim_choisie else { return };
         self.anim_temps = t;
+        // La pose du moment est-elle une pose du catalogue, telle quelle ? La clé s'en
+        // souvient, « Reprendre les poses du catalogue » la suivra
+        let source = self.armature_os().and_then(|(_, _, a)| a.poses_nommees().into_iter().find(|p| !p.id.is_empty() && crate::animation::ecart_max(&p.pose, &a.pose) < 1e-3));
+        let nom = source.as_ref().map(|p| format!(" (« {} »)", p.nom)).unwrap_or_default();
+        let source = source.map(|p| p.id);
         self.changer_os(|a, _| {
             let mut l = a.animations();
             let p = a.pose.clone();
             if let Some(x) = l.get_mut(i) {
-                x.poser_cle(t, p);
+                x.poser_cle_de(t, p, source);
             }
             a.regler_animations(&l);
         });
-        self.dire(format!("Clé à {} s", chiffres(t)));
+        self.dire(format!("Clé à {} s{nom}", chiffres(t)));
+    }
+
+    /// Recopie dans les clés de l'animation choisie la version actuelle de leurs poses du
+    /// catalogue : une étape d'annulation.
+    pub fn reprendre_poses_catalogue(&mut self) {
+        let Some(i) = self.anim_choisie else { return };
+        let mut faits = Vec::new();
+        self.changer_os(|a, _| {
+            let poses = a.poses_nommees();
+            let mut l = a.animations();
+            if let Some(x) = l.get_mut(i) {
+                faits = x.reprendre_poses(&poses);
+            }
+            a.regler_animations(&l);
+        });
+        self.aller_a(self.anim_temps);
+        let n = faits.len();
+        let deduits: Vec<String> = faits.iter().filter(|f| f.2).map(|f| format!("{} s → « {} »", chiffres(f.0), f.1)).collect();
+        let mut m = format!("{n} clé{} mise{} à jour", if n > 1 { "s" } else { "" }, if n > 1 { "s" } else { "" });
+        if !deduits.is_empty() {
+            m += &format!(" ; rattachées par ressemblance : {}", deduits.join(", "));
+        }
+        self.dire(m);
     }
 
     /// La lecture avance l'instant ; sans boucle, elle s'arrête au bout.
@@ -6814,7 +6928,15 @@ impl App {
             // Le doigt s'aimante aux images
             self.aller_a(an.instant(t as f64));
         }
-        let legende = format!("{} s · {} clé{}{}", chiffres(self.anim_temps), an.cles.len(), if an.cles.len() > 1 { "s" } else { "" }, if ici.is_some() { " · sur une clé" } else { "" });
+        // Sur une clé copiée d'une pose du catalogue, la légende la nomme
+        let poses = self.armature_os().map(|(_, _, a)| a.poses_nommees()).unwrap_or_default();
+        let source = an.cle_a(self.anim_temps).and_then(|k| an.cles[k].source.as_ref()).and_then(|s| poses.iter().find(|p| &p.id == s));
+        let sur = match (ici, source) {
+            (Some(_), Some(p)) => format!(" · sur la clé « {} »", p.nom),
+            (Some(_), None) => " · sur une clé".into(),
+            _ => String::new(),
+        };
+        let legende = format!("{} s · {} clé{}{sur}", chiffres(self.anim_temps), an.cles.len(), if an.cles.len() > 1 { "s" } else { "" });
         if cx.legende_lien(b, &legende, Some((id("animation-cle"), if ici.is_some() { "Remplacer la clé" } else { "Poser une clé" }))) {
             self.poser_cle();
         }
@@ -6845,6 +6967,9 @@ impl App {
                 });
                 self.aller_a(t);
             }
+        }
+        if !poses.is_empty() && !an.cles.is_empty() && cx.lien(b, id("animation-reprendre-poses"), "Reprendre les poses du catalogue") {
+            self.reprendre_poses_catalogue();
         }
         if cx.lien(b, id("animation-supprimer"), "Supprimer l'animation") {
             let i = self.anim_choisie;
@@ -7457,6 +7582,12 @@ impl App {
         // Au-dessus de l'arbre : un humanoïde a 19 os
         let pret = armature.is_some_and(|a| page.os.iter().any(|i| a.trouver(i).is_some()));
         let fin = cx.rangee(b, id("liaison-fin"), &[("Lier", pret), ("Annuler", true)]);
+        // Une armature posée : le modèle peut avoir été fait dans cette pose
+        let posee = page.armature.as_ref().is_some_and(|i| self.armature_posee(i));
+        let dans_la_pose = posee && pret && cx.lien(b, id("liaison-pose"), "Lier dans cette pose");
+        if posee {
+            cx.paragraph(b, "Pour un modèle fait dans cette pose, les bras baissés d'un piéton par exemple : ses poids s'y calculent, puis il revient au repos de l'armature.");
+        }
         if let Some(a) = armature {
             page.os.retain(|i| a.trouver(i).is_some());
             cx.paragraph(b, &match page.os.len() {
@@ -7485,6 +7616,9 @@ impl App {
             cx.paragraph(b, "Choisissez une armature.");
         }
         self.liaison = Some(page);
+        if dans_la_pose {
+            return self.lier_dans_la_pose();
+        }
         match fin {
             Some(0) => self.lier(),
             Some(1) => self.liaison = None,
@@ -7505,6 +7639,28 @@ impl App {
             ([i], Some(a)) => format!("Lié à « {} », os {}.", x.nom, a.trouver(i)?.nom),
             _ => format!("Lié à « {} », {} os.", x.nom, l.os.len()),
         })
+    }
+
+    /// Ajuste l'armature humanoïde `k` aux os de l'armature `source` : ses os prennent la
+    /// taille du corps, gardent leur repos en croix, et une pose les met sur ses
+    /// articulations. « Lier dans cette pose » y lie ensuite le corps.
+    pub fn ajuster_armature(&mut self, k: usize, source: usize) {
+        let (x, s) = (&self.projet.objets[k], &self.projet.objets[source]);
+        let (Some(mut a), Some(sa)) = (x.armature.clone(), s.armature.as_ref()) else { return };
+        let ms = s.matrice();
+        let art = gda::ajustement::articulations_de(sa).into_iter().map(|(n, p)| (n, geo::vers_local(x, vue::appliquer(&ms, p)))).collect();
+        let (nom, nom_source) = (x.nom.clone(), s.nom.clone());
+        match a.ajuster(&art) {
+            Ok(n) => {
+                self.memoriser();
+                let o = &mut self.projet.objets[k];
+                o.maillage = Arc::new(a.enveloppe_pose());
+                o.armature = Some(a);
+                self.a_sauver = true;
+                self.dire(format!("« {nom} » ajustée aux os de « {nom_source} » : {n} os, posée comme eux"));
+            }
+            Err(e) => self.dire(format!("Ajustement impossible : {e}")),
+        }
     }
 
     /// Retourne toutes les faces des objets choisis : l'endroit devient l'envers.
@@ -7538,6 +7694,18 @@ impl App {
                 match &o.armature {
                     Some(a) => cx.paragraph(b, &format!("Armature de {} os. Un double appui l'édite.", a.os.len())),
                     None => cx.paragraph(b, &format!("{s} sommets · {f} faces · matériau {mat}")),
+                }
+                // Une armature humanoïde s'ajuste aux os d'une autre, reconnus à leur nom
+                if self.projet.objets[k].armature.as_ref().is_some_and(|a| a.os.iter().any(|x| x.nom == "bassin")) {
+                    let sources: Vec<(usize, String)> = self.projet.objets.iter().enumerate()
+                        .filter(|(j, x)| *j != k && x.armature.as_ref().is_some_and(|a| gda::ajustement::manquantes(&gda::ajustement::articulations_de(a)).is_empty()))
+                        .map(|(j, x)| (j, format!("Ajuster aux os de « {} »", x.nom)))
+                        .collect();
+                    for (i, (j, texte)) in sources.iter().enumerate() {
+                        if cx.lien(b, sub_id(id("ajuster-armature"), i), texte) {
+                            self.ajuster_armature(k, *j);
+                        }
+                    }
                 }
                 if let Some(t) = self.texte_liaison(&self.projet.objets[k]) {
                     cx.paragraph(b, &t);
@@ -11673,6 +11841,91 @@ mod tests {
         b.app.sortir_geometrie();
         assert_eq!(enveloppe(&b), posee);
         assert!(b.app.place_posee(0).is_some());
+    }
+
+    #[test]
+    fn l_humanoide_s_ajuste_aux_os_d_un_pieton_place_et_pose() {
+        // Le squelette d'un piéton, plus grand, bras baissés, placé et tourné dans la scène
+        let mut corps = Armature::humanoide();
+        for b in &mut corps.os {
+            b.position = b.position.map(|c| c * 1.15);
+            b.longueur *= 1.15;
+        }
+        for (n, s) in [("bras.G", -1.0), ("bras.D", 1.0)] {
+            let id = corps.os.iter().find(|b| b.nom == n).unwrap().id.clone();
+            corps.pose.insert(id, gda::armature::Ecart { r: ed::qaxe([0.0, 0.0, 1.0], s * 1.2), t: [0.0; 3] });
+        }
+        let pieton = corps.figee();
+        let mut b = Banc::pret();
+        b.app.ajouter_armature("os du piéton", pieton.clone());
+        let src = b.app.projet.objets.len() - 1;
+        {
+            let o = &mut b.app.projet.objets[src];
+            o.position = [2.0, 0.0, -1.0];
+            o.rotation = ed::qaxe([0.0, 1.0, 0.0], 1.0);
+        }
+        b.app.ajouter_armature("hb", Armature::humanoide());
+        let k = b.app.projet.objets.len() - 1;
+        b.app.choisir(Some(k));
+        b.images(1);
+        b.app.ajuster_armature(k, src);
+        let a = b.app.projet.objets[k].armature.clone().unwrap();
+        assert!(!a.pose.is_empty(), "{:?}", b.app.message);
+        // Les identifiants restent ceux de l'humanoïde
+        assert!(Armature::humanoide().os.iter().all(|x| a.os.iter().any(|y| y.id == x.id)));
+        // Dans sa pose, chaque épaule et chaque coude tombe sur ceux du piéton, dans la scène
+        let monde = |k: usize, a: &Armature, n: &str| {
+            let o = &b.app.projet.objets[k];
+            let id = &a.os.iter().find(|x| x.nom == n).unwrap().id;
+            vue::appliquer(&o.matrice(), a.segments_pose()[id].tete)
+        };
+        for n in ["bras.G", "avant-bras.G", "main.D", "jambe.D", "pied.G", "tete"] {
+            let (p, q) = (monde(k, &a, n), monde(src, &pieton, n));
+            assert!((0..3).all(|c| (p[c] - q[c]).abs() < 1e-5), "{n} : {p:?} au lieu de {q:?}");
+        }
+        assert_eq!(*b.app.projet.objets[k].maillage, a.enveloppe_pose());
+        b.app.annuler();
+        assert!(b.app.projet.objets[k].armature.as_ref().unwrap().pose.is_empty());
+    }
+
+    #[test]
+    fn lier_dans_la_pose_garde_la_forme_et_ramene_le_maillage_au_repos() {
+        let (mut b, _) = banc_pose();
+        tourner_bras(&mut b, ed::qaxe([0.0, 0.0, 1.0], -1.2));
+        b.app.basculer_pose();
+        b.app.basculer_pose();
+        b.app.sortir_geometrie();
+        let x = b.app.projet.objets[1].clone();
+        let a = x.armature.clone().unwrap();
+        assert!(!a.pose.is_empty());
+        // Un corps modelé dans cette pose, au repère de l'armature, comme un piéton de GTA
+        let o = &mut b.app.projet.objets[0];
+        o.liaison = None;
+        (o.position, o.rotation, o.echelle) = (x.position, x.rotation, x.echelle);
+        o.maillage = Arc::new(a.enveloppe_pose());
+        b.app.choisir(Some(0));
+        b.app.ouvrir_liaison();
+        b.images(1);
+        assert!(b.app.armature_posee(&x.id));
+        b.app.lier_dans_la_pose();
+        let l = liaison_de(&b, 0).unwrap();
+        assert!(l.poids.is_some() && l.os.len() == a.os.len(), "{:?}", b.app.message);
+        // Au repos, le maillage a pris la pose de l'armature au repos
+        let ecart = |u: &[P3], v: &[P3]| {
+            let mut e: Vec<f64> = u.iter().zip(v).map(|(p, q)| (0..3).map(|c| (p[c] - q[c]).powi(2)).sum::<f64>().sqrt()).collect();
+            e.sort_by(|p, q| p.total_cmp(q));
+            (e[e.len() / 2], e[e.len() - 1])
+        };
+        let (mediane, _) = ecart(&b.app.projet.objets[0].maillage.sommets, &a.enveloppe().sommets);
+        assert!(mediane < 1e-6, "médiane {mediane}");
+        // Dans la pose, il se montre comme avant
+        b.images(5);
+        let (_, pire) = ecart(&b.app.maillage_vu(0).sommets, &a.enveloppe_pose().sommets);
+        assert!(pire < 1e-6, "pire {pire}");
+        // Et tout s'annule
+        b.app.annuler();
+        assert!(liaison_de(&b, 0).is_none());
+        assert_eq!(b.app.projet.objets[0].maillage.sommets, a.enveloppe_pose().sommets);
     }
 
     #[test]

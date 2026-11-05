@@ -229,7 +229,7 @@ Rustcraft garde et réécrit toutes les autres clés de l'armature.
   "vitesse": 1.44,
   "marqueurs": [{ "t": 0, "nom": "contact.G" }, { "t": 0.5, "nom": "contact.D" }],
   "cles": [
-    { "t": 0,   "os": { "<id os>": { "r": […], "t": […] } } },
+    { "t": 0,   "pose": "p5", "os": { "<id os>": { "r": […], "t": […] } } },
     { "t": 0.5, "os": { … } }
   ]
 }
@@ -245,6 +245,9 @@ Rustcraft garde et réécrit toutes les autres clés de l'armature.
   - en boucle, l'animation revient vers la première clé, atteinte à
     `t₀ + duree` ;
   - sinon, la dernière pose est tenue.
+- **`pose`**, facultatif dans une clé : l'id de la pose du catalogue dont la clé est la
+  copie. « Reprendre les poses du catalogue » recopie cette pose dans la clé. La
+  clé garde toujours ses `os` : sans catalogue, elle se lit seule.
 - Une clé sans `t` rend son animation illisible : l'animation est ignorée. Les écarts
   vers des os disparus sont oubliés.
 - **`mode`** : `"normal"` (par défaut, clé absente) ou `"additif"`. Une animation normale
