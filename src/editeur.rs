@@ -251,6 +251,8 @@ pub enum Selection {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Derniere {
     Subdivision { coupes: usize },
+    /// Les éléments d'un type, recopiés à `distance` le long de la normale.
+    Extrusion { t: T, distance: f64 },
     Boucle { arete: Arete, coupes: usize, glissement: f64, uniforme: bool, inverser: bool },
     Fusion { cible: Cible },
     Revolution { axe: usize, vue: P3, angle: f64, inverse: bool, segments: usize, fermer: bool },
@@ -287,6 +289,7 @@ impl Derniere {
     fn titre(self) -> &'static str {
         match self {
             Derniere::Subdivision { .. } => "Subdivision",
+            Derniere::Extrusion { .. } => "Extrusion",
             Derniere::Boucle { .. } => "Boucle de coupe",
             Derniere::Fusion { .. } => "Fusion",
             Derniere::Revolution { .. } => "Révolution",
@@ -323,6 +326,7 @@ pub enum Champ {
     Angle,
     Segments,
     Tolerance,
+    Distance,
     Couleur(usize),
     Decalage(usize),
     Facteur(usize),
@@ -380,6 +384,7 @@ impl Champ {
             Champ::Angle => "Angle (degrés)".into(),
             Champ::Segments => "Segments".into(),
             Champ::Tolerance => "Tolérance".into(),
+            Champ::Distance => "Distance".into(),
             Champ::Couleur(i) => format!("{} (#rrggbb)", theme::LIGNES[i].libelle),
             Champ::Decalage(k) => format!("Décalage {}", NOMS_AXES[k]),
             Champ::Facteur(k) => format!("Facteur {}", NOMS_AXES[k]),
@@ -2884,6 +2889,32 @@ impl App {
         }
     }
 
+    /// Extrude les éléments sélectionnés du type `t`, d'une distance à l'échelle de la
+    /// sélection (le quart de sa plus grande dimension, arrondi), réglable ensuite.
+    fn extruder(&mut self, t: T) {
+        let p = self.points();
+        let etendue = |p: &[P3]| {
+            let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+            for q in p {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(q[k]);
+                    hi[k] = hi[k].max(q[k]);
+                }
+            }
+            (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max)
+        };
+        let mut e = etendue(&p);
+        if e < 1e-9 {
+            e = self.travail.as_ref().map_or(0.0, |t| etendue(&t.m.sommets) * 0.4);
+        }
+        let brut = if e > 1e-9 { e / 4.0 } else { 1.0 };
+        // 1, 2 ou 5 fois une puissance de dix
+        let p10 = 10f64.powf(brut.log10().floor());
+        let r = brut / p10;
+        let distance = p10 * if r < 1.5 { 1.0 } else if r < 3.5 { 2.0 } else if r < 7.5 { 5.0 } else { 10.0 };
+        self.lancer(Derniere::Extrusion { t, distance });
+    }
+
     /// Lance une opération réglable, retenue pour le panneau.
     fn lancer(&mut self, d: Derniere) {
         let avant = self.etape();
@@ -2929,6 +2960,7 @@ impl App {
         let Some(t) = &mut self.travail else { return Ok(None) };
         match d {
             Derniere::Subdivision { coupes } => t.subdiviser(coupes),
+            Derniere::Extrusion { t: ty, distance } => t.extruder(ty, distance),
             Derniere::Boucle { arete, coupes, glissement, uniforme, inverser } => t.boucle(Some(arete), coupes, glissement, uniforme, inverser),
             Derniere::Fusion { cible } => t.fusionner(cible),
             Derniere::Proches { tolerance } => t.fusion_proches(tolerance),
@@ -3967,6 +3999,7 @@ impl App {
             (Champ::Pivot(k), Some(Derniere::Echelle { pivot, .. } | Derniere::Rotation { pivot, .. })) => pivot[k],
             (Champ::Segments, Some(Derniere::Revolution { segments, .. })) => segments as f64,
             (Champ::Tolerance, Some(Derniere::Proches { tolerance })) => return Some(format!("{tolerance}").replace('.', ",")),
+            (Champ::Distance, Some(Derniere::Extrusion { distance, .. })) => distance,
             (Champ::Nom, _) => return Some(objet?.nom.clone()),
             (Champ::Projet, _) => return Some(self.nom.clone()),
             (Champ::Couleur(i), _) => return Some(theme::hex(coul(theme::LIGNES[i].c))),
@@ -4129,6 +4162,7 @@ impl App {
                 (Champ::Angle, Derniere::Revolution { axe, vue, inverse, segments, fermer, .. }) => Some(Derniere::Revolution { axe, vue, angle: v.clamp(0.01, 360.0), inverse, segments, fermer }),
                 (Champ::Segments, Derniere::Revolution { axe, vue, angle, inverse, fermer, .. }) => Some(Derniere::Revolution { axe, vue, angle, inverse, segments: (v as usize).clamp(1, 256), fermer }),
                 (Champ::Tolerance, Derniere::Proches { .. }) => Some(Derniere::Proches { tolerance: v.max(0.0) }),
+                (Champ::Distance, Derniere::Extrusion { t, .. }) => Some(Derniere::Extrusion { t, distance: v }),
                 (Champ::Decalage(k), Derniere::Translation { mut d }) => {
                     d[k] = v;
                     Some(Derniere::Translation { d })
@@ -6106,6 +6140,9 @@ impl App {
             A::DescendantsOs => self.descendants_os(),
             A::ReposOs => self.repos_os(),
             A::CreerFace => self.operer(Travail::creer_face),
+            A::ExtruderSommets => self.extruder(T::S),
+            A::ExtruderAretes => self.extruder(T::A),
+            A::ExtruderFaces => self.extruder(T::F),
             A::Inverser => self.operer(Travail::inverser),
             A::Trianguler => self.operer(Travail::trianguler),
             A::Separer => self.separer(),
@@ -6224,6 +6261,11 @@ impl App {
             Derniere::Proches { tolerance } => {
                 if cx.champ(b, id("r-tol"), "Tolérance", coul(C::Texte), &format!("{tolerance}")) {
                     self.saisir(Champ::Tolerance);
+                }
+            }
+            Derniere::Extrusion { distance, .. } => {
+                if cx.champ(b, id("r-distance"), "Distance", coul(C::Texte), &chiffres(*distance)) {
+                    self.saisir(Champ::Distance);
                 }
             }
             Derniere::Translation { d } => self.champs(cx, b, "Décalage", id("r-decalage"), *d, Champ::Decalage),

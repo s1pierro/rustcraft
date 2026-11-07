@@ -12,7 +12,7 @@ ouvrez la page, puis touchez le fichier `.apk`.
 
 ## État
 
-Version 0.55 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
+Version 0.56 : **édition en modes Scène, Géométrie et Pose, armatures, modifieurs, visserie, UV et matériaux**.
 
 - Projets `.gda` des formats 1 à 10, fichiers OBJ, STL, glTF et GLB ; Rustcraft écrit
   le format 10, que GDA n'ouvre pas
@@ -55,6 +55,10 @@ Version 0.55 : **édition en modes Scène, Géométrie et Pose, armatures, modif
   toucher, en boîte, par chemin, éléments liés, conversions
 - Opérations : créer, supprimer, inverser, trianguler, séparer, dissoudre, subdiviser,
   boucle de coupe, fusionner, révolution, avec réglage de la dernière opération
+- Extrusion, un type d'élément à la fois : un sommet se recopie relié par une arête,
+  une arête par un quadrilatère qui prolonge la surface, une région de faces par ses
+  flancs (seule, elle garde son fond et forme un volume) ; distance le long de la
+  normale réglable, copies sélectionnées
 - Nettoyer la sélection : sommets isolés, arêtes libres seules, faces sans arête
   commune avec une autre (liens présents seulement s'il y a quelque chose à retirer)
 - Pastille Contexte : fiche de l'objet ou de la géométrie, et onglet Dernière opération

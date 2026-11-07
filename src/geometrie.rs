@@ -1261,6 +1261,272 @@ impl Travail {
         Ok(Some(l.join(" · ")))
     }
 
+    /// Extrude les éléments sélectionnés d'un seul type, recopiés à `distance` le long
+    /// de la normale et liés à leur source : un sommet par une arête, une arête par un
+    /// quadrilatère, une région de faces par ses flancs (une région qui ne tient à rien
+    /// garde aussi sa face d'origine, retournée : elle forme un volume). Les copies sont
+    /// sélectionnées.
+    pub fn extruder(&mut self, t: T, distance: f64) -> Bilan {
+        let m0 = self.m.clone();
+        let normale = |f: &Face| m0.normale(&f.s);
+        let unitaire = |v: P3| {
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            (l > 1e-12).then(|| [v[0] / l, v[1] / l, v[2] / l])
+        };
+        // La direction des sommets et des arêtes : la normale moyenne des faces qui les
+        // touchent, sinon vers le haut
+        let direction_autour = |l: &HashSet<usize>| {
+            let mut d = [0.0; 3];
+            for f in m0.faces.iter().filter(|f| f.s.iter().any(|i| l.contains(i))) {
+                let n = normale(f);
+                for k in 0..3 {
+                    d[k] += n[k];
+                }
+            }
+            unitaire(d).unwrap_or([0.0, 1.0, 0.0])
+        };
+        let n0 = m0.sommets.len();
+        // Les copies : source → nouveau sommet
+        let mut copie: HashMap<usize, usize> = HashMap::new();
+        let mut nouveaux: Vec<(usize, P3)> = Vec::new();
+        let mut doubler = |i: usize, d: P3, copie: &mut HashMap<usize, usize>| -> usize {
+            *copie.entry(i).or_insert_with(|| {
+                let p = m0.sommets[i];
+                nouveaux.push((i, [p[0] + d[0] * distance, p[1] + d[1] * distance, p[2] + d[2] * distance]));
+                n0 + nouveaux.len() - 1
+            })
+        };
+        let mut fils: Vec<Arete> = Vec::new();
+        let mut faces: Vec<Face> = Vec::new();
+        // Faces retouchées : (indice, nouveaux sommets) ; sommets déplacés sur place
+        let mut remplacees: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut deplaces: Vec<(usize, P3)> = Vec::new();
+        let mut aretes_source: Vec<Arete> = Vec::new();
+        match t {
+            T::S => {
+                let l = self.sel.sommets.clone();
+                if l.is_empty() {
+                    return Err("Aucun sommet sélectionné".into());
+                }
+                let d = direction_autour(&l.iter().copied().collect());
+                for &i in &l {
+                    let j = doubler(i, d, &mut copie);
+                    fils.push([i, j]);
+                }
+            }
+            T::A => {
+                let l = self.sel.aretes.clone();
+                if l.is_empty() {
+                    return Err("Aucune arête sélectionnée".into());
+                }
+                let d = direction_autour(&l.iter().flatten().copied().collect());
+                aretes_source = l.clone();
+                // Le sens de chaque arête : contraire à celui de sa face, pour prolonger la
+                // surface ; sans face, le long de la chaîne qu'elle forme
+                let sens_face = |a: usize, b: usize| -> Option<(bool, Mat)> {
+                    for f in &m0.faces {
+                        for k in 0..f.s.len() {
+                            let (x, y) = (f.s[k], f.s[(k + 1) % f.s.len()]);
+                            if (x, y) == (a, b) {
+                                return Some((true, f.m.clone()));
+                            }
+                            if (x, y) == (b, a) {
+                                return Some((false, f.m.clone()));
+                            }
+                        }
+                    }
+                    None
+                };
+                let mut libres: Vec<Arete> = Vec::new();
+                let mut orientees: Vec<(usize, usize, Mat)> = Vec::new();
+                for &[a, b] in &l {
+                    match sens_face(a, b) {
+                        // La face va de a à b : la nouvelle de b à a
+                        Some((true, m)) => orientees.push((b, a, m)),
+                        Some((false, m)) => orientees.push((a, b, m)),
+                        None => libres.push([a, b]),
+                    }
+                }
+                let defaut: Mat = m0.faces.first().map_or_else(|| Arc::from("defaut"), |f| f.m.clone());
+                // Les chaînes d'arêtes libres, parcourues depuis un bout
+                let mut reste: Vec<Arete> = libres;
+                while !reste.is_empty() {
+                    let degre = |v: usize, r: &[Arete]| r.iter().filter(|e| e.contains(&v)).count();
+                    let depart = reste.iter().flatten().copied().find(|&v| degre(v, &reste) == 1).unwrap_or(reste[0][0]);
+                    let mut v = depart;
+                    while let Some(k) = reste.iter().position(|e| e.contains(&v)) {
+                        let e = reste.remove(k);
+                        let w = if e[0] == v { e[1] } else { e[0] };
+                        orientees.push((v, w, defaut.clone()));
+                        v = w;
+                    }
+                }
+                for (a, b, mat) in orientees {
+                    let (a2, b2) = (doubler(a, d, &mut copie), doubler(b, d, &mut copie));
+                    faces.push(face(&mat, vec![a, b, b2, a2]));
+                }
+            }
+            T::F => {
+                let l: Vec<usize> = self.sel.faces.clone();
+                if l.is_empty() {
+                    return Err("Aucune face sélectionnée".into());
+                }
+                let choisies: HashSet<usize> = l.iter().copied().collect();
+                // Les régions : faces choisies qui se touchent par un sommet
+                let mut parent: Vec<usize> = (0..l.len()).collect();
+                fn racine(p: &mut [usize], mut i: usize) -> usize {
+                    while p[i] != i {
+                        p[i] = p[p[i]];
+                        i = p[i];
+                    }
+                    i
+                }
+                let mut premier: HashMap<usize, usize> = HashMap::new();
+                for (k, &f) in l.iter().enumerate() {
+                    for &v in &m0.faces[f].s {
+                        match premier.get(&v) {
+                            Some(&j) => {
+                                let (a, b) = (racine(&mut parent, k), racine(&mut parent, j));
+                                parent[a] = b;
+                            }
+                            None => {
+                                premier.insert(v, k);
+                            }
+                        }
+                    }
+                }
+                let mut regions: HashMap<usize, Vec<usize>> = HashMap::new();
+                for k in 0..l.len() {
+                    let r = racine(&mut parent, k);
+                    regions.entry(r).or_default().push(l[k]);
+                }
+                // Ce qui tient aux sommets hors des faces choisies
+                let mut ailleurs: HashSet<usize> = m0.fils.iter().flatten().copied().collect();
+                let mut aretes_ailleurs: HashSet<Arete> = HashSet::new();
+                for (k, f) in m0.faces.iter().enumerate() {
+                    if !choisies.contains(&k) {
+                        ailleurs.extend(f.s.iter().copied());
+                        for q in 0..f.s.len() {
+                            aretes_ailleurs.insert(arete(f.s[q], f.s[(q + 1) % f.s.len()]));
+                        }
+                    }
+                }
+                let mut regions: Vec<Vec<usize>> = regions.into_values().collect();
+                regions.sort();
+                for r in regions {
+                    let mut n = [0.0; 3];
+                    for &f in &r {
+                        let x = normale(&m0.faces[f]);
+                        for k in 0..3 {
+                            n[k] += x[k];
+                        }
+                    }
+                    let d = unitaire(n).unwrap_or([0.0, 1.0, 0.0]);
+                    // Le bord : les arêtes qu'une seule face de la région parcourt
+                    let mut compte: HashMap<Arete, usize> = HashMap::new();
+                    for &f in &r {
+                        let s = &m0.faces[f].s;
+                        for q in 0..s.len() {
+                            *compte.entry(arete(s[q], s[(q + 1) % s.len()])).or_insert(0) += 1;
+                        }
+                    }
+                    let bord: Vec<(usize, usize, usize)> = r
+                        .iter()
+                        .flat_map(|&f| {
+                            let s = &m0.faces[f].s;
+                            (0..s.len()).map(move |q| (f, s[q], s[(q + 1) % s.len()]))
+                        })
+                        .filter(|&(_, a, b)| compte[&arete(a, b)] == 1)
+                        .collect();
+                    // Une région qui ne tient à rien garde son fond : un volume fermé
+                    let fond = !bord.is_empty() && bord.iter().all(|&(_, a, b)| !aretes_ailleurs.contains(&arete(a, b)));
+                    let sur_bord: HashSet<usize> = bord.iter().flat_map(|&(_, a, b)| [a, b]).collect();
+                    let a_doubler = |v: usize| fond || sur_bord.contains(&v) || ailleurs.contains(&v);
+                    for &f in &r {
+                        let s: Vec<usize> = m0.faces[f]
+                            .s
+                            .iter()
+                            .map(|&v| {
+                                if a_doubler(v) {
+                                    doubler(v, d, &mut copie)
+                                } else {
+                                    if !deplaces.iter().any(|x| x.0 == v) {
+                                        let p = m0.sommets[v];
+                                        deplaces.push((v, [p[0] + d[0] * distance, p[1] + d[1] * distance, p[2] + d[2] * distance]));
+                                    }
+                                    v
+                                }
+                            })
+                            .collect();
+                        remplacees.push((f, s));
+                    }
+                    for &(f, a, b) in &bord {
+                        let (a2, b2) = (doubler(a, d, &mut copie), doubler(b, d, &mut copie));
+                        faces.push(face(&m0.faces[f].m, vec![a, b, b2, a2]));
+                    }
+                    if fond {
+                        for &f in &r {
+                            let x = &m0.faces[f];
+                            let mut s = x.s.clone();
+                            let mut uv = x.uv.clone();
+                            s.reverse();
+                            uv.reverse();
+                            faces.push(Face { s, m: x.m.clone(), uv });
+                        }
+                    }
+                }
+            }
+        }
+        // Le maillage
+        let (nf, nn) = (faces.len(), nouveaux.len());
+        for &(i, _) in &nouveaux {
+            let p = self.proprio[i];
+            self.proprio.push(p);
+        }
+        let m = self.mm();
+        m.sommets.extend(nouveaux.iter().map(|x| x.1));
+        for (v, p) in &deplaces {
+            m.sommets[*v] = *p;
+        }
+        for (f, s) in &remplacees {
+            m.faces[*f].s = s.clone();
+        }
+        m.faces.extend(faces);
+        m.fils.extend(fils.iter().copied());
+        m.nettoyer_fils();
+        // Les copies sélectionnées, et elles seules
+        self.sel.vider(None);
+        match t {
+            T::S => {
+                let mut l: Vec<usize> = copie.values().copied().collect();
+                l.sort();
+                for j in l {
+                    self.sel.ajouter(El::S(j));
+                }
+            }
+            T::A => {
+                for [a, b] in aretes_source {
+                    self.sel.ajouter(El::A(arete(copie[&a], copie[&b])));
+                }
+            }
+            T::F => {
+                for (f, _) in &remplacees {
+                    self.sel.ajouter(El::F(*f));
+                }
+            }
+        }
+        self.rendre_selectionnable(t);
+        self.maj();
+        let mut r = vec![format!("{nn} sommet{p} ajouté{p}", p = pl(nn))];
+        if nf > 0 {
+            r.push(format!("{nf} face{p} ajoutée{p}", p = pl(nf)));
+        }
+        if !fils.is_empty() {
+            r.push(format!("{} arête{p} ajoutée{p}", fils.len(), p = pl(fils.len())));
+        }
+        Ok(Some(format!("Extrusion : {} ; glissez pour écarter les copies", r.join(", "))))
+    }
+
     // ----- Sélection ---------------------------------------------------------
 
     pub fn convertir(&mut self, de: T, vers: T) -> Bilan {
@@ -1598,6 +1864,87 @@ mod tests {
 
     fn cube() -> Travail {
         Travail::ouvrir(&[Objet::neuf("c", Maillage::cube(2.0))], &[0], 0, [true; 3])
+    }
+
+    /// Chaque arête de deux faces y est parcourue une fois dans chaque sens ; `ferme` :
+    /// toutes les arêtes ont deux faces.
+    fn bien_oriente(m: &Maillage, ferme: bool) -> bool {
+        let mut dirigees: HashMap<(usize, usize), usize> = HashMap::new();
+        for f in &m.faces {
+            for k in 0..f.s.len() {
+                *dirigees.entry((f.s[k], f.s[(k + 1) % f.s.len()])).or_insert(0) += 1;
+            }
+        }
+        dirigees.iter().all(|(&(a, b), &n)| n == 1 && (!ferme || dirigees.contains_key(&(b, a))))
+    }
+
+    fn plan() -> Travail {
+        let mut m = Maillage::default();
+        m.sommets.extend([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 0.0, 0.0]]);
+        m.faces.push(face(&Arc::from("defaut"), vec![0, 1, 2, 3]));
+        Travail::ouvrir(&[Objet::neuf("p", m)], &[0], 0, [true; 3])
+    }
+
+    #[test]
+    fn extruder_une_face_du_cube_ajoute_ses_flancs() {
+        let mut t = cube();
+        let haut = (0..6).find(|&f| t.m.normale(&t.m.faces[f].s)[1] > 0.9).unwrap();
+        t.sel.ajouter(El::F(haut));
+        t.extruder(T::F, 0.5).unwrap();
+        assert_eq!((t.m.sommets.len(), t.m.faces.len()), (12, 10));
+        assert!(bien_oriente(&t.m, true));
+        assert_eq!(t.sel.faces, vec![haut]);
+        assert!(t.m.faces[haut].s.iter().all(|&i| (t.m.sommets[i][1] - 1.5).abs() < 1e-9));
+        assert_eq!(t.proprio.len(), 12);
+    }
+
+    #[test]
+    fn extruder_une_face_seule_forme_un_volume() {
+        let mut t = plan();
+        t.sel.ajouter(El::F(0));
+        t.extruder(T::F, 2.0).unwrap();
+        assert_eq!((t.m.sommets.len(), t.m.faces.len()), (8, 6));
+        assert!(bien_oriente(&t.m, true));
+    }
+
+    #[test]
+    fn extruder_une_arete_prolonge_la_surface() {
+        let mut t = plan();
+        t.sel.ajouter(El::A(arete(1, 2)));
+        t.extruder(T::A, 1.0).unwrap();
+        assert_eq!((t.m.sommets.len(), t.m.faces.len()), (6, 2));
+        assert!(bien_oriente(&t.m, false));
+        assert_eq!(t.sel.aretes, vec![arete(4, 5)]);
+        assert!(t.sel.sommets.is_empty() && t.sel.faces.is_empty());
+    }
+
+    #[test]
+    fn extruder_une_chaine_de_fils_fait_une_bande_bien_orientee() {
+        let mut m = Maillage::default();
+        m.sommets.extend([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]);
+        m.fils.extend([[1, 0], [1, 2], [3, 2]]);
+        let mut t = Travail::ouvrir(&[Objet::neuf("f", m)], &[0], 0, [true; 3]);
+        for a in [arete(0, 1), arete(1, 2), arete(2, 3)] {
+            t.sel.ajouter(El::A(a));
+        }
+        t.extruder(T::A, 1.0).unwrap();
+        assert_eq!((t.m.sommets.len(), t.m.faces.len()), (8, 3));
+        assert!(bien_oriente(&t.m, false));
+        assert!(t.m.fils.is_empty(), "les fils sont devenus des bords de faces");
+        // Sans face voisine, vers le haut
+        assert!((t.m.sommets[4][1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extruder_des_sommets_les_relie_par_des_aretes() {
+        let mut t = cube();
+        t.sel.ajouter(El::S(0));
+        t.sel.ajouter(El::S(1));
+        t.extruder(T::S, 1.0).unwrap();
+        assert_eq!(t.m.sommets.len(), 10);
+        assert!(t.m.fils.contains(&[0, 8]) && t.m.fils.contains(&[1, 9]));
+        assert_eq!(t.sel.sommets, vec![8, 9]);
+        assert_eq!(t.m.faces.len(), 6);
     }
 
     fn vue() -> Vue {
