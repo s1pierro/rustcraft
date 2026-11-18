@@ -1,6 +1,6 @@
 [package]
 name = "rustcraft"
-version = "0.59.0"
+version = "0.60.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 
@@ -13,6 +13,7 @@ gda = { path = "../gda" }
 fontdue = "0.9"
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
+gif = { version = "0.13", default-features = false, features = ["std"] }
 boolmesh = "0.2"
 
 [lib]

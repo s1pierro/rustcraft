@@ -103,10 +103,48 @@ pub fn decoder(d: &[u8]) -> Result<Image, String> {
         png(d)?
     } else if d.starts_with(&[0xFF, 0xD8]) {
         jpeg(d)?
+    } else if d.starts_with(b"GIF8") {
+        gif(d)?
     } else {
-        return Err("image ni PNG ni JPEG".into());
+        return Err("image ni PNG, ni JPEG, ni GIF".into());
     };
     Ok(reduire(i))
+}
+
+/// Première image d'un GIF, en RVBA.
+fn gif(d: &[u8]) -> Result<Image, String> {
+    let mut o = gif::DecodeOptions::new();
+    o.set_color_output(gif::ColorOutput::RGBA);
+    let mut r = o.read_info(d).map_err(|e| format!("GIF : {e}"))?;
+    let (l, h) = (r.width() as u32, r.height() as u32);
+    let mut rgba = vec![255u8; (l * h * 4) as usize];
+    let f = r.read_next_frame().map_err(|e| format!("GIF : {e}"))?.ok_or("GIF : aucune image")?;
+    // L'image peut ne couvrir qu'une partie du canevas
+    for y in 0..f.height as u32 {
+        for x in 0..f.width as u32 {
+            let (cx, cy) = (x + f.left as u32, y + f.top as u32);
+            if cx < l && cy < h {
+                let (i, j) = (((y * f.width as u32 + x) * 4) as usize, ((cy * l + cx) * 4) as usize);
+                rgba[j..j + 4].copy_from_slice(&f.buffer[i..i + 4]);
+            }
+        }
+    }
+    Ok(Image { l, h, rgba })
+}
+
+/// Un GIF devient un PNG, que l'export (glTF, OBJ) sait porter ; les autres images
+/// restent telles quelles.
+pub fn sans_gif(d: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
+    if !d.starts_with(b"GIF8") {
+        return Ok(std::borrow::Cow::Borrowed(d));
+    }
+    let i = gif(d)?;
+    let mut o = Vec::new();
+    let mut e = png::Encoder::new(&mut o, i.l, i.h);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header().and_then(|mut w| w.write_image_data(&i.rgba)).map_err(|e| format!("PNG : {e}"))?;
+    Ok(std::borrow::Cow::Owned(o))
 }
 
 fn png(d: &[u8]) -> Result<Image, String> {

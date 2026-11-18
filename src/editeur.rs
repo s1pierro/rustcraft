@@ -385,7 +385,7 @@ impl Champ {
             Champ::ModifDecalage(_, k) => format!("Décalage {}", NOMS_AXES[k]),
             Champ::Position(k) => format!("Position {}", NOMS_AXES[k]),
             Champ::Curseur(k) => format!("Curseur {}", NOMS_AXES[k]),
-            Champ::Plan(k) => ["Largeur du plan", "Décalage à droite", "Décalage en haut"][k.min(2)].into(),
+            Champ::Plan(k) => ["Taille réelle du plan", "Décalage à droite", "Décalage en haut"][k.min(2)].into(),
             Champ::OsTranslation(k) => format!("Translation {}", NOMS_AXES[k]),
             Champ::Rotation(k) => format!("Rotation {}", NOMS_AXES[k]),
             Champ::Dimension(k) => format!("Dimensions {}", NOMS_AXES[k]),
@@ -806,7 +806,7 @@ pub struct App {
     pub onglet_aide: usize,
     /// Opération dont l'aide est dépliée.
     deplie: Option<A>,
-    scrolls: Scrolls,
+    pub scrolls: Scrolls,
     message: Option<(String, f32)>,
     /// Taille de l'espace de travail, pour cadrer.
     espace: Rect,
@@ -846,9 +846,13 @@ pub struct App {
     /// Matériau qui attend l'image du sélecteur.
     image_pour: Option<String>,
     /// L'image attendue du sélecteur sera un nouveau plan de référence.
-    plan_a_venir: bool,
+    plan_a_venir: Option<bool>,
+    /// Prise du cadre de la zone d'un plan : bords tenus, zone et point de départ.
+    prise_zone: Option<([bool; 4], [f64; 4], (f64, f64))>,
+    /// Carrés des plans, par zone et quarts de tour.
+    carres_plans: HashMap<([u64; 4], u8), Arc<Maillage>>,
     /// Plan de référence choisi dans le panneau Scène.
-    plan_actif: Option<usize>,
+    pub plan_actif: Option<usize>,
     /// Départ de la boîte en cours dans la vue UV.
     boite_uv: Option<(f32, f32)>,
     /// Derniers réglages de chaque primitive, repris à l'ajout suivant.
@@ -990,7 +994,9 @@ impl App {
             mat_couleur: None,
             mat_saisie: false,
             image_pour: None,
-            plan_a_venir: false,
+            plan_a_venir: None,
+            prise_zone: None,
+            carres_plans: HashMap::new(),
             plan_actif: None,
             boite_uv: None,
             primitives: HashMap::new(),
@@ -1898,13 +1904,14 @@ impl App {
     fn choisir_image(&mut self) {
         let Some(n) = self.materiau_actif() else { return self.dire("Touchez d'abord un objet".into()) };
         self.image_pour = Some(n);
-        self.plan_a_venir = false;
+        self.plan_a_venir = None;
         self.selecteur = Some(Selecteur::Image);
     }
 
-    /// Demande une image au sélecteur, pour un nouveau plan de référence.
-    pub fn ajouter_plan(&mut self) {
-        self.plan_a_venir = true;
+    /// Demande une image au sélecteur, pour un nouveau plan de référence ; une planche
+    /// (plusieurs vues sur une image) donne un plan par vue.
+    pub fn ajouter_plan(&mut self, planche: bool) {
+        self.plan_a_venir = Some(planche);
         self.selecteur = Some(Selecteur::Image);
     }
 
@@ -1912,13 +1919,7 @@ impl App {
     /// moment, sinon de face, centré sur ce que la vue regarde et à la largeur de ce
     /// qu'elle montre : l'image remplit à peu près l'écran.
     pub fn recevoir_plan(&mut self, fichier: &str, octets: &[u8]) {
-        let i = match texture::decoder(octets) {
-            Ok(i) => i,
-            Err(e) => return self.dire(format!("Image illisible : {fichier} ({e})")),
-        };
-        let cle = texture::identifiant(octets);
-        self.projet.textures.entry(cle.clone()).or_insert_with(|| crate::texture::Texture { nom: fichier.to_string(), octets: Arc::new(octets.to_vec()) });
-        let base = fichier.rsplit(['/', '\\']).next().unwrap_or(fichier).to_string();
+        let Some((i, cle, base)) = self.garder_image_plan(fichier, octets) else { return };
         let (_, _, _, dos) = self.repere();
         let vue = plans::vue_de(dos).unwrap_or(0);
         let (_, _, d, h) = plans::VUES[vue];
@@ -1929,13 +1930,75 @@ impl App {
         let haut = 2.0 * self.cam.distance * (CHAMP.to_radians() / 2.0).tan() * 0.9;
         let large = haut * (self.espace.w.max(1.0) / self.espace.h.max(1.0)) as f64;
         let largeur = large.min(haut / rapport);
-        self.projet.plans.push(plans::Plan::neuf(&base, &cle, rapport, vue, largeur, decalage));
+        let mut p = plans::Plan::neuf(&base, &cle, rapport, vue, largeur, decalage);
+        p.pixels = [i.l.max(1), i.h.max(1)];
+        self.projet.plans.push(p);
         self.plan_actif = Some(self.projet.plans.len() - 1);
         self.a_sauver = true;
         if plans::vue_de(dos).is_none() {
             self.vue_alignee(vue);
         }
         self.dire(format!("Plan {} : {} × {}", plans::VUES[vue].0, i.l, i.h));
+    }
+
+    /// Image d'un plan : décodée, gardée dans le projet ; rend aussi sa clé et son nom.
+    fn garder_image_plan(&mut self, fichier: &str, octets: &[u8]) -> Option<(Image, String, String)> {
+        let octets = match texture::sans_gif(octets) {
+            Ok(o) => o.into_owned(),
+            Err(e) => {
+                self.dire(format!("Image illisible : {fichier} ({e})"));
+                return None;
+            }
+        };
+        let octets = &octets[..];
+        let i = match texture::decoder(octets) {
+            Ok(i) => i,
+            Err(e) => {
+                self.dire(format!("Image illisible : {fichier} ({e})"));
+                return None;
+            }
+        };
+        let cle = texture::identifiant(octets);
+        self.projet.textures.entry(cle.clone()).or_insert_with(|| crate::texture::Texture { nom: fichier.to_string(), octets: Arc::new(octets.to_vec()) });
+        let base = fichier.rsplit(['/', '\\']).next().unwrap_or(fichier).to_string();
+        Some((i, cle, base))
+    }
+
+    /// Planche reçue : ses dessins sont trouvés et rangés par vue (profil, dessus, face,
+    /// arrière), chacun devient un plan calé au sol, tous à la même échelle. Le profil
+    /// mesure d'abord 4 unités ; le pavé s'ouvre pour donner sa longueur réelle.
+    pub fn recevoir_planche(&mut self, fichier: &str, octets: &[u8]) {
+        let Some((i, cle, base)) = self.garder_image_plan(fichier, octets) else { return };
+        let (l, h) = (i.l.max(1) as usize, i.h.max(1) as usize);
+        let vues = plans::repartir(&plans::detecter(&i.rgba, l, h));
+        if vues.is_empty() {
+            self.dire("Aucun dessin trouvé : l'image devient un plan entier".into());
+            return self.recevoir_plan(fichier, octets);
+        }
+        let rapport = h as f64 / l as f64;
+        let debut = self.projet.plans.len();
+        for (vue, b, quart) in &vues {
+            let mut p = plans::Plan::neuf(&base, &cle, rapport, *vue, 1.0, [0.0; 2]);
+            p.pixels = [l as u32, h as u32];
+            // Un pixel de marge autour du trait
+            p.zone = [
+                (b[0].saturating_sub(1)) as f64 / l as f64,
+                (b[1].saturating_sub(1)) as f64 / h as f64,
+                (b[2] + 1).min(l) as f64 / l as f64,
+                (b[3] + 1).min(h) as f64 / h as f64,
+            ];
+            p.quart = *quart;
+            p.cale = true;
+            self.projet.plans.push(p);
+        }
+        // Le profil (le premier) donne l'échelle
+        plans::echelle_commune(&mut self.projet.plans, debut, 4.0);
+        self.plan_actif = Some(debut);
+        self.a_sauver = true;
+        self.vue_alignee(self.projet.plans[debut].vue);
+        let noms: Vec<&str> = vues.iter().map(|v| plans::VUES[v.0].0).collect();
+        self.dire(format!("Planche : {}", noms.join(", ")));
+        self.saisir(Champ::Plan(0));
     }
 
     /// Rubrique des plans de référence du panneau Scène : la liste (toucher un plan le
@@ -1947,12 +2010,15 @@ impl App {
             self.plan_actif = None;
         }
         if n == 0 {
-            cx.paragraph(b, "Une image (plan, profil, photo) posée face à une vue alignée, derrière le modèle, pour modeler par-dessus.");
+            cx.paragraph(b, "Une image (plan, profil, photo) posée face à une vue alignée, derrière le modèle, pour modeler par-dessus. Une planche à plusieurs vues donne un plan par vue.");
         }
         let mut clic = None;
         for k in 0..n {
             let p = &self.projet.plans[k];
-            let label = format!("{} · {}", plans::VUES[p.vue].0, p.nom);
+            // Le nom sans extension, coupé s'il est long : le lien doit rester lisible
+            let nom = p.nom.rsplit_once('.').map_or(p.nom.as_str(), |x| x.0);
+            let nom: String = if nom.chars().count() > 22 { nom.chars().take(21).chain(['…']).collect() } else { nom.to_string() };
+            let label = format!("{} · {nom}", plans::VUES[p.vue].0);
             let lien = if p.visible { "Masquer" } else { "Montrer" };
             let (ligne, voir) = cx.row_lien(b, sub_id(id("plan"), k), &label, self.plan_actif == Some(k), Some((sub_id(id("plan-voir"), k), lien)));
             if ligne {
@@ -1984,10 +2050,23 @@ impl App {
                 self.projet.plans[k].vue = v;
                 self.vue_alignee(v);
             }
-            let valeurs = [avant.largeur, avant.decalage[0], avant.decalage[1]];
-            for (j, nom) in ["Largeur", "→ Droite", "↑ Haut"].iter().enumerate() {
-                if cx.champ(b, sub_id(id("plan-champ"), j), nom, coul(C::Texte), &chiffres(valeurs[j])) {
-                    self.saisir(Champ::Plan(j));
+            self.zone_plan(cx, b, k);
+            match cx.rangee(b, id("plan-zone-actions"), &[("Toute l'image", avant.zone != plans::ZONE_ENTIERE), ("Tourner", true)]) {
+                Some(0) => self.projet.plans[k].zone = plans::ZONE_ENTIERE,
+                Some(_) => self.projet.plans[k].quart = (avant.quart + 1) % 4,
+                None => {}
+            }
+            // De profil et de dessus, la longueur ; de face et de l'arrière, la largeur
+            let taille = if avant.vue < 2 { "Largeur réelle" } else { "Longueur réelle" };
+            if cx.champ(b, sub_id(id("plan-champ"), 0), taille, coul(C::Texte), &chiffres(avant.largeur)) {
+                self.saisir(Champ::Plan(0));
+            }
+            cx.toggle(b, id("plan-cale"), "Calé au sol, centré", &mut self.projet.plans[k].cale);
+            if !self.projet.plans[k].cale {
+                for (j, nom) in [(1, "→ Droite"), (2, "↑ Haut")] {
+                    if cx.champ(b, sub_id(id("plan-champ"), j), nom, coul(C::Texte), &chiffres(avant.decalage[j - 1])) {
+                        self.saisir(Champ::Plan(j));
+                    }
                 }
             }
             let mut o = self.projet.plans[k].opacite * 100.0;
@@ -2003,9 +2082,91 @@ impl App {
                 self.a_sauver = true;
             }
         }
-        if cx.lien(b, id("plan-ajouter"), "Ajouter…") {
-            self.ajouter_plan();
+        if cx.legende_lien(b, "", Some((id("plan-planche"), "Ajouter une planche…"))) {
+            self.ajouter_plan(true);
         }
+        if cx.lien(b, id("plan-ajouter"), "Ajouter une image…") {
+            self.ajouter_plan(false);
+        }
+    }
+
+    /// L'image du plan `k` en entier, sa zone encadrée : le doigt tire un bord ou un coin
+    /// près duquel il se pose, sinon déplace toute la zone.
+    fn zone_plan(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, k: usize) {
+        let d = cx.dp;
+        let p = &self.projet.plans[k];
+        if !self.projet.textures.contains_key(&p.image) {
+            return;
+        }
+        let a = p.pixels[1] as f32 / p.pixels[0].max(1) as f32;
+        let (mut w, mut h) = (b.w, b.w * a);
+        let hmax = 1.1 * b.w;
+        if h > hmax {
+            (w, h) = (hmax / a, hmax);
+        }
+        let r = Rect::new(b.x + (b.w - w) / 2.0, b.y + 4.0 * d, w, h);
+        let image = p.image.clone();
+        let mut z = p.zone;
+        if let Some(g) = cx.ui.drag(id("plan-zone"), r) {
+            let (fx, fy) = (((g.x - r.x) / r.w) as f64, ((g.y - r.y) / r.h) as f64);
+            let prise = *self.prise_zone.get_or_insert_with(|| {
+                let (px, py) = (((g.depart.0 - r.x) / r.w) as f64, ((g.depart.1 - r.y) / r.h) as f64);
+                // Bords à moins de 24 dp du doigt ; aucun : toute la zone
+                let (sx, sy) = ((24.0 * d / r.w) as f64, (24.0 * d / r.h) as f64);
+                let mut bords = [(px - z[0]).abs() < sx, (py - z[1]).abs() < sy, (px - z[2]).abs() < sx, (py - z[3]).abs() < sy];
+                if bords[0] && bords[2] {
+                    bords[if (px - z[0]).abs() < (px - z[2]).abs() { 2 } else { 0 }] = false;
+                }
+                if bords[1] && bords[3] {
+                    bords[if (py - z[1]).abs() < (py - z[3]).abs() { 3 } else { 1 }] = false;
+                }
+                (bords, z, (px, py))
+            });
+            let (bords, z0, (px, py)) = prise;
+            let (dx, dy) = (fx - px, fy - py);
+            if bords.iter().any(|x| *x) {
+                let min = 0.01;
+                if bords[0] { z[0] = (z0[0] + dx).clamp(0.0, z0[2] - min); }
+                if bords[2] { z[2] = (z0[2] + dx).clamp(z0[0] + min, 1.0); }
+                if bords[1] { z[1] = (z0[1] + dy).clamp(0.0, z0[3] - min); }
+                if bords[3] { z[3] = (z0[3] + dy).clamp(z0[1] + min, 1.0); }
+            } else {
+                let dx = dx.clamp(-z0[0], 1.0 - z0[2]);
+                let dy = dy.clamp(-z0[1], 1.0 - z0[3]);
+                z = [z0[0] + dx, z0[1] + dy, z0[2] + dx, z0[3] + dy];
+            }
+            if z != self.projet.plans[k].zone {
+                // La zone change, l'échelle de la planche reste : la taille suit
+                let s = self.projet.plans[k].echelle();
+                let p = &mut self.projet.plans[k];
+                p.zone = z;
+                p.largeur = s * p.pixels_vus().0;
+            }
+        } else {
+            self.prise_zone = None;
+        }
+        cx.dl.rrect(r, 0.0, coul(C::Fond));
+        cx.dl.image(r, &image);
+        let zr = Rect::new(r.x + z[0] as f32 * r.w, r.y + z[1] as f32 * r.h, (z[2] - z[0]) as f32 * r.w, (z[3] - z[1]) as f32 * r.h);
+        // Hors de la zone, voilé
+        let voile = [0, 0, 0, 90];
+        cx.dl.rrect(Rect::new(r.x, r.y, r.w, zr.y - r.y), 0.0, voile);
+        cx.dl.rrect(Rect::new(r.x, zr.bottom(), r.w, r.bottom() - zr.bottom()), 0.0, voile);
+        cx.dl.rrect(Rect::new(r.x, zr.y, zr.x - r.x, zr.h), 0.0, voile);
+        cx.dl.rrect(Rect::new(zr.right(), zr.y, r.right() - zr.right(), zr.h), 0.0, voile);
+        let (c, e) = (coul(C::Accent), 2.0 * d);
+        for (a, z) in [([zr.x, zr.y], [zr.right(), zr.y]), ([zr.right(), zr.y], [zr.right(), zr.bottom()]), ([zr.right(), zr.bottom()], [zr.x, zr.bottom()]), ([zr.x, zr.bottom()], [zr.x, zr.y])] {
+            cx.dl.line(a, z, e, c);
+        }
+        for (x, y) in [(zr.x, zr.y), (zr.right(), zr.y), (zr.right(), zr.bottom()), (zr.x, zr.bottom())] {
+            cx.dl.rrect(Rect::new(x - 5.0 * d, y - 5.0 * d, 10.0 * d, 10.0 * d), 5.0 * d, c);
+        }
+        b.y += h + 12.0 * d;
+    }
+
+    /// Ferme le pavé sans rien saisir : pour les aperçus.
+    pub fn fermer_pave(&mut self) {
+        self.pave = None;
     }
 
     /// Vue alignée sur un axe (rang de `plans::VUES`), en orthographique.
@@ -2036,10 +2197,17 @@ impl App {
     /// porte pas : un nouveau matériau prend le nom du fichier. La couleur repasse au
     /// blanc, sans quoi elle teinterait l'image.
     pub fn recevoir_image(&mut self, fichier: &str, octets: &[u8]) {
-        if std::mem::take(&mut self.plan_a_venir) {
-            return self.recevoir_plan(fichier, octets);
+        match self.plan_a_venir.take() {
+            Some(true) => return self.recevoir_planche(fichier, octets),
+            Some(false) => return self.recevoir_plan(fichier, octets),
+            None => {}
         }
         let Some(mut nom) = self.image_pour.take() else { return };
+        let octets = match texture::sans_gif(octets) {
+            Ok(o) => o.into_owned(),
+            Err(e) => return self.dire(format!("Image illisible : {fichier} ({e})")),
+        };
+        let octets = &octets[..];
         let i = match texture::decoder(octets) {
             Ok(i) => i,
             Err(e) => return self.dire(format!("Image illisible : {fichier} ({e})")),
@@ -4351,7 +4519,7 @@ impl App {
         self.maillage_base(k).boite_englobante().map_or([0.0; 3], |b| [0, 1, 2].map(|c| b.max[c] - b.min[c]))
     }
 
-    fn appliquer_champ(&mut self, c: Champ, v: f64) {
+    pub fn appliquer_champ(&mut self, c: Champ, v: f64) {
         match c {
             Champ::Primitive(i, _) => {
                 if let Some(a) = &mut self.ajout {
@@ -4367,14 +4535,17 @@ impl App {
                 return;
             }
             Champ::Plan(k) => {
-                let Some(p) = self.plan_actif.and_then(|i| self.projet.plans.get_mut(i)) else { return };
+                let Some(i) = self.plan_actif.filter(|i| *i < self.projet.plans.len()) else { return };
                 if k == 0 {
                     if v <= 0.0 {
-                        return self.dire("La largeur doit être positive".into());
+                        return self.dire("La taille doit être positive".into());
                     }
-                    p.largeur = v;
+                    // Toute la planche suit, à la même échelle
+                    plans::echelle_commune(&mut self.projet.plans, i, v);
                 } else {
+                    let p = &mut self.projet.plans[i];
                     p.decalage[(k - 1).min(1)] = v;
+                    p.cale = false;
                 }
                 self.a_sauver = true;
                 return;
@@ -8326,14 +8497,19 @@ impl App {
         }
         // Plans de référence : en fond dans leur vue, dans la scène s'ils y vont partout
         let alignee = plans::vue_de(dos);
-        let carre = carre_plan();
-        let cle_carre = Arc::as_ptr(&carre) as usize;
-        for p in self.projet.plans.iter().filter(|p| p.visible && self.projet.textures.contains_key(&p.image)) {
+        let mut carres = std::mem::take(&mut self.carres_plans);
+        let mut gardes = HashMap::new();
+        let reculs = plans::reculs(&self.projet.plans);
+        for (p, recul) in self.projet.plans.iter().zip(reculs).filter(|(p, _)| p.visible && self.projet.textures.contains_key(&p.image)) {
             let fond = alignee == Some(p.vue);
             if !fond && !p.partout {
                 continue;
             }
-            let m = p.matrice();
+            let cle = (p.zone.map(f64::to_bits), p.quart % 4);
+            let carre = carres.remove(&cle).or_else(|| gardes.get(&cle).cloned()).unwrap_or_else(|| Arc::new(plans::carre(p.coins_uv())));
+            gardes.insert(cle, carre.clone());
+            let cle_carre = Arc::as_ptr(&carre) as usize;
+            let m = p.matrice(recul);
             besoin.insert(p.image.clone());
             objets.push(ObjetVue { tampon: cle_carre, modele: vue::mat4(&m), normale: vue::mat_normale(&m), albedo: [0.0; 3], emission: [1.0; 3], opacite: p.opacite, contour: false, filaire: false, texture: Some(p.image.clone()), envers: None, devant: false, deux_cotes: !fond, fond });
             vus.insert(cle_carre);
@@ -8342,6 +8518,7 @@ impl App {
                 self.connus.insert(cle_carre, carre.clone());
             }
         }
+        self.carres_plans = gardes;
         let retraits: Vec<usize> = self.connus.keys().filter(|c| !vus.contains(c)).copied().collect();
         for c in &retraits {
             self.connus.remove(c);
@@ -8354,6 +8531,10 @@ impl App {
             self.version_geo = None;
         }
         besoin.extend(image_uv);
+        // Image du plan choisi, dans le panneau Scène
+        if self.contenu == Contenu::Scene && self.onglet_scene != ONGLET_MATERIAUX {
+            besoin.extend(self.plan_actif.and_then(|k| self.projet.plans.get(k)).map(|p| p.image.clone()).filter(|i| self.projet.textures.contains_key(i)));
+        }
         // Vignette de l'onglet Matériaux
         if self.contenu == Contenu::Scene && self.onglet_scene == ONGLET_MATERIAUX {
             let i = self.materiau_actif().and_then(|n| self.projet.materiau(&n)?.texture.clone());
@@ -8508,14 +8689,6 @@ fn poser_bouts(o: &mut Objet, bouts: &[Bout], depart: &Segments, v: Transfo) {
 }
 
 /// Nombre pour un champ : trois décimales au plus, sans zéros inutiles.
-/// Le carré des plans de référence, le même pour tous.
-fn carre_plan() -> Arc<Maillage> {
-    thread_local! {
-        static CARRE: Arc<Maillage> = Arc::new(plans::carre());
-    }
-    CARRE.with(|c| c.clone())
-}
-
 fn chiffres(v: f64) -> String {
     let s = format!("{v:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
@@ -12691,11 +12864,52 @@ mod tests {
     }
 
     #[test]
+    fn une_planche_donne_un_plan_par_vue_a_la_meme_echelle() {
+        let mut b = Banc::pret();
+        // Profil 500 × 170 en haut à gauche, face 200 × 170 à droite, dessus dessous
+        let cadres = [(20, 20, 520, 190), (560, 20, 760, 190), (20, 240, 520, 440), (560, 250, 760, 420)];
+        let png = crate::texture::tests::png_de(800, 500, |x, y| {
+            let (x, y) = (x as usize, y as usize);
+            let bord = cadres.iter().any(|&(x0, y0, x1, y1)| x >= x0 && x < x1 && y >= y0 && y < y1 && (x < x0 + 2 || x >= x1 - 2 || y < y0 + 2 || y >= y1 - 2));
+            if bord { [0, 0, 0, 255] } else { [255, 255, 255, 255] }
+        });
+        b.app.ajouter_plan(true);
+        assert_eq!(b.app.prendre_selecteur(), Some(Selecteur::Image));
+        b.app.recevoir_image("planche.png", &png);
+        let l = &b.app.projet.plans;
+        assert_eq!(l.iter().map(|p| p.vue).collect::<Vec<_>>(), [2, 4, 0, 1]);
+        assert!(l.iter().all(|p| p.cale && p.image == l[0].image));
+        assert!((l[0].largeur - 4.0).abs() < 1e-9, "le profil mesure d'abord 4");
+        // Le pavé attend la longueur réelle : toute la planche suit
+        assert_eq!(b.app.pave.as_ref().map(|p| p.cible), Some(Champ::Plan(0)));
+        b.app.fermer_pave();
+        b.app.appliquer_champ(Champ::Plan(0), 4.03);
+        let l = &b.app.projet.plans;
+        assert!((l[0].largeur - 4.03).abs() < 1e-9);
+        let s = l[0].echelle();
+        assert!(l.iter().all(|p| (p.echelle() - s).abs() < 1e-12), "une seule échelle");
+        // Calés : le profil touche le sol, le dessus est centré
+        assert!((l[0].decalage_vu()[1] - l[0].largeur * l[0].aspect() / 2.0).abs() < 1e-12);
+        assert_eq!(l[1].decalage_vu(), [0.0, 0.0]);
+        assert_eq!(l[1].quart, 1, "le dessus, tourné d'un quart");
+        // Chaque zone a son carré, avec ses coordonnées
+        b.app.agir(A::VueDroite);
+        b.images(40);
+        let s = b.images(1);
+        assert_eq!(s.objets.iter().filter(|o| o.fond).count(), 1);
+        // Un décalage saisi décale : le plan n'est plus calé
+        b.app.plan_actif = Some(2);
+        b.app.appliquer_champ(Champ::Plan(1), 0.3);
+        assert!(!b.app.projet.plans[2].cale);
+        assert_eq!(b.app.projet.plans[2].decalage_vu(), [0.3, 0.0]);
+    }
+
+    #[test]
     fn un_plan_de_reference_se_pose_dans_sa_vue_et_s_enregistre() {
         let mut b = Banc::pret();
         b.app.agir(A::VueGauche);
         b.images(40);
-        b.app.ajouter_plan();
+        b.app.ajouter_plan(false);
         assert_eq!(b.app.prendre_selecteur(), Some(Selecteur::Image));
         b.app.recevoir_image("profil.png", &png_2_sur_1());
         assert_eq!(b.app.projet.plans.len(), 1);

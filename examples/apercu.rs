@@ -99,6 +99,9 @@ fn main() {
         Vue { nom: "vis-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "geo-faces", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 1, pave: false, geo: 1, fichier: false },
         Vue { nom: "plans", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "planche", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "planche-dessus", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "planche-iso", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "plans-iso", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "miroir", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 1, pave: false, geo: 1, fichier: false },
         Vue { nom: "geo-rayons", w: 1920, h: 1200, dp: 1.5, debut: true, fin: false, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 2, fichier: false },
@@ -366,6 +369,34 @@ fn main() {
             }
             if s.nom == "plans-iso" {
                 app.cadrer_cible([0.0; 3], 9.0);
+            }
+        }
+        if s.nom.starts_with("planche") {
+            // La planche de la 306 (téléchargée à part), à 4,03 m ; le cube s'efface
+            let f = "/sdcard/bang/blueprints-psa/peugeot/306/1993-peugeot-306-5-door-tag.png";
+            let octets = std::fs::read(f).expect("planche de la 306 absente");
+            app.projet.objets[0].visible = false;
+            app.recevoir_planche("1993-peugeot-306-5-door-tag.png", &octets);
+            app.appliquer_champ(Champ::Plan(0), 4.03);
+            app.fermer_pave();
+            app.contenu = Contenu::Scene;
+            if s.nom == "planche-dessus" {
+                app.plan_actif = Some(1);
+                app.vue_alignee(4);
+            }
+            if s.nom == "planche-iso" {
+                for p in app.projet.plans.iter_mut() {
+                    p.partout = true;
+                }
+                app.vue_iso();
+            }
+            for _ in 0..30 {
+                let sc = etape(&mut app, &mut ui, &mut text, &mut dl);
+                render.draw(w, h, &sc, &dl, &mut text);
+            }
+            app.cadrer_cible([0.0, 0.7, 0.0], 5.0);
+            if s.nom == "planche" {
+                app.scrolls.insert(rustcraft::ui::sub_id(rustcraft::ui::id("corps-scene"), 0), (1250.0, 1e7));
             }
         }
         if s.nom == "miroir" {
