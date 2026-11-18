@@ -18,6 +18,7 @@ pub mod icones;
 pub mod editeur;
 pub mod gles;
 pub mod math;
+pub mod plans;
 pub mod projet;
 pub mod renderer;
 pub mod shell;

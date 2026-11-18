@@ -694,6 +694,22 @@ impl Renderer {
         (gl.glUniform3f)(self.fond_bord, b[0], b[1], b[2]);
         (gl.glBindVertexArray)(self.vide_vao);
         (gl.glDrawArrays)(STRIP, 0, 4);
+        // Plans de référence dans leur vue : sur le fond, derrière tout le reste
+        if s.objets.iter().any(|o| o.fond) {
+            (gl.glEnable)(BLEND);
+            (gl.glBlendFunc)(0x0302, 0x0303);
+            (gl.glDepthMask)(0);
+            (gl.glUseProgram)(self.objet);
+            (gl.glUniformMatrix4fv)(self.lo.vp, 1, 0, s.vue_proj.as_ptr());
+            (gl.glUniform3f)(self.lo.lumiere, s.lumiere[0], s.lumiere[1], s.lumiere[2]);
+            for o in s.objets.iter().filter(|o| o.fond) {
+                if let Some(g) = self.gpu.get(&o.tampon) {
+                    self.dessiner_objet(g, o);
+                }
+            }
+            (gl.glDepthMask)(1);
+            (gl.glDisable)(BLEND);
+        }
         (gl.glEnable)(DEPTH_TEST);
 
         let k = s.pas_grille;
@@ -716,7 +732,7 @@ impl Renderer {
         (gl.glUseProgram)(self.objet);
         (gl.glUniformMatrix4fv)(self.lo.vp, 1, 0, s.vue_proj.as_ptr());
         (gl.glUniform3f)(self.lo.lumiere, s.lumiere[0], s.lumiere[1], s.lumiere[2]);
-        for o in s.objets.iter().filter(|o| o.opacite >= 1.0 && !o.filaire && !o.devant) {
+        for o in s.objets.iter().filter(|o| o.opacite >= 1.0 && !o.filaire && !o.devant && !o.fond) {
             if let Some(g) = self.gpu.get(&o.tampon) {
                 self.dessiner_objet(g, o);
             }
@@ -759,7 +775,7 @@ impl Renderer {
         (gl.glDrawArrays)(LIGNES, 0, NB_GRILLE);
         (gl.glEnable)(CULL_FACE);
         (gl.glUseProgram)(self.objet);
-        for o in s.objets.iter().filter(|o| o.opacite < 1.0 && !o.filaire && !o.devant) {
+        for o in s.objets.iter().filter(|o| o.opacite < 1.0 && !o.filaire && !o.devant && !o.fond) {
             if let Some(g) = self.gpu.get(&o.tampon) {
                 self.dessiner_objet(g, o);
             }

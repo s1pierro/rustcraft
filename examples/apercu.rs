@@ -98,6 +98,9 @@ fn main() {
         Vue { nom: "vis", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "vis-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
         Vue { nom: "geo-faces", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 1, pave: false, geo: 1, fichier: false },
+        Vue { nom: "plans", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "plans-iso", w: 1920, h: 1200, dp: 1.5, debut: false, fin: false, rendu: Rendu::Solide, choix: None, mode: Mode::Translation, onglet: 0, pave: false, geo: 0, fichier: false },
+        Vue { nom: "miroir", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 1, pave: false, geo: 1, fichier: false },
         Vue { nom: "geo-rayons", w: 1920, h: 1200, dp: 1.5, debut: true, fin: false, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 0, pave: false, geo: 2, fichier: false },
         Vue { nom: "geo-nettoyer", w: 1920, h: 1200, dp: 1.5, debut: false, fin: true, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Translation, onglet: 1, pave: false, geo: 4, fichier: false },
         Vue { nom: "geo-telephone", w: 1080, h: 2400, dp: 2.5, debut: false, fin: false, rendu: Rendu::Solide, choix: Some(0), mode: Mode::Rotation, onglet: 1, pave: false, geo: 3, fichier: false },
@@ -315,6 +318,59 @@ fn main() {
         if s.nom == "curseur" {
             // Le panneau Scène, sa rubrique Curseur 3D, le curseur posé sur un objet
             app.projet.curseur = [0.3, 0.5, 0.2];
+            app.contenu = Contenu::Scene;
+        }
+        if s.nom.starts_with("plans") {
+            // Un profil dessiné posé à droite, un cube devant ; puis la vue iso où il se pose
+            // dans la scène
+            let (l, hi) = (512u32, 256u32);
+            let mut px = vec![255u8; (l * hi * 3) as usize];
+            for y in 0..hi {
+                for x in 0..l {
+                    let (fx, fy) = (x as f32 / l as f32, y as f32 / hi as f32);
+                    let roue = |cx: f32| (((fx - cx) * 2.0).powi(2) + (fy - 0.78).powi(2)).sqrt();
+                    let trait_ = (fy - 0.62).abs() < 0.006 && fx > 0.06 && fx < 0.94
+                        || (fy - 0.35).abs() < 0.006 && fx > 0.3 && fx < 0.7
+                        || (roue(0.25) - 0.14).abs() < 0.008
+                        || (roue(0.75) - 0.14).abs() < 0.008
+                        || (x % 32 == 0 || y % 32 == 0);
+                    if trait_ {
+                        let i = ((y * l + x) * 3) as usize;
+                        let c = if x % 32 == 0 || y % 32 == 0 { [170, 190, 230] } else { [20, 30, 60] };
+                        px[i..i + 3].copy_from_slice(&c);
+                    }
+                }
+            }
+            let mut octets = Vec::new();
+            {
+                let mut e = png::Encoder::new(&mut octets, l, hi);
+                e.set_color(png::ColorType::Rgb);
+                e.set_depth(png::BitDepth::Eight);
+                e.write_header().unwrap().write_image_data(&px).unwrap();
+            }
+            app.vue_alignee(2);
+            for _ in 0..30 {
+                let sc = etape(&mut app, &mut ui, &mut text, &mut dl);
+                render.draw(w, h, &sc, &dl, &mut text);
+            }
+            app.recevoir_plan("profil.png", &octets);
+            app.projet.plans[0].opacite = 0.8;
+            app.contenu = Contenu::Scene;
+            if s.nom == "plans-iso" {
+                app.projet.plans[0].partout = true;
+                app.vue_iso();
+            }
+            for _ in 0..30 {
+                let sc = etape(&mut app, &mut ui, &mut text, &mut dl);
+                render.draw(w, h, &sc, &dl, &mut text);
+            }
+            if s.nom == "plans-iso" {
+                app.cadrer_cible([0.0; 3], 9.0);
+            }
+        }
+        if s.nom == "miroir" {
+            // Le panneau Scène en Géométrie, l'édition en miroir active
+            app.miroir.actif = true;
             app.contenu = Contenu::Scene;
         }
         if s.nom == "devant" {

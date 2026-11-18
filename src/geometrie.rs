@@ -347,6 +347,43 @@ fn survivantes(avant: &[Vec<usize>], n: &[isize], degenerees: bool) -> Vec<Optio
         .collect()
 }
 
+/// Le plan de l'édition en miroir, au monde : un point et sa normale (unitaire). Un
+/// sommet à moins de `tolerance` du reflet d'un sommet transformé est son jumeau : il
+/// suit en reflet. `plan` : un sommet transformé posé sur le plan y reste.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Miroir {
+    pub point: P3,
+    pub normale: P3,
+    pub tolerance: f64,
+    pub plan: bool,
+}
+
+impl Miroir {
+    /// Distance signée au plan.
+    pub fn distance(&self, p: P3) -> f64 {
+        (0..3).map(|k| (p[k] - self.point[k]) * self.normale[k]).sum()
+    }
+
+    pub fn refleter(&self, p: P3) -> P3 {
+        let d = 2.0 * self.distance(p);
+        [0, 1, 2].map(|k| p[k] - d * self.normale[k])
+    }
+
+    pub fn projeter(&self, p: P3) -> P3 {
+        let d = self.distance(p);
+        [0, 1, 2].map(|k| p[k] - d * self.normale[k])
+    }
+}
+
+/// Ce qu'un geste en miroir emporte : pour des rangs de la liste transformée, le
+/// sommet jumeau (hors de la liste) qui suit en reflet ; les rangs posés sur le plan.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Reflets {
+    pub miroir: Option<Miroir>,
+    pub jumeaux: Vec<(usize, usize)>,
+    pub sur_plan: Vec<usize>,
+}
+
 /// Copie de travail, au monde : les maillages réunis des objets édités.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Travail {
@@ -665,6 +702,77 @@ impl Travail {
         let m = self.mm();
         for (&i, &v) in indices.iter().zip(departs) {
             m.sommets[i] = crate::edition::transformer(v, t);
+        }
+        self.version += 1;
+    }
+
+    /// Les jumeaux des sommets `indices` (à leurs positions `departs`) par le miroir :
+    /// les sommets à moins de la tolérance du reflet de chacun (plusieurs s'ils sont
+    /// superposés : coins répétés d'un maillage aux faces séparées) (une
+    /// grille de cases de la tolérance : pas de recherche sur tout). Si un sommet et
+    /// son reflet sont tous deux de la liste, celui du côté positif du plan mène,
+    /// l'autre suit : le résultat reste symétrique.
+    pub fn reflets(&self, indices: &[usize], departs: &[P3], miroir: &Miroir) -> Reflets {
+        let tol = miroir.tolerance.max(1e-9);
+        let case = |p: P3| [0, 1, 2].map(|k| (p[k] / tol).floor() as i64);
+        // Les candidats : hors de la liste, ou de la liste du côté négatif
+        let negatifs: HashSet<usize> = indices.iter().zip(departs).filter(|(_, p)| miroir.distance(**p) < -tol).map(|(i, _)| *i).collect();
+        let dans: HashSet<usize> = indices.iter().copied().collect();
+        let mut grille: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+        for (j, p) in self.m.sommets.iter().enumerate() {
+            if !dans.contains(&j) || negatifs.contains(&j) {
+                grille.entry(case(*p)).or_default().push(j);
+            }
+        }
+        let mut r = Reflets { miroir: Some(*miroir), ..Reflets::default() };
+        let mut pris: HashSet<usize> = HashSet::new();
+        // Le côté positif d'abord : ses sommets mènent
+        let mut ordre: Vec<usize> = (0..departs.len()).collect();
+        ordre.sort_by(|a, b| miroir.distance(departs[*b]).total_cmp(&miroir.distance(departs[*a])));
+        for rang in ordre {
+            let p = departs[rang];
+            if miroir.distance(p).abs() <= tol {
+                r.sur_plan.push(rang);
+                continue;
+            }
+            if pris.contains(&indices[rang]) {
+                continue;
+            }
+            let q = miroir.refleter(p);
+            let c = case(q);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        for &j in grille.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).into_iter().flatten() {
+                            let s = self.m.sommets[j];
+                            let d = ((s[0] - q[0]).powi(2) + (s[1] - q[1]).powi(2) + (s[2] - q[2]).powi(2)).sqrt();
+                            if d <= tol && pris.insert(j) {
+                                r.jumeaux.push((rang, j));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        r
+    }
+
+    /// Après `poser` : les jumeaux prennent le reflet de leur sommet, les sommets du
+    /// plan y reviennent (si le miroir le demande).
+    pub fn poser_reflets(&mut self, indices: &[usize], r: &Reflets) {
+        let Some(miroir) = r.miroir else { return };
+        let m = self.mm();
+        for &(rang, j) in &r.jumeaux {
+            if let (Some(&i), true) = (indices.get(rang), j < m.sommets.len()) {
+                m.sommets[j] = miroir.refleter(m.sommets[i]);
+            }
+        }
+        if miroir.plan {
+            for &rang in &r.sur_plan {
+                if let Some(&i) = indices.get(rang) {
+                    m.sommets[i] = miroir.projeter(m.sommets[i]);
+                }
+            }
         }
         self.version += 1;
     }
@@ -2195,5 +2303,36 @@ mod tests {
         assert_eq!(p.objets.len(), 1);
         assert_eq!(p.objets[0].nom, "cube 2");
         assert_eq!(choix, [0]);
+    }
+
+    #[test]
+    fn en_miroir_le_jumeau_suit_en_reflet_et_le_plan_retient() {
+        let mut t = cube();
+        let m = Miroir { point: [0.0; 3], normale: [1.0, 0.0, 0.0], tolerance: 1e-3, plan: true };
+        let i = (0..t.m.sommets.len()).find(|&i| t.m.sommets[i][0] > 0.5).unwrap();
+        let p = t.m.sommets[i];
+        let j = (0..t.m.sommets.len()).find(|&j| (t.m.sommets[j][0] + p[0]).abs() < 1e-9 && t.m.sommets[j][1] == p[1] && t.m.sommets[j][2] == p[2]).unwrap();
+        let r = t.reflets(&[i], &[p], &m);
+        assert!(r.jumeaux.contains(&(0, j)) && r.jumeaux.iter().all(|x| x.0 == 0));
+        t.poser(&[i], &[p], Transfo::Translation([0.5, 0.2, 0.0]));
+        t.poser_reflets(&[i], &r);
+        let (a, b) = (t.m.sommets[i], t.m.sommets[j]);
+        assert!((a[0] - (p[0] + 0.5)).abs() < 1e-9 && (b[0] + a[0]).abs() < 1e-9 && (b[1] - a[1]).abs() < 1e-9);
+        // Le sommet et son reflet tous deux choisis : le côté positif mène
+        let mut t = cube();
+        let d = [t.m.sommets[j], t.m.sommets[i]];
+        let r = t.reflets(&[j, i], &d, &m);
+        assert!(r.jumeaux.contains(&(1, j)) && r.jumeaux.iter().all(|x| x.0 == 1));
+        t.poser(&[j, i], &d, Transfo::Translation([0.3, 0.0, 0.0]));
+        t.poser_reflets(&[j, i], &r);
+        assert!((t.m.sommets[j][0] + t.m.sommets[i][0]).abs() < 1e-9);
+        // Un plan qui passe par les sommets : ils y restent
+        let mut t = cube();
+        let m = Miroir { point: p, ..m };
+        let r = t.reflets(&[i], &[p], &m);
+        assert_eq!(r.sur_plan, vec![0]);
+        t.poser(&[i], &[p], Transfo::Translation([0.4, 0.1, 0.0]));
+        t.poser_reflets(&[i], &r);
+        assert!((t.m.sommets[i][0] - p[0]).abs() < 1e-9 && (t.m.sommets[i][1] - p[1] - 0.1).abs() < 1e-9);
     }
 }

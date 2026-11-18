@@ -254,6 +254,8 @@ pub struct Projet {
     /// Images des matériaux, par identifiant de contenu. Hors de l'annulation : défaire
     /// un import laisse l'image ici, et `ecrire` ne garde que celles qui servent.
     pub textures: BTreeMap<String, Texture>,
+    /// Plans de référence : images posées face aux vues alignées. Hors de l'annulation.
+    pub plans: Vec<crate::plans::Plan>,
 }
 
 fn echelle(j: Option<&J>) -> [f64; 3] {
@@ -338,6 +340,7 @@ impl Projet {
             curseur: [0.0; 3],
             materiaux: vec![],
             textures: BTreeMap::new(),
+            plans: vec![],
         };
         p.verifier();
         p
@@ -414,7 +417,8 @@ impl Projet {
                 }
             }
         }
-        let mut r = Projet { objets, sets, actif, curseur, materiaux, textures };
+        let plans = p.get("plans").and_then(J::liste).map_or(vec![], |l| l.iter().filter_map(crate::plans::Plan::lire).filter(|x| textures.contains_key(&x.image)).collect());
+        let mut r = Projet { objets, sets, actif, curseur, materiaux, textures, plans };
         r.verifier();
         r.cibles_en_identifiants();
         Ok(r)
@@ -593,17 +597,22 @@ impl Projet {
         let textures = self
             .textures
             .iter()
-            .filter(|(id, _)| self.materiaux.iter().any(|(_, m)| m.texture.as_ref() == Some(*id)))
+            .filter(|(id, _)| self.materiaux.iter().any(|(_, m)| m.texture.as_ref() == Some(*id)) || self.plans.iter().any(|p| p.image == **id))
             .map(|(id, x)| (id.clone(), J::Objet(vec![c("nom", t(&x.nom)), c("donnees", J::Txt(texture::vers_base64(&x.octets)))])))
             .collect();
-        let p = J::Objet(vec![
+        let mut p = vec![
             c("format", t("gda")),
             c("version", J::Num(FORMAT)),
             c("application", J::Txt(format!("{SIGNATURE} {}", env!("CARGO_PKG_VERSION")))),
             c("scene", scene),
             c("materiaux", materiaux),
             c("textures", J::Objet(textures)),
-        ]);
+        ];
+        // Seulement s'il y en a : sans plans, le fichier reste celui de GDA
+        if !self.plans.is_empty() {
+            p.push(c("plans", J::Liste(self.plans.iter().map(|p| p.vers_json()).collect())));
+        }
+        let p = J::Objet(p);
         let mut o = String::new();
         json::indente(&p, 0, &mut o);
         o
@@ -698,7 +707,7 @@ impl Projet {
         if objets.is_empty() {
             return Err("aucun maillage dans ce fichier".into());
         }
-        let mut p = Projet { objets: vec![], sets: vec![], actif: Some(0), curseur: [0.0; 3], materiaux: vec![], textures: BTreeMap::new() };
+        let mut p = Projet { objets: vec![], sets: vec![], actif: Some(0), curseur: [0.0; 3], materiaux: vec![], textures: BTreeMap::new(), plans: vec![] };
         let manquantes = p.lire_materiaux(&ext, contenu, annexes);
         for (n, m) in objets {
             let mat = m.faces.first().map_or(DEFAUT.to_string(), |f| f.m.to_string());

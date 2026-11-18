@@ -15,6 +15,7 @@ use crate::maillage::{self, Arete, Boite, Cible, Maillage, P3};
 use crate::math::{self, Mat4};
 use crate::modifs;
 use crate::peau;
+use crate::plans;
 use crate::primitives::{self, Genre, Prim, Valeurs, V};
 use crate::projet::{Materiau, Objet, Projet, DEFAUT};
 use crate::shell::{Layout, Shell, Side};
@@ -100,6 +101,13 @@ const OPACITE_RAYONS: f32 = 0.45;
 
 /// Champ de vision vertical de GDA, en degrés.
 const CHAMP: f64 = 50.0;
+/// Recul de l'œil en vue orthographique, en multiples de la distance : l'écart à une
+/// vraie projection parallèle est d'un millième par unité de distance en profondeur.
+const RECUL_ORTHO: f64 = 1000.0;
+/// Les vues du panneau, dans l'ordre de `plans::VUES`, puis l'isométrique.
+const VUES_ACTIONS: [A; 7] = [A::VueFace, A::VueArriere, A::VueDroite, A::VueGauche, A::VueDessus, A::VueDessous, A::VueIso];
+/// Hauteur de caméra la plus grande : un rien sous le pôle.
+const HAUTEUR_MAX: f64 = std::f64::consts::FRAC_PI_2 - crate::plans::POLE;
 const LAMPE: P3 = [-0.35, 0.45, 1.0];
 const SOLEIL: P3 = [0.4, 1.0, 0.8];
 const ANIM_CAMERA: f32 = 0.4;
@@ -168,6 +176,8 @@ pub struct ObjetVue {
     pub devant: bool,
     /// Ses faces se voient des deux côtés (matériau « Deux côtés », en rendu En jeu).
     pub deux_cotes: bool,
+    /// Plan de référence dans sa vue : dessiné avant tout, derrière tout.
+    pub fond: bool,
 }
 
 /// Fil, points et arêtes choisies de la copie de travail.
@@ -341,6 +351,8 @@ pub enum Champ {
     OsLimite(usize, bool),
     /// Position du curseur 3D.
     Curseur(usize),
+    /// Plan de référence choisi : 0 sa largeur, 1 et 2 son décalage à droite et en haut.
+    Plan(usize),
     /// Translation de l'os actif posé, le long d'un de ses axes.
     OsTranslation(usize),
     /// Nom de la pose choisie dans le catalogue.
@@ -373,6 +385,7 @@ impl Champ {
             Champ::ModifDecalage(_, k) => format!("Décalage {}", NOMS_AXES[k]),
             Champ::Position(k) => format!("Position {}", NOMS_AXES[k]),
             Champ::Curseur(k) => format!("Curseur {}", NOMS_AXES[k]),
+            Champ::Plan(k) => ["Largeur du plan", "Décalage à droite", "Décalage en haut"][k.min(2)].into(),
             Champ::OsTranslation(k) => format!("Translation {}", NOMS_AXES[k]),
             Champ::Rotation(k) => format!("Rotation {}", NOMS_AXES[k]),
             Champ::Dimension(k) => format!("Dimensions {}", NOMS_AXES[k]),
@@ -529,6 +542,9 @@ struct Camera {
     distance: f64,
     lacet: f64,
     hauteur: f64,
+    /// Vue orthographique : l'œil recule de `RECUL_ORTHO` fois et le champ se resserre
+    /// d'autant, si bien que tout le reste (rayons, taille d'un pixel) reste valable.
+    ortho: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -705,6 +721,71 @@ enum CmdModif {
     Fixer(usize, &'static str, J),
 }
 
+/// L'édition en miroir de la géométrie : un sommet transformé emporte son jumeau, de
+/// l'autre côté d'un plan perpendiculaire à l'axe `axe`, qui passe par l'origine de
+/// l'objet édité (axe de l'objet), le curseur 3D ou l'origine du monde (axe du monde).
+/// Gardée dans `reglages.txt` : « miroir	actif axe centre plan tolérance ».
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReglageMiroir {
+    pub actif: bool,
+    pub axe: usize,
+    pub centre: CentreMiroir,
+    /// Un sommet posé sur le plan y reste.
+    pub plan: bool,
+    /// Rang dans `TOLERANCES_MIROIR`.
+    pub tolerance: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CentreMiroir {
+    Objet,
+    Curseur,
+    Monde,
+}
+
+impl CentreMiroir {
+    pub const TOUS: [CentreMiroir; 3] = [CentreMiroir::Objet, CentreMiroir::Curseur, CentreMiroir::Monde];
+}
+
+/// La distance sous laquelle deux sommets sont jumeaux (en unités de la scène).
+pub const TOLERANCES_MIROIR: [(f64, &str); 3] = [(1e-4, "0,1 mm"), (1e-3, "1 mm"), (1e-2, "1 cm")];
+
+impl Default for ReglageMiroir {
+    fn default() -> Self {
+        ReglageMiroir { actif: false, axe: 0, centre: CentreMiroir::Objet, plan: true, tolerance: 1 }
+    }
+}
+
+impl ReglageMiroir {
+    pub fn ecrire(&self) -> String {
+        let c = CentreMiroir::TOUS.iter().position(|x| *x == self.centre).unwrap_or(0);
+        format!("{} {} {c} {} {}", self.actif as u8, self.axe, self.plan as u8, self.tolerance)
+    }
+
+    /// Une valeur illisible garde son défaut.
+    pub fn lire(t: &str) -> ReglageMiroir {
+        let mut r = ReglageMiroir::default();
+        let n: Vec<usize> = t.split(' ').map(|x| x.parse().unwrap_or(usize::MAX)).collect();
+        let get = |k: usize, max: usize| n.get(k).copied().filter(|v| *v < max);
+        if let Some(v) = get(0, 2) {
+            r.actif = v == 1;
+        }
+        if let Some(v) = get(1, 3) {
+            r.axe = v;
+        }
+        if let Some(v) = get(2, 3) {
+            r.centre = CentreMiroir::TOUS[v];
+        }
+        if let Some(v) = get(3, 2) {
+            r.plan = v == 1;
+        }
+        if let Some(v) = get(4, TOLERANCES_MIROIR.len()) {
+            r.tolerance = v;
+        }
+        r
+    }
+}
+
 pub struct App {
     pub shell: Shell,
     pub projet: Projet,
@@ -753,12 +834,21 @@ pub struct App {
     pub page_liste: PageListe,
     /// Onglet de la pastille Scène.
     pub onglet_scene: usize,
+    /// L'édition en miroir (Scène › Miroir), et ce qu'emporte le geste en cours.
+    pub miroir: ReglageMiroir,
+    reflets: Option<geo::Reflets>,
+    /// Le décompte des jumeaux de la sélection montré au panneau, et ce dont il dépend.
+    miroir_compte: Option<((u64, geo::Miroir), String)>,
     /// Couleur de matériau dépliée : matériau, couleur, teinte.
     mat_couleur: Option<(String, usize, [f32; 3])>,
     /// Glissé en cours sur un réglage : une seule étape d'annulation.
     mat_saisie: bool,
     /// Matériau qui attend l'image du sélecteur.
     image_pour: Option<String>,
+    /// L'image attendue du sélecteur sera un nouveau plan de référence.
+    plan_a_venir: bool,
+    /// Plan de référence choisi dans le panneau Scène.
+    plan_actif: Option<usize>,
     /// Départ de la boîte en cours dans la vue UV.
     boite_uv: Option<(f32, f32)>,
     /// Derniers réglages de chaque primitive, repris à l'ajout suivant.
@@ -862,7 +952,7 @@ impl App {
             projet: Projet::neuf(),
             nom: String::new(),
             rendu: Rendu::Solide,
-            cam: Camera { cible: [0.0; 3], distance: 4.0, lacet: 0.6, hauteur: 0.5 },
+            cam: Camera { cible: [0.0; 3], distance: 4.0, lacet: 0.6, hauteur: 0.5, ortho: false },
             vol: None,
             choix: Vec::new(),
             contenu: Contenu::Scene,
@@ -894,9 +984,14 @@ impl App {
             uv: EditeurUv::default(),
             page_liste: PageListe::Objets,
             onglet_scene: 0,
+            miroir: ReglageMiroir::default(),
+            reflets: None,
+            miroir_compte: None,
             mat_couleur: None,
             mat_saisie: false,
             image_pour: None,
+            plan_a_venir: false,
+            plan_actif: None,
             boite_uv: None,
             primitives: HashMap::new(),
             images_vues: HashSet::new(),
@@ -1803,13 +1898,147 @@ impl App {
     fn choisir_image(&mut self) {
         let Some(n) = self.materiau_actif() else { return self.dire("Touchez d'abord un objet".into()) };
         self.image_pour = Some(n);
+        self.plan_a_venir = false;
         self.selecteur = Some(Selecteur::Image);
+    }
+
+    /// Demande une image au sélecteur, pour un nouveau plan de référence.
+    pub fn ajouter_plan(&mut self) {
+        self.plan_a_venir = true;
+        self.selecteur = Some(Selecteur::Image);
+    }
+
+    /// Image reçue pour un plan de référence. Il se pose face à la vue alignée du
+    /// moment, sinon de face, centré sur ce que la vue regarde et à la largeur de ce
+    /// qu'elle montre : l'image remplit à peu près l'écran.
+    pub fn recevoir_plan(&mut self, fichier: &str, octets: &[u8]) {
+        let i = match texture::decoder(octets) {
+            Ok(i) => i,
+            Err(e) => return self.dire(format!("Image illisible : {fichier} ({e})")),
+        };
+        let cle = texture::identifiant(octets);
+        self.projet.textures.entry(cle.clone()).or_insert_with(|| crate::texture::Texture { nom: fichier.to_string(), octets: Arc::new(octets.to_vec()) });
+        let base = fichier.rsplit(['/', '\\']).next().unwrap_or(fichier).to_string();
+        let (_, _, _, dos) = self.repere();
+        let vue = plans::vue_de(dos).unwrap_or(0);
+        let (_, _, d, h) = plans::VUES[vue];
+        let c = self.cam.cible;
+        let decalage = [(0..3).map(|k| c[k] * d[k]).sum::<f64>(), (0..3).map(|k| c[k] * h[k]).sum::<f64>()];
+        let rapport = i.h.max(1) as f64 / i.l.max(1) as f64;
+        // Ce que la vue montre : sa hauteur, et sa largeur sans dépasser
+        let haut = 2.0 * self.cam.distance * (CHAMP.to_radians() / 2.0).tan() * 0.9;
+        let large = haut * (self.espace.w.max(1.0) / self.espace.h.max(1.0)) as f64;
+        let largeur = large.min(haut / rapport);
+        self.projet.plans.push(plans::Plan::neuf(&base, &cle, rapport, vue, largeur, decalage));
+        self.plan_actif = Some(self.projet.plans.len() - 1);
+        self.a_sauver = true;
+        if plans::vue_de(dos).is_none() {
+            self.vue_alignee(vue);
+        }
+        self.dire(format!("Plan {} : {} × {}", plans::VUES[vue].0, i.l, i.h));
+    }
+
+    /// Rubrique des plans de référence du panneau Scène : la liste (toucher un plan le
+    /// choisit et emmène dans sa vue), puis les réglages du plan choisi.
+    fn reglages_plans(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        cx.section(b, "PLANS DE RÉFÉRENCE");
+        let n = self.projet.plans.len();
+        if self.plan_actif.is_some_and(|k| k >= n) {
+            self.plan_actif = None;
+        }
+        if n == 0 {
+            cx.paragraph(b, "Une image (plan, profil, photo) posée face à une vue alignée, derrière le modèle, pour modeler par-dessus.");
+        }
+        let mut clic = None;
+        for k in 0..n {
+            let p = &self.projet.plans[k];
+            let label = format!("{} · {}", plans::VUES[p.vue].0, p.nom);
+            let lien = if p.visible { "Masquer" } else { "Montrer" };
+            let (ligne, voir) = cx.row_lien(b, sub_id(id("plan"), k), &label, self.plan_actif == Some(k), Some((sub_id(id("plan-voir"), k), lien)));
+            if ligne {
+                clic = Some((k, false));
+            }
+            if voir {
+                clic = Some((k, true));
+            }
+        }
+        match clic {
+            Some((k, true)) => {
+                self.projet.plans[k].visible ^= true;
+                self.a_sauver = true;
+            }
+            Some((k, false)) => {
+                self.plan_actif = Some(k);
+                let v = self.projet.plans[k].vue;
+                let (_, _, _, dos) = self.repere();
+                if plans::vue_de(dos) != Some(v) {
+                    self.vue_alignee(v);
+                }
+            }
+            None => {}
+        }
+        if let Some(k) = self.plan_actif {
+            let avant = self.projet.plans[k].clone();
+            let noms: Vec<&str> = plans::VUES.iter().map(|v| v.0).collect();
+            if let Some(v) = cx.choix(b, id("plan-vue"), &noms, Some(avant.vue), 3) {
+                self.projet.plans[k].vue = v;
+                self.vue_alignee(v);
+            }
+            let valeurs = [avant.largeur, avant.decalage[0], avant.decalage[1]];
+            for (j, nom) in ["Largeur", "→ Droite", "↑ Haut"].iter().enumerate() {
+                if cx.champ(b, sub_id(id("plan-champ"), j), nom, coul(C::Texte), &chiffres(valeurs[j])) {
+                    self.saisir(Champ::Plan(j));
+                }
+            }
+            let mut o = self.projet.plans[k].opacite * 100.0;
+            cx.slider(b, id("plan-opacite"), "Opacité", &format!("{:.0} %", o), &mut o, 5.0, 100.0);
+            self.projet.plans[k].opacite = (o / 100.0).clamp(0.05, 1.0);
+            cx.toggle(b, id("plan-partout"), "Aussi hors de sa vue", &mut self.projet.plans[k].partout);
+            if self.projet.plans[k] != avant {
+                self.a_sauver = true;
+            }
+            if cx.legende_lien(b, "", Some((id("plan-supprimer"), "Supprimer le plan"))) {
+                self.projet.plans.remove(k);
+                self.plan_actif = None;
+                self.a_sauver = true;
+            }
+        }
+        if cx.lien(b, id("plan-ajouter"), "Ajouter…") {
+            self.ajouter_plan();
+        }
+    }
+
+    /// Vue alignée sur un axe (rang de `plans::VUES`), en orthographique.
+    pub fn vue_alignee(&mut self, k: usize) {
+        let (lacet, hauteur) = plans::angles(k);
+        self.cam.ortho = true;
+        self.vol = Some(Vol { depart: self.cam, arrivee: Camera { lacet, hauteur, ..self.cam }, t: 0.0 });
+    }
+
+    /// Vue isométrique, en orthographique.
+    pub fn vue_iso(&mut self) {
+        let (lacet, hauteur) = plans::angles_iso();
+        self.cam.ortho = true;
+        self.vol = Some(Vol { depart: self.cam, arrivee: Camera { lacet, hauteur, ..self.cam }, t: 0.0 });
+    }
+
+    /// Rang de la vue du moment parmi les vues alignées, 6 pour l'isométrique.
+    fn vue_courante(&self) -> Option<usize> {
+        let (_, _, _, dos) = self.repere();
+        plans::vue_de(dos).or_else(|| {
+            let (l, h) = plans::angles_iso();
+            let iso = [l.sin() * h.cos(), h.sin(), l.cos() * h.cos()];
+            ((0..3).map(|k| iso[k] * dos[k]).sum::<f64>() > 0.9995).then_some(6)
+        })
     }
 
     /// Image reçue du sélecteur. Le matériau par défaut, que tout objet partage, ne la
     /// porte pas : un nouveau matériau prend le nom du fichier. La couleur repasse au
     /// blanc, sans quoi elle teinterait l'image.
     pub fn recevoir_image(&mut self, fichier: &str, octets: &[u8]) {
+        if std::mem::take(&mut self.plan_a_venir) {
+            return self.recevoir_plan(fichier, octets);
+        }
         let Some(mut nom) = self.image_pour.take() else { return };
         let i = match texture::decoder(octets) {
             Ok(i) => i,
@@ -3235,6 +3464,7 @@ impl App {
 
     /// Transforme la sélection depuis son état présent.
     fn poser_selection(&mut self, v: Transfo) {
+        let miroir = self.miroir_courant();
         if let Some(e) = &mut self.os {
             let Some(o) = e.objet.and_then(|k| self.projet.objets.get_mut(k)) else { return };
             if e.pose {
@@ -3248,7 +3478,11 @@ impl App {
         } else if let Some(t) = &mut self.travail {
             let l = t.impliques();
             let depart: Vec<P3> = l.iter().map(|i| t.m.sommets[*i]).collect();
+            let reflets = miroir.map(|m| t.reflets(&l, &depart, &m));
             t.poser(&l, &depart, v);
+            if let Some(r) = &reflets {
+                t.poser_reflets(&l, r);
+            }
         } else {
             let l = self.choix.clone();
             let departs = ed::depart(&self.projet.objets, &l);
@@ -3373,7 +3607,8 @@ impl App {
 
     fn vue_ecran(&self, w: Rect) -> Vue {
         let (oeil, droite, haut, dos) = self.repere();
-        Vue { oeil, droite, haut, dos, largeur: w.w as f64, hauteur: w.h as f64, tan: (CHAMP.to_radians() / 2.0).tan(), pres: self.cam.distance / 200.0 }
+        let (_, tan) = self.optique();
+        Vue { oeil, droite, haut, dos, largeur: w.w as f64, hauteur: w.h as f64, tan, pres: self.profondeurs().0 }
     }
 
     fn poignee(&self, vue: &Vue, dp: f32) -> Option<Poignee> {
@@ -3504,9 +3739,12 @@ impl App {
         if let Some(q) = self.repere_pose() {
             g.orienter(q);
         }
+        let miroir = self.miroir_courant();
+        self.reflets = None;
         if let Some(t) = &self.travail {
             g.indices = t.impliques();
             g.sommets = pts;
+            self.reflets = miroir.map(|m| t.reflets(&g.indices, &g.sommets, &m));
         } else if let Some((e, _, a)) = self.armature_os() {
             g.indices = (0..e.bouts.len()).collect();
             let (s, p) = (a.segments(), a.pose.clone());
@@ -3583,7 +3821,12 @@ impl App {
                 }
             } else {
                 match &mut self.travail {
-                    Some(t) => t.poser(&g.indices, &g.sommets, v),
+                    Some(t) => {
+                        t.poser(&g.indices, &g.sommets, v);
+                        if let Some(r) = &self.reflets {
+                            t.poser_reflets(&g.indices, r);
+                        }
+                    }
                     None => {
                         ed::poser(&mut self.projet.objets, &g.indices, &g.departs, v);
                         ed::suivre(&mut self.projet.objets, &self.suivis);
@@ -3988,6 +4231,10 @@ impl App {
             (Champ::Rotation(k), _) => ed::euler(objet?.rotation)[k],
             (Champ::Dimension(k), _) => self.base(self.seul()?)[k] * objet?.echelle[k],
             (Champ::Curseur(k), _) => self.projet.curseur[k],
+            (Champ::Plan(k), _) => {
+                let p = self.projet.plans.get(self.plan_actif?)?;
+                if k == 0 { p.largeur } else { p.decalage[(k - 1).min(1)] }
+            }
             (Champ::PasTranslation, _) => self.pas_translation(),
             (Champ::PasAngle, _) => self.pas.angle,
             (Champ::PasEchelle, _) => self.pas.echelle,
@@ -4048,6 +4295,7 @@ impl App {
         let s = match c {
             Champ::Position(k) if k < 2 => Champ::Position(k + 1),
             Champ::Curseur(k) if k < 2 => Champ::Curseur(k + 1),
+            Champ::Plan(k) if k < 2 => Champ::Plan(k + 1),
             Champ::OsTranslation(k) => {
                 let (_, x) = self.os_actif()?;
                 let l = x.limites_t();
@@ -4115,6 +4363,19 @@ impl App {
             }
             Champ::Curseur(k) => {
                 self.projet.curseur[k] = v;
+                self.a_sauver = true;
+                return;
+            }
+            Champ::Plan(k) => {
+                let Some(p) = self.plan_actif.and_then(|i| self.projet.plans.get_mut(i)) else { return };
+                if k == 0 {
+                    if v <= 0.0 {
+                        return self.dire("La largeur doit être positive".into());
+                    }
+                    p.largeur = v;
+                } else {
+                    p.decalage[(k - 1).min(1)] = v;
+                }
                 self.a_sauver = true;
                 return;
             }
@@ -4626,6 +4887,11 @@ impl App {
         let k = 1.0 - (1.0 - v.t as f64).powi(3); // ralentit à l'arrivée
         let (a, b) = (v.depart, v.arrivee);
         self.cam.distance = a.distance + (b.distance - a.distance) * k;
+        // Les angles par le plus court chemin
+        let tour = std::f64::consts::TAU;
+        let dl = (b.lacet - a.lacet + tour / 2.0).rem_euclid(tour) - tour / 2.0;
+        self.cam.lacet = a.lacet + dl * k;
+        self.cam.hauteur = a.hauteur + (b.hauteur - a.hauteur) * k;
         for c in 0..3 {
             self.cam.cible[c] = a.cible[c] + (b.cible[c] - a.cible[c]) * k;
         }
@@ -4634,11 +4900,34 @@ impl App {
         }
     }
 
+    /// Recul de l'œil et tangente du demi-champ : ceux de la perspective, ou, en
+    /// orthographique, l'œil très loin et le champ resserré d'autant.
+    fn optique(&self) -> (f64, f64) {
+        let t = (CHAMP.to_radians() / 2.0).tan();
+        if self.cam.ortho {
+            (self.cam.distance * RECUL_ORTHO, t / RECUL_ORTHO)
+        } else {
+            (self.cam.distance, t)
+        }
+    }
+
+    /// Plans proche et lointain du rendu.
+    fn profondeurs(&self) -> (f64, f64) {
+        let (recul, _) = self.optique();
+        let d = self.cam.distance;
+        if self.cam.ortho {
+            (recul - 100.0 * d, recul + 100.0 * d)
+        } else {
+            (d / 200.0, d * 50.0)
+        }
+    }
+
     fn repere(&self) -> (P3, P3, P3, P3) {
         let c = &self.cam;
         let (sl, cl, sh, ch) = (c.lacet.sin(), c.lacet.cos(), c.hauteur.sin(), c.hauteur.cos());
         let dos = [sl * ch, sh, cl * ch];
-        let oeil = [c.cible[0] + dos[0] * c.distance, c.cible[1] + dos[1] * c.distance, c.cible[2] + dos[2] * c.distance];
+        let (recul, _) = self.optique();
+        let oeil = [c.cible[0] + dos[0] * recul, c.cible[1] + dos[1] * recul, c.cible[2] + dos[2] * recul];
         (oeil, [cl, 0.0, -sl], [-sl * sh, ch, -cl * sh], dos)
     }
 
@@ -4663,7 +4952,7 @@ impl App {
         let (_, droite, haut, _) = self.repere();
         let c = &mut self.cam;
         c.lacet -= g.orbit.0 as f64 * 0.008;
-        c.hauteur = (c.hauteur + g.orbit.1 as f64 * 0.006).clamp(-1.5, 1.5);
+        c.hauteur = (c.hauteur + g.orbit.1 as f64 * 0.006).clamp(-HAUTEUR_MAX, HAUTEUR_MAX);
         c.distance = (c.distance / g.zoom as f64).clamp(1e-3, 1e7);
         for i in 0..3 {
             c.cible[i] += -g.pan.0 as f64 * k * droite[i] + g.pan.1 as f64 * k * haut[i];
@@ -4681,7 +4970,7 @@ impl App {
     /// Objet affiché sous le doigt, le plus proche de l'œil.
     fn objet_sous(&self, w: Rect, x: f32, y: f32) -> Option<usize> {
         let (oeil, droite, haut, dos) = self.repere();
-        let t = (CHAMP.to_radians() / 2.0).tan();
+        let (_, t) = self.optique();
         let nx = ((x - w.x) / w.w * 2.0 - 1.0) as f64 * t * (w.w / w.h.max(1.0)) as f64;
         let ny = (1.0 - (y - w.y) / w.h * 2.0) as f64 * t;
         let d = [0, 1, 2].map(|k| droite[k] * nx + haut[k] * ny - dos[k]);
@@ -4703,8 +4992,9 @@ impl App {
         let c = &self.cam;
         let f = |p: P3| p.map(|x| x as f32);
         let v = math::look_at(f(oeil), f(c.cible), [0.0, 1.0, 0.0]);
-        let (pres, loin) = ((c.distance / 200.0) as f32, (c.distance * 50.0) as f32);
-        let p = math::perspective((CHAMP as f32).to_radians(), w.w.max(1.0) / w.h.max(1.0), pres, loin);
+        let (pres, loin) = self.profondeurs();
+        let (_, tan) = self.optique();
+        let p = math::perspective((2.0 * tan.atan()) as f32, w.w.max(1.0) / w.h.max(1.0), pres as f32, loin as f32);
         (v, p)
     }
 
@@ -5755,8 +6045,76 @@ impl App {
             }
         }
         self.operations(cx, b, Menu::Vue);
+        self.reglages_miroir(cx, b);
+        self.reglages_plans(cx, b);
         if !geo && self.os.is_none() {
             self.operations(cx, b, Menu::Scene);
+        }
+    }
+
+    /// Le plan de l'édition en miroir, s'il est actif et qu'une géométrie est ouverte.
+    pub fn miroir_courant(&self) -> Option<geo::Miroir> {
+        let r = self.miroir;
+        if !r.actif {
+            return None;
+        }
+        let t = self.travail.as_ref()?;
+        let mut n = [0.0; 3];
+        n[r.axe] = 1.0;
+        let (point, normale) = match r.centre {
+            CentreMiroir::Objet => {
+                let o = self.projet.objets.get(*t.edites.last()?)?;
+                (o.position, ed::qappliquer(ed::qnorm(o.rotation), n))
+            }
+            CentreMiroir::Curseur => (self.projet.curseur, n),
+            CentreMiroir::Monde => ([0.0; 3], n),
+        };
+        Some(geo::Miroir { point, normale, tolerance: TOLERANCES_MIROIR[r.tolerance].0, plan: r.plan })
+    }
+
+    /// Rubrique Miroir du panneau Scène, sous le curseur 3D : l'interrupteur, puis,
+    /// s'il est actif, l'axe, le centre du plan, la tolérance, et ce que la sélection
+    /// emporte.
+    fn reglages_miroir(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body) {
+        let avant = self.miroir;
+        cx.section(b, "MIROIR");
+        cx.toggle(b, id("miroir"), "Édition en miroir", &mut self.miroir.actif);
+        if self.miroir.actif {
+            if let Some(k) = cx.choix(b, id("miroir-axe"), &["Axe X", "Axe Y", "Axe Z"], Some(self.miroir.axe), 3) {
+                self.miroir.axe = k;
+            }
+            let c = CentreMiroir::TOUS.iter().position(|x| *x == self.miroir.centre);
+            if let Some(k) = cx.choix(b, id("miroir-centre"), &["Objet", "Curseur 3D", "Monde"], c, 3) {
+                self.miroir.centre = CentreMiroir::TOUS[k];
+            }
+            let tol: Vec<&str> = TOLERANCES_MIROIR.iter().map(|x| x.1).collect();
+            if let Some(k) = cx.choix(b, id("miroir-tolerance"), &tol, Some(self.miroir.tolerance), 3) {
+                self.miroir.tolerance = k;
+            }
+            cx.toggle(b, id("miroir-plan"), "Garder sur le plan", &mut self.miroir.plan);
+            match (&self.travail, self.miroir_courant()) {
+                (Some(t), Some(m)) => {
+                    let cle = (t.version, m);
+                    if self.miroir_compte.as_ref().is_none_or(|x| x.0 != cle) {
+                        let l = t.impliques();
+                        let d: Vec<P3> = l.iter().map(|i| t.m.sommets[*i]).collect();
+                        let r = t.reflets(&l, &d, &m);
+                        let texte = if l.is_empty() {
+                            "Aucun sommet choisi".to_string()
+                        } else {
+                            format!("{} sommets choisis : {} avec un jumeau, {} sur le plan", l.len(), r.jumeaux.len(), r.sur_plan.len())
+                        };
+                        self.miroir_compte = Some((cle, texte));
+                    }
+                    if let Some((_, texte)) = &self.miroir_compte {
+                        cx.paragraph(b, texte);
+                    }
+                }
+                _ => cx.paragraph(b, "S'applique en mode Géométrie"),
+            }
+        }
+        if self.miroir != avant {
+            self.reglages_changes = true;
         }
     }
 
@@ -5797,6 +6155,22 @@ impl App {
                         }
                     }
                 }
+            }
+            // Les vues alignées en grille, la perspective en interrupteur
+            if menu == Menu::Vue && (VUES_ACTIONS.contains(&o.action) || o.action == A::Perspective) {
+                if o.action == A::VueFace {
+                    let noms = ["Face", "Arrière", "Droite", "Gauche", "Dessus", "Dessous", "Iso"];
+                    if let Some(k) = cx.choix(b, id("vues-alignees"), &noms, self.vue_courante(), 4) {
+                        choisie = Some(VUES_ACTIONS[k]);
+                    }
+                } else if o.action == A::Perspective {
+                    let mut ortho = self.cam.ortho;
+                    cx.toggle(b, id("vue-ortho"), "Orthographique", &mut ortho);
+                    if ortho != self.cam.ortho {
+                        choisie = Some(A::Perspective);
+                    }
+                }
+                continue;
             }
             // Les placements du curseur : des liens, seulement ceux qui s'appliquent
             if menu == Menu::Vue && rubrique == "Curseur 3D" {
@@ -6008,6 +6382,7 @@ impl App {
             }
             l.extend(theme::LIGNES.iter().zip(&self.couleurs).filter_map(|(c, v)| v.map(|v| format!("couleur.{}\t{}", c.cle, theme::hex(v)))));
             l.sort();
+            l.insert(0, format!("miroir\t{}", self.miroir.ecrire()));
             l.insert(0, format!("pave\t{} {}", self.pave_place[0], self.pave_place[1]));
             l.insert(0, format!("barre\t{}", self.barre_visible as u8));
             l.join("\n") + "\n"
@@ -6024,6 +6399,8 @@ impl App {
                 if let (Some(x), Some(y)) = (n.next(), n.next()) {
                     self.pave_place = [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)];
                 }
+            } else if k == "miroir" {
+                self.miroir = ReglageMiroir::lire(v);
             } else if let Some(cle) = k.strip_prefix("primitive.") {
                 self.reprendre_primitive(cle, v);
             } else if let Some(cle) = k.strip_prefix("couleur.") {
@@ -6054,7 +6431,7 @@ impl App {
     }
 
     /// Exécute une opération du catalogue, si elle s'applique à la sélection.
-    fn agir(&mut self, a: A) {
+    pub fn agir(&mut self, a: A) {
         if !self.contexte().possible(a) {
             return;
         }
@@ -6073,6 +6450,17 @@ impl App {
             A::ExporterSage => self.exporter_sage(crate::sage::Couches::EnCouches),
             A::ExporterSageAplati => self.exporter_sage(crate::sage::Couches::Aplaties),
             A::Recadrer => self.recadrer(),
+            A::VueFace => self.vue_alignee(0),
+            A::VueArriere => self.vue_alignee(1),
+            A::VueDroite => self.vue_alignee(2),
+            A::VueGauche => self.vue_alignee(3),
+            A::VueDessus => self.vue_alignee(4),
+            A::VueDessous => self.vue_alignee(5),
+            A::VueIso => self.vue_iso(),
+            A::Perspective => {
+                self.cam.ortho ^= true;
+                self.dire(if self.cam.ortho { "Vue orthographique" } else { "Vue en perspective" }.into());
+            }
             A::CurseurOrigine => {
                 self.projet.curseur = [0.0; 3];
                 self.a_sauver = true;
@@ -6130,6 +6518,7 @@ impl App {
             A::EditerGeometrie => self.entrer_geometrie(),
             A::AjouterArmature => self.ajouter_armature("armature", Armature::nouvelle()),
             A::AjouterHumanoide => self.ajouter_armature("humanoide", Armature::humanoide()),
+            A::AjouterHumanoideDetaille => self.ajouter_armature("humanoide", Armature::humanoide_detaille()),
             A::AjouterOs => self.ajouter_os(),
             A::ExtruderOs => self.extruder_os(),
             A::SupprimerOs => self.supprimer_os(),
@@ -7915,7 +8304,7 @@ impl App {
             besoin.extend(texture.clone());
             let devant = self.devant(k);
             let deux_cotes = self.rendu == Rendu::Jeu && self.travail.is_none() && self.os.is_none() && self.projet.materiau(&o.materiau).is_some_and(|m| m.deux_cotes);
-            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&m), normale: vue::mat_normale(&m), albedo, emission, opacite, contour, filaire: cibles.contains(&k), texture, envers: None, devant, deux_cotes });
+            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&m), normale: vue::mat_normale(&m), albedo, emission, opacite, contour, filaire: cibles.contains(&k), texture, envers: None, devant, deux_cotes, fond: false });
             vus.insert(cle);
             if !self.connus.contains_key(&cle) {
                 ajouts.push((cle, vue::tampons(&vu)));
@@ -7928,11 +8317,29 @@ impl App {
             let cle = Arc::as_ptr(&m) as usize;
             let c = self.projet.curseur;
             let mx = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, c[0], c[1], c[2], 1.0];
-            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&mx), normale: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], albedo: lin_octets(coul(C::ObjetActif)), emission: [0.0; 3], opacite: 1.0, contour: true, filaire: false, texture: None, envers: None, devant: false, deux_cotes: false });
+            objets.push(ObjetVue { tampon: cle, modele: vue::mat4(&mx), normale: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], albedo: lin_octets(coul(C::ObjetActif)), emission: [0.0; 3], opacite: 1.0, contour: true, filaire: false, texture: None, envers: None, devant: false, deux_cotes: false, fond: false });
             vus.insert(cle);
             if !self.connus.contains_key(&cle) {
                 ajouts.push((cle, vue::tampons(&m)));
                 self.connus.insert(cle, m);
+            }
+        }
+        // Plans de référence : en fond dans leur vue, dans la scène s'ils y vont partout
+        let alignee = plans::vue_de(dos);
+        let carre = carre_plan();
+        let cle_carre = Arc::as_ptr(&carre) as usize;
+        for p in self.projet.plans.iter().filter(|p| p.visible && self.projet.textures.contains_key(&p.image)) {
+            let fond = alignee == Some(p.vue);
+            if !fond && !p.partout {
+                continue;
+            }
+            let m = p.matrice();
+            besoin.insert(p.image.clone());
+            objets.push(ObjetVue { tampon: cle_carre, modele: vue::mat4(&m), normale: vue::mat_normale(&m), albedo: [0.0; 3], emission: [1.0; 3], opacite: p.opacite, contour: false, filaire: false, texture: Some(p.image.clone()), envers: None, devant: false, deux_cotes: !fond, fond });
+            vus.insert(cle_carre);
+            if !self.connus.contains_key(&cle_carre) {
+                ajouts.push((cle_carre, vue::tampons(&carre)));
+                self.connus.insert(cle_carre, carre.clone());
             }
         }
         let retraits: Vec<usize> = self.connus.keys().filter(|c| !vus.contains(c)).copied().collect();
@@ -7999,7 +8406,7 @@ impl App {
                 (Some(_), false) => [1.0; 3],
                 (Some(_), true) => lin_octets(c).map(|x| 0.7 + 0.3 * x),
             };
-            objets.push(ObjetVue { tampon: cle, modele, normale: id3, albedo, emission: [0.0; 3], opacite, contour: false, filaire: false, texture: image.clone(), envers: Some(lin_octets(coul(C::Envers))), devant: false, deux_cotes: false });
+            objets.push(ObjetVue { tampon: cle, modele, normale: id3, albedo, emission: [0.0; 3], opacite, contour: false, filaire: false, texture: image.clone(), envers: Some(lin_octets(coul(C::Envers))), devant: false, deux_cotes: false, fond: false });
         }
         if self.version_geo == Some(t.version) {
             return Some(GeoVue { maj: None, rayons: self.rayons });
@@ -8101,6 +8508,14 @@ fn poser_bouts(o: &mut Objet, bouts: &[Bout], depart: &Segments, v: Transfo) {
 }
 
 /// Nombre pour un champ : trois décimales au plus, sans zéros inutiles.
+/// Le carré des plans de référence, le même pour tous.
+fn carre_plan() -> Arc<Maillage> {
+    thread_local! {
+        static CARRE: Arc<Maillage> = Arc::new(plans::carre());
+    }
+    CARRE.with(|c| c.clone())
+}
+
 fn chiffres(v: f64) -> String {
     let s = format!("{v:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
@@ -10807,7 +11222,13 @@ mod tests {
         b.app.agir(A::AjouterHumanoide);
         assert_eq!(b.app.projet.objets[n + 1].armature.as_ref().unwrap().os.len(), 19);
         assert_eq!(b.app.projet.objets[n + 1].nom, "humanoide");
+        // Le détaillé : mâchoire, orteils et doigts en plus
+        b.app.agir(A::AjouterHumanoideDetaille);
+        let d = b.app.projet.objets[n + 2].armature.as_ref().unwrap();
+        assert_eq!(d.os.len(), 52);
+        assert!(["machoire", "orteils.G", "pouce-3.D", "auriculaire-3.G"].iter().all(|x| d.os.iter().any(|o| o.nom == *x)));
         b.images(2);
+        b.app.annuler();
         b.app.annuler();
         b.app.annuler();
         assert_eq!(b.app.projet.objets.len(), n);
@@ -12235,6 +12656,79 @@ mod tests {
     }
 
     #[test]
+    fn vues_alignees_iso_et_orthographique() {
+        let mut b = Banc::pret();
+        b.app.agir(A::VueDroite);
+        b.images(40);
+        assert!(b.app.cam.ortho);
+        assert_eq!(b.app.vue_courante(), Some(2));
+        // De droite : +Y monte à l'écran, -Z part à droite
+        let (o, y, z) = (pixel(&b, [0.0; 3]), pixel(&b, [0.0, 1.0, 0.0]), pixel(&b, [0.0, 0.0, -1.0]));
+        assert!(y.1 < o.1 - 10.0 && (y.0 - o.0).abs() < 0.5, "{o:?} {y:?}");
+        assert!(z.0 > o.0 + 10.0 && (z.1 - o.1).abs() < 0.5, "{o:?} {z:?}");
+        // Orthographique : la profondeur ne change pas la taille (à moins d'un pixel près)
+        let (p, q) = (pixel(&b, [0.5, 1.0, 0.0]), pixel(&b, [-0.5, 1.0, 0.0]));
+        assert!((p.1 - q.1).abs() < 0.5 && (p.0 - q.0).abs() < 0.5, "{p:?} {q:?}");
+        // Le rayon d'un pixel retombe sur son point
+        let w = b.app.espace;
+        let v = b.app.vue_ecran(w);
+        let e = v.ecran([0.3, 0.4, -0.2]).unwrap();
+        let pt = v.sur_plan(e[0], e[1], [1.0, 0.0, 0.0], [0.3, 0.0, 0.0]).unwrap();
+        assert!((pt[1] - 0.4).abs() < 1e-6 && (pt[2] + 0.2).abs() < 1e-6, "{pt:?}");
+        // Le cube se touche toujours
+        assert_eq!(b.app.objet_sous(w, o.0, o.1), Some(0));
+        b.app.agir(A::VueDessus);
+        b.images(40);
+        assert_eq!(b.app.vue_courante(), Some(4));
+        let (o, z) = (pixel(&b, [0.0; 3]), pixel(&b, [0.0, 0.0, -1.0]));
+        assert!(z.1 < o.1 - 10.0, "de dessus, -Z monte à l'écran");
+        b.app.agir(A::VueIso);
+        b.images(40);
+        assert_eq!(b.app.vue_courante(), Some(6));
+        b.app.agir(A::Perspective);
+        assert!(!b.app.cam.ortho);
+        assert_eq!(b.app.vue_courante(), Some(6));
+    }
+
+    #[test]
+    fn un_plan_de_reference_se_pose_dans_sa_vue_et_s_enregistre() {
+        let mut b = Banc::pret();
+        b.app.agir(A::VueGauche);
+        b.images(40);
+        b.app.ajouter_plan();
+        assert_eq!(b.app.prendre_selecteur(), Some(Selecteur::Image));
+        b.app.recevoir_image("profil.png", &png_2_sur_1());
+        assert_eq!(b.app.projet.plans.len(), 1);
+        let p = b.app.projet.plans[0].clone();
+        assert_eq!((p.vue, p.rapport, p.nom.as_str()), (3, 0.5, "profil.png"));
+        assert!(b.app.projet.materiaux.iter().all(|(_, m)| m.texture.is_none()), "aucun matériau ne la prend");
+        // En fond dans sa vue, avec son image
+        let s = b.images(1);
+        let f: Vec<_> = s.objets.iter().filter(|o| o.fond).collect();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].texture.as_deref(), Some(p.image.as_str()));
+        // Hors de sa vue, caché, sauf partout
+        b.app.agir(A::VueFace);
+        b.images(40);
+        let s = b.images(1);
+        assert!(s.objets.iter().all(|o| o.texture.as_deref() != Some(p.image.as_str())));
+        b.app.projet.plans[0].partout = true;
+        let s = b.images(1);
+        assert!(s.objets.iter().any(|o| !o.fond && o.texture.as_deref() == Some(p.image.as_str())));
+        // Réglages par le pavé
+        b.app.plan_actif = Some(0);
+        b.app.appliquer_champ(Champ::Plan(0), 3.0);
+        b.app.appliquer_champ(Champ::Plan(2), 0.5);
+        assert_eq!((b.app.projet.plans[0].largeur, b.app.projet.plans[0].decalage[1]), (3.0, 0.5));
+        // Le fichier garde le plan et son image
+        let q = Projet::lire(&b.app.projet.ecrire()).unwrap();
+        assert_eq!(q.plans, b.app.projet.plans);
+        assert!(q.textures.contains_key(&p.image));
+        // Sans plan, rien de plus dans le fichier
+        assert!(!Projet::neuf().ecrire().contains("\"plans\""));
+    }
+
+    #[test]
     fn glisser_le_curseur_dans_le_vide_le_garde_a_sa_profondeur_sans_tourner_la_vue() {
         let mut b = Banc::pret();
         b.app.projet.curseur = [1.2, 0.0, 0.0];
@@ -12735,5 +13229,11 @@ mod tests {
         assert!((0..n).all(|i| u16::from_le_bytes(bin[o + 8 * i..o + 8 * i + 2].try_into().unwrap()) == rang));
         assert!(b.app.message.as_ref().unwrap().0.contains("S.A.G.E."));
     }
-}
 
+    #[test]
+    fn le_reglage_du_miroir_se_relit() {
+        let r = ReglageMiroir { actif: true, axe: 2, centre: CentreMiroir::Curseur, plan: false, tolerance: 0 };
+        assert_eq!(ReglageMiroir::lire(&r.ecrire()), r);
+        assert_eq!(ReglageMiroir::lire("x 9"), ReglageMiroir::default());
+    }
+}
